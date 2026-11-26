@@ -1,0 +1,119 @@
+= Build a Windows app
+
+[#get-started]
+== Create and package a starter app
+
+Install https://github.com/roc-lang/nightlies/releases[Roc] as `roc`.
+Use the `windows-VERSION-HASH.tar.zst` CLI bundle URL from a
+https://github.com/lukewilliamboswell/roc-native-windows/releases[platform release].
+Set `$env:WINDOWS_TOOL_URL` to that URL in PowerShell.
+
+[source,powershell]
+----
+roc $env:WINDOWS_TOOL_URL -- init my-app
+Set-Location my-app
+roc windows.roc -- package --target x64mingw
+----
+
+The command writes `dist/my-app-x64mingw.msi`. On Windows x64, open the
+MSI to install the app. Launch it from the Start menu. Enter a title, select
+Add, mark the title read, and remove it. During development on Windows,
+`roc windows.roc -- run` builds and launches without installing the MSI.
+
+The starter keeps the Roc Signals view in `src/`, pure decisions in a
+separate `logic/` package, and the displayed bitmap in `assets/`.
+Edit the view in `src/main.roc` or change the reading-list rules in
+`logic/ReadingList.roc`. Use `init --simple my-app` for a single-file
+counter. From a checkout, run `roc cli/windows.roc -- init my-app` at the
+repository root to use the local platform.
+
+[#choose-a-windows-target]
+== Choose a Windows build target
+
+[cols="1,1",options="header"]
+|===
+| Argument | App architecture
+| `--target x64mingw` | Windows x64
+| `--target arm64mingw` | Windows ARM64
+|===
+
+On macOS and Linux the default target is x64. On Windows it follows
+the architecture running Roc. Build writes the executable and its assets
+to `build/<target>/`. Package writes a Windows MSI or ZIP to `dist/`.
+The release includes the Win32 host and its linker inputs, so the
+consumer build needs Roc. Use `ROC_WINDOWS_ROC` to select a particular
+compiler executable if needed.
+
+An MSI packager's filename identifies the machine running that tool.
+For example, `roc-windows-msi-0.1.0-linux-x64` runs on an x64 Linux
+machine and can produce either Windows target. The CLI selects the
+packager automatically and checks its SHA-256 before running it. For a
+custom platform, use `init --platform <platform/main.roc-or-bundle-URL>`.
+
+[#test-an-app]
+== Check an app
+
+Run these commands from the directory containing `src/main.roc` or
+`main.roc`.
+
+[source,sh]
+----
+roc windows.roc -- test --check
+roc windows.roc -- fuzz --check
+----
+
+Use `test` on Windows to execute the app's behaviour specs. The portable
+check runs Roc expects and validates spec syntax. The starter has a separate
+roc-fuzz target in `tests/fuzz/main.roc`. On Apple Silicon macOS or x64
+Linux, `fuzz` runs a short generated-input campaign, and `fuzz --check`
+runs the declared cases once.
+
+See xref:spec-runner.adoc#write-a-spec[Write behaviour specs] for native
+control actions, effect simulation, and recording.
+
+[#ship-a-windows-app]
+== Package an app for distribution
+
+Set MSI metadata in `windows.json` at the app root, beside `windows.roc`.
+The starter sets an example ID from the project name. Choose your own
+stable reverse-DNS ID before publishing, and keep it for upgrades. The version is a three-part MSI
+product version. The ID, publisher, and asset filenames use ASCII.
+
+[source,json]
+----
+{
+  "id": "com.example.reading-list",
+  "version": "1.0.0",
+  "publisher": "Example"
+}
+----
+
+[source,sh]
+----
+roc windows.roc -- package --target x64mingw
+roc windows.roc -- package --target arm64mingw --format zip
+----
+
+Use `--id`, `--app-version`, or `--publisher` to override a field for one
+build. Projects can omit `windows.json` for local development defaults.
+See xref:architecture.adoc#redistributable-inputs[the embedded Win32 manifest]
+for process settings such as DPI awareness.
+
+The MSI installs under Program Files and adds a Start menu shortcut.
+The ZIP contains an executable that can run after extraction. Both carry
+the executable, `assets/`, and any top-level `LICENSE` or
+`THIRD_PARTY_LICENSES.md` supplied by the app author.
+
+[#examples]
+== Choose an example
+
+[cols="1,3",options="header"]
+|===
+| Example | What it demonstrates
+| Starter | A reading list with a pure logic package, specs, and fuzz cases
+| Counter | Local state and a label updated by button actions
+| Todos | Native text input, checkboxes, and persisted state
+| Workers | A Roc calculation on a worker while the window handles input
+| Files | File selection, previews, and SHA-256
+| HTTP | WinHTTP requests and bounded response previews
+|===

@@ -1,0 +1,101 @@
+= Test and record Win32 apps
+
+[#write-a-spec]
+== Write a behaviour spec
+
+Put one named `(test ...)` or `(demo ...)` form in each
+`tests/specs/*.scm` file. Place input data under `tests/fixtures/`.
+A spec can look up a control by its type and caption or accessible
+label. This scenario adds and checks one item in the Starter app.
+
+[source,scheme]
+----
+(test "mark a title read"
+  (steps
+    (fill (text-field "Title") "Roc guide")
+    (click (button "Add"))
+    (toggle (checkbox "Roc guide"))
+    (expect-checked (checkbox "Roc guide") true)
+    (expect-visible (text "0 unread"))))
+----
+
+Run `roc windows.roc -- test --check` to check source, run Roc expects,
+and validate test and demo syntax. On a Windows desktop, use
+`roc windows.roc -- test` to build the app and run each test against
+a fresh process. Each failure names the spec and step. The CLI must match
+the runner protocol in the platform bundle. On Windows on Arm, an x64 Roc
+process can test an ARM64 build with `test --target arm64mingw`.
+
+Selectors look up `button`, `checkbox`, `text-field`, `text`,
+`file-button` and `image`. Use `(within OUTER INNER)` to narrow a
+selector to a row or container. An action needs a unique match. Use
+`expect-text`, `expect-visible`, `expect-absent`, `expect-disabled` and
+`expect-checked` to inspect the current control state. Keep control
+assertions independent of pixel output.
+
+== Simulate and run effects
+
+Tests start with isolated storage and hold HTTP requests, timers and
+intervals by default. An optional `setup` form can seed
+`local-storage` or `session-storage`, set `initial-time` in milliseconds,
+or set a `worker-pool` limit. The HTTP example checks a submitted request
+and answers it explicitly.
+
+[source,scheme]
+----
+(expect-request 1 :method "GET" :url "https://example.test/guide")
+(stub-http "guide" :status 200 :body "Read the guide.")
+(run-effect 1)
+(expect-visible (text "Read the guide."))
+----
+
+Held effects are numbered in issue order, starting at one. Use
+`expect-pending-effects` and `expect-cancelled` to inspect them.
+Use `fail-http` to stage a failure. Advance virtual time with
+`advance-time` to exercise HTTP timeouts. Trigger a one-shot timer or
+matching interval with `fire-timer` or `tick-interval`. Inspect a period
+with `expect-interval`.
+
+`(files "tests/fixtures/hello.txt")` supplies a file as a picker result.
+The app reads or hashes it through the production file adapter.
+`(await-work)` waits for file and Roc worker work to settle with a
+real-time bound. Use `(setup (live-effects http))` to exercise the real
+HTTP adapter or `(setup (live-effects time))` for real timers. Use a
+loopback HTTP fixture for an integration test that can run independently.
+
+== Capture a screenshot or record a demo
+
+Use a Windows desktop session for capture. A
+`(setup (window-size 640 520))` form sets client size. Use
+`(screenshot "after-add")` for a PNG checkpoint or
+`test --screenshot-on-failure` for a diagnostic image. Results are written
+under `build/specs/`. Use a test's control assertions for repeatable
+checks across themes and display settings.
+
+A `(demo ...)` scenario uses real timing. It is validated with the test
+suite and executed by the explicit `record` command. The starter's
+`tests/specs/demo.scm` adds and marks an item.
+
+[source,sh]
+----
+roc windows.roc -- record tests/specs/demo.scm --format gif
+----
+
+GIF is the default. Use `--format png` for frames. The artifacts are under
+`build/specs/`. Recordings use the app's fixed-size window. Capture of
+minimized, occluded, locked or noninteractive sessions requires separate
+verification.
+
+[#runner-boundary]
+== Runner boundary
+
+The CLI lowers a parsed scenario to a versioned plan file with source
+locations. The built Win32 host executes that plan through its native
+window, control and effect paths. Success requires an explicit completion
+result. The runner uses separate storage per scenario and a watchdog that
+still runs when the scenario uses virtual time.
+
+Capture uses the app's window and child controls. GDI draws the window
+into a bitmap. The installed Windows Imaging Component encodes PNG, and
+the host encodes GIF on a separate thread. See
+xref:architecture.adoc#redistributable-inputs[What the bundle contains].

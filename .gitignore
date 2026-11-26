@@ -1,4 +1,5 @@
 /.blueprint/
+/.docs-out/
 /build/
 /dist/
 /host/target/

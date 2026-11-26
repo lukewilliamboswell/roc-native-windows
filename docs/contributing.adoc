@@ -1,0 +1,138 @@
+= Contribute to the platform
+
+[#verify-native-windows]
+== Run the examples on Windows
+
+Use this path to work on Win32 behaviour and test the app examples. To
+write your own app, start at xref:apps.adoc#get-started[Create and package a starter app].
+
+Install the x64 Windows builds of
+https://github.com/lukewilliamboswell/roc-blueprint/releases/tag/0.13.0[Blueprint 0.13.0]
+and https://github.com/roc-lang/nightlies/releases[Roc]. Put
+`blueprint.exe` and `roc.exe` on your PowerShell path. Use a platform bundle
+built from this checkout. In a scratch directory, run `roc unbundle` on
+its raw `HASH.tar.zst` archive and copy the extracted `targets/` folder
+into `platform/` in your checkout.
+
+Run the suite from the repository root on Windows x64.
+
+[source,powershell]
+----
+blueprint run test-native -- --target x64mingw
+----
+
+On Windows on Arm, run the x64 Blueprint and Roc binaries under Windows
+emulation and pass `--target arm64mingw` to test native ARM64 executables.
+The task runs Roc expects and the app's specs where present.
+
+To develop one example interactively, open PowerShell at the repository root.
+
+[source,powershell]
+----
+Set-Location examples/starter
+roc ../../cli/windows.roc -- run --target x64mingw
+----
+
+When verifying a release, use the same staged bundle on each architecture
+and bootstrap a fresh project with an empty Roc package cache. Use an
+interactive Windows desktop for capture. Check focus, DPI, Narrator,
+file dialogs, networking and workers. Install, start, upgrade and uninstall
+the MSI on a clean machine. Cross-builds and Wine compatibility checks
+provide separate evidence from native Windows runs. Hosted CI is currently
+disabled.
+
+[#build-the-platform]
+== Cross-build the platform from source
+
+For the maintainer build on Apple Silicon macOS, install Blueprint 0.13.0,
+Roc as `roc`, Zig 0.17.1, and Rustup.
+`Blueprint.roc` names the tooling compiler and `Blueprint.lock` carries
+the fetched digests. `rust-toolchain.toml` selects the Rust version and
+Windows targets. Use the Roc nightly validated by this checkout when
+testing the current compiler and platform together.
+
+[source,sh]
+----
+blueprint run check
+blueprint run build
+blueprint run bundle
+blueprint run docs
+----
+
+`check` runs Rust format, lint, and portable tests, checks generated ABI
+bindings using the vendored `host/glue/RustGlue.roc`, runs Roc expects and
+spec validation, and cross-builds the examples. `build` writes the example executables under
+`examples/<name>/build/<target>/`. `bundle` writes the Windows platform
+bundle to `dist/platform/`. `docs` renders the manual website, Markdown,
+and PDF under `.docs-out/`.
+
+The platform examples depend on the local platform through relative
+paths. Keep compiler pins in `scripts/`, keep generated ABI changes
+reviewable, and keep build products out of source control. An example
+with specs adds `.scm` files under `tests/specs/` and data under
+`tests/fixtures/`.
+
+To exercise packaging directly from the checkout, build the local MSI
+packager and run the CLI from the example directory.
+
+[source,sh]
+----
+blueprint run packager
+export ROC_WINDOWS_MSI="$PWD/packaging/target/release/roc-windows-msi"
+cd examples/counter
+roc ../../cli/windows.roc -- package --target x64mingw
+----
+
+[#stage-a-release]
+== Stage a release
+
+On Apple Silicon macOS, add the Intel macOS and Linux musl Rust targets
+for the release packagers. Build the platform bundle and pass its
+generated path, the release version and the public asset base URL.
+
+[source,sh]
+----
+rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+blueprint run bundle
+blueprint run release -- 0.1.0 dist/platform/HASH.tar.zst "$RELEASE_BASE_URL" dist/release
+----
+
+The output directory must be new. Every attachment includes the version.
+The CLI and platform bundle use underscores in the version so Roc can
+read URLs containing a dotted release tag. The standalone launcher,
+the six packagers, and the two license files use the dotted version.
+The scaffold writes the fetched launcher as `windows.roc`.
+
+Stage and serve the files to test a local HTTP URL.
+
+[source,sh]
+----
+blueprint run release -- --local 0.1.0 dist/platform/HASH.tar.zst dist/release-preview
+blueprint run serve -- dist/release-preview
+----
+
+The preview server uses Basic CLI's TCP support and binds to
+`127.0.0.1:8000`. If you choose a different port with `serve --port`,
+pass the matching loopback URL to the release task when staging the files.
+
+In another terminal, set `TOOL_BUNDLE` to the generated
+`windows-0_1_0-HASH.tar.zst` filename and use a fresh directory and cache
+to check the first-user path.
+
+[source,sh]
+----
+roc "http://127.0.0.1:8000/$TOOL_BUNDLE" -- init /tmp/windows-release-preview
+cd /tmp/windows-release-preview
+roc windows.roc -- test --check
+roc windows.roc -- package --target x64mingw
+roc windows.roc -- package --target arm64mingw
+----
+
+On Linux, reuse the built platform archive and pass
+`--packagers DIR` with the six macOS-stage packagers for the same version.
+Before a public release, verify the exact bytes to be published, include
+license and provenance evidence, and produce validated SBOM sidecars.
+Use the https://github.com/lukewilliamboswell/roc-automation/blob/main/docs/platforms.adoc[roc-automation platform guide]
+for the release matrix and the
+https://github.com/lukewilliamboswell/roc-automation/blob/main/docs/software-bill-of-materials.adoc[SBOM contract]
+for release evidence.

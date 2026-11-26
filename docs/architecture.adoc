@@ -1,0 +1,35 @@
+= Platform architecture
+
+[#engine-and-host]
+== How Roc and Win32 fit together
+
+A Roc app describes a view and how events change its state. The
+Roc Signals engine owns the reactive state and emits incremental
+commands. The Rust host applies those commands to a tree of Win32
+controls. It translates native notifications into Roc events on the
+window thread.
+
+Worker jobs have their own Roc instances. The UI thread receives their
+results from the host event pump. When an app no longer wants a result,
+the host can discard the reply while a pure computation finishes.
+A Roc crash in a worker stops the process.
+
+[#redistributable-inputs]
+== What the bundle contains
+
+`platform/main.roc` declares the host calls and linker inputs.
+`host/src/roc_platform_abi.rs` records the generated ABI. The Windows
+platform bundle links the same generated resource into both target
+architectures. It embeds the Common Controls v6, DPI-awareness, and
+long-path manifest from `host/windows/windows.manifest`.
+
+The Rust host uses bindings from `windows-rs`. Zig supplies open-source
+startup and runtime inputs and generates import libraries from its
+bundled definitions. Windows supplies the DLL implementations when the
+app runs. The bundle carries compiled host and linker inputs. See the
+https://github.com/lukewilliamboswell/roc-native-windows/blob/main/THIRD_PARTY_LICENSES.md[third-party notices]
+for their origins.
+
+The platform runner uses the same host to mount an app, send control
+events, and handle effects. See xref:spec-runner.adoc#runner-boundary[Runner
+boundary] for how the CLI hands a scenario to the host.

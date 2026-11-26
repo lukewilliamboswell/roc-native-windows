@@ -1,0 +1,30 @@
+= Win32 controls
+
+[#controls]
+== Control reference
+
+Import `pf.Ui` from the Windows platform. The controls receive Roc Signals
+values. A handler sends writes to the state the view reads. See the
+https://github.com/lukewilliamboswell/roc-signals[Roc Signals manual]
+for state, stores, and worker tasks.
+
+[cols="1,2,3",options="header"]
+|===
+| Builder | Native role | Inputs
+| `Ui.vstack` | Vertical layout | Children, `spacing` and `padding`
+| `Ui.hstack` | Horizontal layout | Children, `spacing` and `padding`
+| `Ui.text` | Label | Text signal
+| `Ui.button` | Push button | Title, `on_press`, optional `enabled`
+| `Ui.text_field` | Single-line edit control | Value, `on_input`, optional `label`, `placeholder` and `enabled`
+| `Ui.checkbox` | Check box | Title, `checked`, `on_change`, optional `enabled`
+| `Ui.file_button` | System file picker | Title and `on_files` handler
+| `Ui.asset_image` | Bitmap image | Asset path, accessible `label`, `width` and `height`
+|===
+
+Stack spacing, padding and image dimensions use device-independent pixels.
+An image path is relative to the app's `assets/` directory. Give each
+interactive control a meaningful caption or label. The test runner uses
+those names to locate controls.
+
+For a complete example, see the Starter app and its specs described in
+xref:apps.adoc#examples[Choose an example].

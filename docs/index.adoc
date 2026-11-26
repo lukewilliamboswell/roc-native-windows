@@ -1,0 +1,22 @@
+= roc-native-windows
+:doctype: book
+:toc: left
+:toclevels: 2
+
+roc-native-windows is a Roc platform for desktop apps. Roc Signals
+connects application state to a tree of `Ui` controls. The Rust host
+creates the corresponding Win32 controls and routes events back to Roc.
+
+App authors can start at xref:apps.adoc#get-started[Create a Windows app]
+and refer to xref:ui.adoc#controls[the control reference]. Contributors can
+start at xref:contributing.adoc#verify-native-windows[Run the examples on Windows].
+
+include::apps.adoc[leveloffset=+1]
+
+include::ui.adoc[leveloffset=+1]
+
+include::spec-runner.adoc[leveloffset=+1]
+
+include::architecture.adoc[leveloffset=+1]
+
+include::contributing.adoc[leveloffset=+1]

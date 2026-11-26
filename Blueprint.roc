@@ -4,6 +4,9 @@ import pf.Recipes
 
 tooling = { compiler: "nightly-2026-11-26-890d6c8" }
 
+docs_tool = |system|
+	if (system == "x86_64-windows") Unavailable else Recipes.file("https://github.com/lukewilliamboswell/roc-automation/releases/download/tools-0.12.0/roc-docs-{system}")(system)
+
 config = [
 	Name("roc-native-windows"),
 	Systems(["aarch64-darwin", "aarch64-linux", "x86_64-linux", "x86_64-windows"]),
@@ -32,6 +35,7 @@ config = [
 			Expect(["roc"]),
 		],
 	),
+	Environment("docs", [Programs([Fetch("roc-docs", docs_tool)])]),
 	Shell("default", [Use("dev")]),
 	Task("check", [Use("dev"), Run(["roc-stable", "scripts/build.roc", "--", "check"])]),
 	Task("test-native", [Use("release"), Run(["roc-stable", "scripts/build.roc", "--", "test-native"])]),
@@ -40,4 +44,5 @@ config = [
 	Task("packager", [Use("dev"), Run(["cargo", "build", "--locked", "--release", "--manifest-path", "packaging/Cargo.toml"])]),
 	Task("release", [Use("release"), Run(["roc-stable", "scripts/release.roc", "--"])]),
 	Task("serve", [Use("release"), Run(["roc-stable", "scripts/serve.roc", "--"])]),
+	Task("docs", [Use("docs"), Run(["roc-docs", "build", "--workspace", ".", "--pdf-filename", "roc-native-windows.pdf"])]),
 ]
