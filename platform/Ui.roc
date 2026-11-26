@@ -22,6 +22,7 @@ Ui := [].{
 	ButtonProps(ctx) := {
 		on_press : HandlerOf(ctx, Engine.Click),
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+		enter_action : [Standard, WindowDefault] ?? Standard,
 	}
 
 	## A push button.
@@ -29,7 +30,11 @@ Ui := [].{
 	button = |title, props|
 		Engine.element(
 			"ui-button",
-			[Engine.attr_s("enabled", props.enabled.map(bool_word)), Engine.on_click(props.on_press)],
+			[
+				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.attr("window-default", bool_word(props.enter_action == WindowDefault)),
+				Engine.on_click(props.on_press),
+			],
 			[Engine.text_s(title)],
 		)
 
@@ -71,6 +76,29 @@ Ui := [].{
 			[
 				Engine.attr_s("title", title),
 				Engine.attr_s("checked", props.checked.map(bool_word)),
+				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.on_checked(props.on_change),
+			],
+			[],
+		)
+
+	## The rendered state of an aggregate check box.
+	CheckState : [Unchecked, Checked, Mixed]
+
+	AggregateCheckboxProps(ctx) := {
+		state : Signal(ctx, CheckState),
+		on_change : HandlerOf(ctx, Bool),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+	}
+
+	## An activation requests true from Unchecked or Mixed and false from Checked.
+	aggregate_checkbox : Signal(ctx, Str), AggregateCheckboxProps(ctx) -> Elem(ctx)
+	aggregate_checkbox = |title, props|
+		Engine.element(
+			"ui-aggregate-checkbox",
+			[
+				Engine.attr_s("title", title),
+				Engine.attr_s("check-state", props.state.map(check_word)),
 				Engine.attr_s("enabled", props.enabled.map(bool_word)),
 				Engine.on_checked(props.on_change),
 			],
@@ -123,3 +151,10 @@ stack = |kind, props, children|
 
 bool_word : Bool -> Str
 bool_word = |value| if (value) "true" else "false"
+
+check_word : Ui.CheckState -> Str
+check_word = |state| match state {
+	Unchecked => "false"
+	Checked => "true"
+	Mixed => "mixed"
+}

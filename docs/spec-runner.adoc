@@ -104,3 +104,10 @@ Capture uses the app's window and child controls. GDI draws the window
 into a bitmap. The installed Windows Imaging Component encodes PNG, and
 the host encodes GIF on a separate thread. See
 xref:architecture.adoc#redistributable-inputs[What the bundle contains].
+
+== Check form actions
+
+`(press-enter (text-field "URL"))` exercises the window's default-button
+routing from that field. A disabled default leaves the current state
+unchanged. Use `(expect-checked (checkbox "Complete all visible tasks") mixed)`
+for a mixed aggregate check box.

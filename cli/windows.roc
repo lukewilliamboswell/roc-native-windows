@@ -618,7 +618,7 @@ spec_step = |expr| {
 		_ => Err(spec_error(at, "Expected a scenario step"))
 	}?
 	fields = match (op, args) {
-		("click", [locator]) | ("toggle", [locator]) | ("expect-visible", [locator]) | ("expect-absent", [locator]) =>
+		("click", [locator]) | ("toggle", [locator]) | ("press-enter", [locator]) | ("expect-visible", [locator]) | ("expect-absent", [locator]) =>
 			spec_locator(locator)
 		("fill", [locator, Quoted(value, _)]) | ("expect-text", [locator, Quoted(value, _)]) =>
 			spec_locator(locator).map_ok(|parts| parts.append(value))
@@ -627,7 +627,8 @@ spec_step = |expr| {
 			word = match value {
 				Word("true", _) | Word("#t", _) => Ok("true")
 				Word("false", _) | Word("#f", _) => Ok("false")
-				_ => Err(spec_error(spec_position(value), "Expected true or false"))
+				Word("mixed", _) if op == "expect-checked" => Ok("mixed")
+				_ => Err(spec_error(spec_position(value), if (op == "expect-checked") "Expected true, false or mixed" else "Expected true or false"))
 			}?
 			Ok(parts.append(word))
 		}

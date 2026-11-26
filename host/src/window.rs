@@ -25,7 +25,9 @@ use windows_sys::Win32::System::Time::{
 use windows_sys::Win32::UI::Controls::{
     ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetFocus, GetKeyState, VK_CONTROL, VK_MENU, VK_RETURN, VK_SHIFT,
+};
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::w;
@@ -209,7 +211,9 @@ impl App {
         let (event_name, value) = match (view_kind, u32::from(notification)) {
             (Control::Edit, EN_CHANGE) => ("input", self.surface.input(key)),
             (Control::Button, BN_CLICKED) => ("click", String::new()),
-            (Control::Checkbox, BN_CLICKED) => ("change", self.surface.input(key)),
+            (Control::Checkbox | Control::AggregateCheckbox, BN_CLICKED) => {
+                ("change", self.surface.input(key))
+            }
             (Control::FileButton, BN_CLICKED) => {
                 if let Some((node, listener)) = self.tree.event(key, "change") {
                     let multiple = self
@@ -239,6 +243,17 @@ impl App {
             self.surface.restore_controlled_value(key);
         }
         Ok(())
+    }
+
+    fn enter(&mut self, focus: HWND, message: Option<&MSG>) -> Result<bool> {
+        let Some(button) = self.surface.default_button(focus, message) else {
+            return Ok(false);
+        };
+        // Suppress auto-repeat; normal key release still goes to the focused control.
+        if message.is_none_or(|msg| msg.lParam & (1 << 30) == 0) {
+            self.command(button, BN_CLICKED as u16)?;
+        }
+        Ok(true)
     }
 
     fn dropped(&mut self, paths: Vec<PathBuf>) -> Result<()> {
@@ -444,6 +459,18 @@ fn run() -> Result<()> {
                 -1 => return Err(last_error("read the Windows message queue")),
                 0 => break,
                 _ => {
+                    if message.message == WM_KEYDOWN
+                        && message.wParam == usize::from(VK_RETURN)
+                        && modifiers() == 0
+                        && APP.with(|state| {
+                            state
+                                .borrow_mut()
+                                .as_mut()
+                                .map_or(Ok(false), |app| app.enter(GetFocus(), Some(&message)))
+                        })?
+                    {
+                        continue;
+                    }
                     if !(WM_KEYFIRST..=WM_KEYLAST).contains(&message.message)
                         || IsDialogMessageW(window, &message) == 0
                     {

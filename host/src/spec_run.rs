@@ -370,8 +370,8 @@ impl App {
                 Ok(())
             }
             (
-                "click" | "fill" | "toggle" | "expect-visible" | "expect-absent" | "expect-text"
-                | "expect-checked" | "expect-disabled",
+                "click" | "fill" | "toggle" | "press-enter" | "expect-visible" | "expect-absent"
+                | "expect-text" | "expect-checked" | "expect-disabled",
                 _,
             ) => self.control_step(step),
             _ => Err("unknown step or invalid arguments".into()),
@@ -444,12 +444,19 @@ impl App {
             ("expect-visible", []) => Ok(()),
             ("expect-text", [expected]) => expect(self.surface.spec_text(key)?.as_str(), *expected),
             ("expect-checked", [value]) => {
-                if self.surface.spec_handle(key).is_none()
-                    || self.surface.kind(key) != Control::Checkbox
+                if self.surface.spec_handle(key).is_none() || !self.surface.kind(key).is_checkbox()
                 {
                     return Err("expect-checked requires a checkbox".into());
                 }
-                expect(self.surface.input(key) == "true", number(value)?)
+                expect(self.surface.check_state(key), *value)
+            }
+            ("press-enter", []) => {
+                let focused = self
+                    .surface
+                    .spec_handle(key)
+                    .ok_or("locator is not a native control")?;
+                self.enter(focused, None)?;
+                Ok(())
             }
             ("expect-disabled", [value]) => {
                 expect(self.surface.spec_disabled(key)?, number(value)?)
@@ -517,7 +524,8 @@ impl App {
                     !label.is_empty() && node.attr("test-id") == Some(label)
                 } else {
                     let expected = if kind == "image" { "asset-image" } else { kind };
-                    matches!(&node.kind, Kind::Element(tag) if tag.strip_prefix("ui-") == Some(expected))
+                    matches!(&node.kind, Kind::Element(tag) if tag.strip_prefix("ui-") == Some(expected)
+                        || (expected == "checkbox" && tag == "ui-aggregate-checkbox"))
                         && (label.is_empty()
                             || self.surface.spec_label(key, kind).as_deref() == Some(label))
                 };

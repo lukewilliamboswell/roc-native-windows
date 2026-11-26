@@ -35,6 +35,14 @@ view = || {
 				],
 			),
 			Ui.text(todos.map(remaining)),
+			Ui.aggregate_checkbox(
+				"Complete all visible tasks",
+				{
+					state: todos.map(completion),
+					enabled: todos.map(|all| !all.is_empty()),
+					on_change: Engine.handle(|done| [cells.todos.update(|all| all.map(|task| { ..task, done }))]),
+				},
+			),
 			Ui.hstack(
 				{},
 				[
@@ -83,3 +91,13 @@ remaining = |todos| {
 
 expect remaining([]) == "0 remaining"
 expect set_done([{ id: 1, title: "Write a list", done: Bool.False }], 1, Bool.True) == [{ id: 1, title: "Write a list", done: Bool.True }]
+
+completion : List(Todo) -> Ui.CheckState
+completion = |todos|
+	if todos.is_empty() or todos.all(|task| !task.done) {
+		Unchecked
+	} else if todos.all(|task| task.done) {
+		Checked
+	} else {
+		Mixed
+	}

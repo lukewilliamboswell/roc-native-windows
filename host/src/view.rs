@@ -1,18 +1,22 @@
 use crate::Result;
 use crate::window::enabled_flag;
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::{HWND, RECT, SIZE};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_BITMAP, SS_CENTERIMAGE, SS_LEFT, SS_NOPREFIX};
-use windows_sys::Win32::UI::Controls::{BST_CHECKED, EM_SETCUEBANNER, EM_SETSEL, SetScrollInfo};
+use windows_sys::Win32::UI::Controls::{
+    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, EM_SETCUEBANNER, EM_SETSEL, SetScrollInfo,
+};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetFocus};
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::{PCWSTR, w};
 
@@ -22,6 +26,7 @@ pub(crate) enum Control {
     Button,
     FileButton,
     Checkbox,
+    AggregateCheckbox,
     Edit,
     Image,
 }
@@ -34,6 +39,7 @@ impl Control {
             "ui-button" => Self::Button,
             "ui-file-button" => Self::FileButton,
             "ui-checkbox" => Self::Checkbox,
+            "ui-aggregate-checkbox" => Self::AggregateCheckbox,
             "ui-text-field" => Self::Edit,
             "ui-asset-image" => Self::Image,
             _ => return Err(format!("unsupported native control {tag}")),
@@ -41,11 +47,16 @@ impl Control {
         Ok(Some(control))
     }
 
+    pub(crate) fn is_checkbox(self) -> bool {
+        matches!(self, Self::Checkbox | Self::AggregateCheckbox)
+    }
+
     fn class(self) -> (u32, PCWSTR, u32) {
         match self {
             Self::Text => (0, w!("STATIC"), SS_LEFT | SS_NOPREFIX),
             Self::Button | Self::FileButton => (0, w!("BUTTON"), WS_TABSTOP | BS_PUSHBUTTON as u32),
             Self::Checkbox => (0, w!("BUTTON"), WS_TABSTOP | BS_AUTOCHECKBOX as u32),
+            Self::AggregateCheckbox => (0, w!("BUTTON"), WS_TABSTOP | BS_3STATE as u32),
             Self::Edit => (
                 WS_EX_CLIENTEDGE,
                 w!("EDIT"),
@@ -71,13 +82,21 @@ struct Props {
     label: String,
     placeholder: String,
     enabled: bool,
-    checked: bool,
+    check_state: u32,
+    window_default: bool,
 }
 
 impl View {
     fn new(window: HWND, font: HFONT, kind: Control) -> Result<Self> {
         let (ex, class, style) = kind.class();
         let handle = child(window, font, ex, class, style)?;
+        if kind == Control::Edit {
+            // SAFETY: The new HWND belongs to this thread, with a static callback.
+            if unsafe { SetWindowSubclass(handle, Some(edit_subclass), 1, 0) } == 0 {
+                unsafe { DestroyWindow(handle) };
+                return Err("could not track input method composition".into());
+            }
+        }
         Ok(Self {
             handle,
             label: null_mut(),
@@ -125,8 +144,16 @@ impl View {
             if self.props.enabled != desired.enabled {
                 EnableWindow(self.handle, i32::from(desired.enabled));
             }
-            if self.kind == Control::Checkbox && self.props.checked != desired.checked {
-                SendMessageW(self.handle, BM_SETCHECK, usize::from(desired.checked), 0);
+            if self.kind.is_checkbox() && self.props.check_state != desired.check_state {
+                SendMessageW(self.handle, BM_SETCHECK, desired.check_state as usize, 0);
+            }
+            if self.kind == Control::Button && self.props.window_default != desired.window_default {
+                let style = if desired.window_default {
+                    BS_DEFPUSHBUTTON
+                } else {
+                    BS_PUSHBUTTON
+                };
+                SendMessageW(self.handle, BM_SETSTYLE, style as usize, 1);
             }
             if self.kind == Control::Edit && self.props.placeholder != desired.placeholder {
                 let placeholder = wide(&desired.placeholder);
@@ -270,12 +297,40 @@ impl Surface {
         if view.kind == Control::Edit {
             return window_text(view.handle);
         }
-        // SAFETY: The child is a live BUTTON with auto-checkbox semantics.
-        if unsafe { SendMessageW(view.handle, BM_GETCHECK, 0, 0) } == BST_CHECKED as isize {
-            "true".into()
+        let checked = self.check_state(key) == "true";
+        (if view.kind == Control::AggregateCheckbox {
+            !checked
         } else {
-            "false".into()
+            checked
+        })
+        .to_string()
+    }
+
+    pub(crate) fn check_state(&self, key: Key) -> &str {
+        // SAFETY: The child is a live BUTTON with check-box semantics.
+        match unsafe { SendMessageW(self.views[&key].handle, BM_GETCHECK, 0, 0) } as u32 {
+            BST_CHECKED => "true",
+            BST_INDETERMINATE => "mixed",
+            _ => "false",
         }
+    }
+
+    pub(crate) fn default_button(&self, focus: HWND, message: Option<&MSG>) -> Option<HWND> {
+        let default = self.views.values().find(|view| view.props.window_default)?;
+        let focused = self.key(focus).and_then(|key| self.views.get(&key));
+        if !focus.is_null() {
+            let parameter = message.map_or(0, |msg| std::ptr::from_ref(msg) as isize);
+            // SAFETY: The message pointer, when present, is live for this SendMessage call.
+            let flags = unsafe { SendMessageW(focus, WM_GETDLGCODE, 13, parameter) } as u32;
+            if flags & DLGC_WANTALLKEYS != 0 || composing(focus) {
+                return None;
+            }
+        }
+        let target = focused
+            .filter(|view| matches!(view.kind, Control::Button | Control::FileButton))
+            .unwrap_or(default);
+        // SAFETY: The target is a mounted control owned by this thread.
+        (unsafe { IsWindowEnabled(target.handle) } != 0).then_some(target.handle)
     }
 
     pub(crate) fn spec_handle(&self, key: Key) -> Option<HWND> {
@@ -326,11 +381,13 @@ impl Surface {
         let view = self
             .views
             .get(&key)
-            .filter(|view| view.kind == Control::Checkbox)
+            .filter(|view| view.kind.is_checkbox())
             .ok_or("toggle requires a checkbox")?;
-        let checked = self.input(key) == "true";
-        // SAFETY: The HWND is a live checkbox on the UI thread.
-        unsafe { SendMessageW(view.handle, BM_SETCHECK, usize::from(!checked), 0) };
+        if view.kind == Control::Checkbox {
+            let checked = self.check_state(key) == "true";
+            // SAFETY: Simulate the native auto-checkbox style before BN_CLICKED.
+            unsafe { SendMessageW(view.handle, BM_SETCHECK, usize::from(!checked), 0) };
+        }
         Ok(view.handle)
     }
 
@@ -342,11 +399,14 @@ impl Surface {
             Control::Edit if window_text(view.handle) != view.props.caption => {
                 set_text(view.handle, &view.props.caption);
             }
-            Control::Checkbox if (self.input(key) == "true") != view.props.checked => {
+            Control::Checkbox | Control::AggregateCheckbox => {
                 // SAFETY: The handle is a live check box owned by this thread.
-                unsafe {
-                    SendMessageW(view.handle, BM_SETCHECK, usize::from(view.props.checked), 0)
-                };
+                let actual = unsafe { SendMessageW(view.handle, BM_GETCHECK, 0, 0) } as u32;
+                if actual != view.props.check_state {
+                    unsafe {
+                        SendMessageW(view.handle, BM_SETCHECK, view.props.check_state as usize, 0)
+                    };
+                }
             }
             _ => {}
         }
@@ -399,6 +459,15 @@ impl Surface {
             }
         });
         self.sync_node(tree, ROOT)?;
+        if self
+            .views
+            .values()
+            .filter(|view| view.props.window_default)
+            .count()
+            > 1
+        {
+            return Err("a window can have only one default button".into());
+        }
         self.arrange(tree)
     }
 
@@ -412,7 +481,9 @@ impl Surface {
                     slot.insert(view);
                 }
                 let caption = match kind {
-                    Control::Checkbox => node.attr("title").unwrap_or("").into(),
+                    Control::Checkbox | Control::AggregateCheckbox => {
+                        node.attr("title").unwrap_or("").into()
+                    }
                     Control::Edit => node.attr("value").unwrap_or("").into(),
                     Control::Image => node.attr("label").unwrap_or("").into(),
                     _ => tree.caption(key),
@@ -425,7 +496,16 @@ impl Surface {
                         label: node.attr("label").unwrap_or("").into(),
                         placeholder: node.attr("placeholder").unwrap_or("").into(),
                         enabled: node.attr("enabled").is_none_or(enabled_flag),
-                        checked: node.attr("checked").is_some_and(enabled_flag),
+                        check_state: if kind == Control::AggregateCheckbox {
+                            match node.attr("check-state") {
+                                Some("true") => BST_CHECKED,
+                                Some("mixed") => BST_INDETERMINATE,
+                                _ => BST_UNCHECKED,
+                            }
+                        } else {
+                            u32::from(node.attr("checked").is_some_and(enabled_flag))
+                        },
+                        window_default: node.attr("window-default").is_some_and(enabled_flag),
                     },
                 )?;
             }
@@ -687,7 +767,9 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             (text_width(dc, &view.props.caption) + dip(30)).max(dip(80)),
             dip(30),
         ),
-        Control::Checkbox => (text_width(dc, &view.props.caption) + dip(26), dip(30)),
+        Control::Checkbox | Control::AggregateCheckbox => {
+            (text_width(dc, &view.props.caption) + dip(26), dip(30))
+        }
         Control::Edit => (
             max_width,
             dip(if view.props.label.is_empty() { 30 } else { 51 }),
@@ -698,6 +780,40 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
         ),
     };
     (width.min(max_width), height)
+}
+
+thread_local! {
+    static COMPOSING: RefCell<BTreeSet<usize>> = const { RefCell::new(BTreeSet::new()) };
+}
+
+fn composing(hwnd: HWND) -> bool {
+    COMPOSING.with(|active| active.borrow().contains(&(hwnd as usize)))
+}
+
+unsafe extern "system" fn edit_subclass(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    match message {
+        WM_IME_STARTCOMPOSITION => COMPOSING.with(|active| {
+            active.borrow_mut().insert(hwnd as usize);
+        }),
+        WM_IME_ENDCOMPOSITION | WM_NCDESTROY => COMPOSING.with(|active| {
+            active.borrow_mut().remove(&(hwnd as usize));
+        }),
+        _ => {}
+    }
+    // SAFETY: This is the installed same-thread subclass and arguments are unmodified.
+    unsafe {
+        if message == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(edit_subclass), id);
+        }
+        DefSubclassProc(hwnd, message, wparam, lparam)
+    }
 }
 
 fn child(parent: HWND, font: HFONT, ex: u32, class: PCWSTR, style: u32) -> Result<HWND> {

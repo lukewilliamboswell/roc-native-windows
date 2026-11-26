@@ -1,7 +1,11 @@
 (test "show a simulated HTTP reply and a virtual timeout"
   (steps
+    (fill (text-field "URL") " ")
+    (press-enter (text-field "URL"))
+    (expect-pending-effects 0)
     (fill (text-field "URL") "https://example.test/guide")
-    (click (button "Fetch"))
+    (press-enter (text-field "URL"))
+    (expect-pending-effects 1)
     (expect-visible (text "Fetching…"))
     (expect-request 1 :method "GET" :url "https://example.test/guide" :timeout 15000)
     (stub-http "guide" :url "https://example.test/guide" :status 200 :body "Read the guide.")

@@ -39,7 +39,7 @@ view = || {
 			Ui.hstack(
 				{},
 				[
-					Ui.button("Fetch", { enabled: start.map(|r| !r.url.is_empty()), on_press: Engine.handle_by(start, |r, _| [cells.request.set(r), cells.status.set("Fetching…"), cells.body.set("")]) }),
+					Ui.button("Fetch", { enter_action: WindowDefault, enabled: start.map(|r| !r.url.is_empty()), on_press: Engine.handle_by(start, |r, _| [cells.request.set(r), cells.status.set("Fetching…"), cells.body.set("")]) }),
 					Ui.button("Cancel", { enabled: request.map(|r| r.active), on_press: Engine.handle(|_| [cells.request.update(|r| { ..r, active: Bool.False }), cells.status.set("Cancelled.")]) }),
 				],
 			),

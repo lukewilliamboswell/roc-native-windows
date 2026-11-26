@@ -31,3 +31,14 @@ event. Cancelling the picker leaves the app's selection alone.
 
 For a complete example, see the Starter app and its specs described in
 xref:apps.adoc#examples[Choose an example].
+
+== Default actions and mixed check boxes
+
+Set a button's `enter_action` to `WindowDefault` to submit from a
+single-line field when Enter is available. A focused push button
+retains its own action. Mount one default button per window.
+
+`Ui.aggregate_checkbox` displays `Unchecked`, `Checked`, or `Mixed`
+from a `state` signal. Activating it requests true from Unchecked or
+Mixed and false from Checked. Use `on_change` to update the underlying
+items and derive the aggregate state from them.
