@@ -127,7 +127,7 @@ view = || {
 				{
 					label: "Stock counts",
 					columns: [
-						{ key: "item", heading: "Item", width: Fixed(140) },
+						{ key: "item", heading: "Product", width: Fixed(140) },
 						{ key: "expected", heading: "Expected", width: Fixed(90) },
 						{ key: "counted", heading: "Counted", width: Fixed(90) },
 					],
