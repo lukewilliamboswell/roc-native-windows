@@ -1,3 +1,5 @@
+# Roc rejects carriage returns in multiline strings, even under core.autocrlf=true.
+*.roc text eol=lf
 /host/glue/RustGlue.roc text eol=lf
 /host/src/roc_platform_abi.rs text eol=lf
 # Specs assert fixture byte counts and digests.
