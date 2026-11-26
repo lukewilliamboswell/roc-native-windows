@@ -73,28 +73,56 @@ jobs:
         run: blueprint run test-native -- --target x64mingw
       - name: Probe Windows UI Automation
         if: ${{ !cancelled() && runner.os == 'Windows' && inputs.accessibility && steps.build.conclusion == 'success' }}
-        run: blueprint run test-accessibility -- -FreshStarter
+        run: blueprint run test-accessibility -- -FreshStarter -BuildProfile size
+      - name: Build the documentation
+        if: runner.os == 'macOS'
+        run: blueprint run docs
+
+  stage-windows:
+    name: Stage Windows validation artifacts
+    if: inputs.windows_arm || inputs.standalone
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      arm_artifact: ${{ steps.upload-arm.outputs.artifact-id }}
+      preview_artifact: ${{ steps.upload-preview.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: roc-lang/setup-roc@dd81390553b0a1236aedb61cdd4c0ed7cf7eaec4
+        with:
+          version: nightly
+          nightly-tag: nightly-2026-11-26-890d6c8
+          cache: 'false'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Install the repository Rust toolchain
+        run: rustup show
+      - name: Bundle the Windows platform
+        id: bundle
+        run: roc scripts/build.roc -- bundle
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: runner.os == 'macOS' && inputs.windows_arm
+        id: upload-arm
+        if: inputs.windows_arm
         with:
           name: windows-link-inputs
           path: platform/targets/
           if-no-files-found: error
-      - name: Build the documentation
-        if: runner.os == 'macOS'
-        run: blueprint run docs
       - name: Stage the standalone release preview
-        if: runner.os == 'macOS' && inputs.standalone
+        id: preview
+        if: ${{ !cancelled() && inputs.standalone && steps.bundle.conclusion == 'success' }}
         shell: bash
         run: |
           rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-          blueprint run bundle
           shopt -s nullglob
           bundles=(dist/platform/*.tar.zst)
           test "${#bundles[@]}" -eq 1
-          blueprint run release -- --local 0.1.0 "${bundles[0]}" dist/release-preview
+          roc scripts/release.roc -- --local 0.1.0 "${bundles[0]}" dist/release-preview
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: runner.os == 'macOS' && inputs.standalone
+        id: upload-preview
+        if: ${{ !cancelled() && inputs.standalone && steps.preview.conclusion == 'success' }}
         with:
           name: windows-release-preview
           path: dist/release-preview/
@@ -102,8 +130,8 @@ jobs:
 
   windows-arm:
     name: Windows ARM64 ${{ matrix.suite }}
-    needs: check
-    if: ${{ !cancelled() && inputs.windows_arm }}
+    needs: stage-windows
+    if: ${{ !cancelled() && inputs.windows_arm && needs.stage-windows.outputs.arm_artifact != '' }}
     runs-on: windows-11-arm
     timeout-minutes: 30
     strategy:
@@ -146,12 +174,12 @@ jobs:
         run: roc scripts/build.roc -- test-native --target arm64mingw
       - name: Probe Windows UI Automation
         if: matrix.suite == 'accessibility'
-        run: roc scripts/build.roc -- test-accessibility -Target arm64mingw -FreshStarter
+        run: roc scripts/build.roc -- test-accessibility -Target arm64mingw -FreshStarter -BuildProfile size
 
   windows-standalone:
     name: Windows x64 standalone Reading List
-    needs: check
-    if: ${{ !cancelled() && inputs.standalone }}
+    needs: stage-windows
+    if: ${{ !cancelled() && inputs.standalone && needs.stage-windows.outputs.preview_artifact != '' }}
     runs-on: windows-2025
     timeout-minutes: 25
     steps:
