@@ -6,4 +6,5 @@
 /platform/targets/
 /examples/*/build/
 /examples/*/dist/
+/examples/*/.roc-fuzz/
 .zig-cache/

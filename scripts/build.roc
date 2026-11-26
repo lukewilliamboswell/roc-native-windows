@@ -10,13 +10,14 @@ import cli.OsStr
 import cli.Path
 import cli.Stderr
 import cli.Stdout
+import cli.System
 
 # Windows startup objects and import libraries come from Zig's bundled GNU
 # runtime. The probe is disposable. The archives on its link line are the
 # runtime inputs for the independently built Roc executable.
 zig_version = "0.17.1"
 
-examples = ["counter", "todos", "workers", "files", "http"]
+examples = ["starter", "counter", "todos", "workers", "files", "http"]
 
 windows_targets = [
 	{ roc: "x64mingw", rust: "x86_64-pc-windows-gnullvm", zig: "x86_64-windows-gnu" },
@@ -38,11 +39,13 @@ main! = |args| {
 dispatch! = |args, roc| match args {
 	["check"] => check!(roc)
 	["build"] => build!(roc)
+	["test-native"] => test_native!(roc, [])
+	["test-native", "--target", target] if ["x64mingw", "arm64mingw"].contains(target) => test_native!(roc, ["--target", target])
 	["bundle"] => {
 		hosts!()?
 		bundle!(roc)
 	}
-	_ => Err("Usage: scripts/build.roc -- check | build | bundle")
+	_ => Err("Usage: scripts/build.roc -- check | build | bundle | test-native [--target TARGET]")
 }
 
 bundle! = |roc| {
@@ -72,9 +75,10 @@ bundle! = |roc| {
 }
 
 check! = |roc| {
-	step!(roc, ["fmt", "--check", "platform", "examples", "scripts", "cli/windows.roc"])?
-	for file in ["scripts/build.roc", "scripts/check_glue.roc", "scripts/release.roc"] {
-		step!(roc, ["test", file])?
+	step!("roc-stable", ["fmt", "--check", "scripts"])?
+	step!(roc, ["fmt", "--check", "platform", "examples", "cli"])?
+	for file in ["scripts/build.roc", "scripts/check_glue.roc", "scripts/release.roc", "scripts/serve.roc"] {
+		step!("roc-stable", ["test", file])?
 	}
 	check_glue!(roc)?
 	step!("cargo", ["fmt", "--manifest-path", "host/Cargo.toml", "--check"])?
@@ -86,25 +90,52 @@ check! = |roc| {
 	for target in windows_targets {
 		step!("cargo", ["clippy", "--manifest-path", "host/Cargo.toml", "--locked", "--target", target.rust, "--", "-D", "warnings"])?
 	}
-	for file in ["platform/main.roc", "cli/windows.roc"].concat(examples.map(|name| "examples/${name}/src/main.roc")) {
+	for file in ["platform/main.roc", "cli/windows.roc"] {
 		step!(roc, ["check", file])?
 		step!(roc, ["test", file])?
+	}
+	system = System.target!()
+	can_fuzz = match (system.os(), system.arch()) {
+		(MacOS(_), Arm64) | (Linux(_), X64) => Bool.True
+		_ => Bool.False
+	}
+	for example in examples {
+		app_tool!(roc, example, ["test", "--check"])?
+		if can_fuzz and ["starter", "files"].contains(example) {
+			app_tool!(roc, example, ["fuzz", "--check"])?
+		}
 	}
 	build!(roc)
 }
 
+app_tool! = |roc, example, args| {
+	dir = "examples/${example}"
+	cmd = command(roc, ["../../cli/windows.roc", "--"].concat(args)).cwd(Path.utf8(dir)).env("ROC_WINDOWS_ROC", OsStr.from_str(roc))
+	run!(cmd, "${example}: ${Str.join_with(args, " ")}")
+}
+
+test_native! = |roc, options| {
+	system = System.target!()
+	match system.os() {
+		Windows(_) => {}
+		_ => return Err("Run the test-native task on Windows")
+	}
+	for example in examples {
+		app_tool!(roc, example, ["test"].concat(options))?
+	}
+	Ok({})
+}
+
 check_glue! = |roc| {
 	spec = Env.var_str!("ROC_WINDOWS_GLUE_SPEC") ?? "host/glue/RustGlue.roc"
-	step!(roc, ["run", "scripts/check_glue.roc", "--", "--roc", roc, "--spec", spec])
+	step!("roc-stable", ["scripts/check_glue.roc", "--", "--roc", roc, "--spec", spec])
 }
 
 build! = |roc| {
 	hosts!()?
 	for target in windows_targets {
 		for example in examples {
-			dir = "examples/${example}"
-			cmd = command(roc, ["run", "../../cli/windows.roc", "--", "build", "--target", target.roc]).cwd(Path.utf8(dir)).env("ROC_WINDOWS_ROC", OsStr.from_str(roc))
-			run!(cmd, "build ${example} for ${target.roc}")?
+			app_tool!(roc, example, ["build", "--target", target.roc])?
 		}
 	}
 	Ok({})

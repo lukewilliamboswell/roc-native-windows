@@ -1,5 +1,6 @@
-app [main] { pf: platform "../../../platform/main.roc" }
+app [main] { logic: "../logic/main.roc", pf: platform "../../../platform/main.roc" }
 
+import logic.Inspector
 import pf.Engine exposing [Elem, File]
 import pf.Ui
 
@@ -12,9 +13,7 @@ store = Engine.store(
 	FilesDemo,
 	{
 		selection: Engine.cell(None),
-		status: Engine.cell("Choose a file to preview its contents."),
-		preview: Engine.cell(""),
-		digest: Engine.cell(""),
+		display: Engine.cell(Inspector.idle),
 	}.Engine.Cells,
 )
 
@@ -23,6 +22,7 @@ cells = store.cells()
 view : () -> Elem(Engine.StoreRoot(_))
 view = || {
 	selection = cells.selection.signal()
+	display = cells.display.signal()
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
@@ -37,17 +37,17 @@ view = || {
 				{},
 				[
 					Ui.file_button("Choose File…", { on_files: Engine.handle(receive) }),
-					Ui.button("Clear", { on_press: Engine.handle(|_| reset("Choose a file to preview its contents.")) }),
+					Ui.button("Clear", { on_press: Engine.handle(|_| reset(Clear)) }),
 				],
 			),
-			Ui.text(cells.status.signal()),
-			Ui.text(cells.preview.signal()),
-			Ui.text(cells.digest.signal()),
+			Ui.text(display.map(|state| state.status)),
+			Ui.text(display.map(|state| state.preview)),
+			Ui.text(display.map(|state| state.digest)),
 			Engine.watch_latest(
 				selection,
 				|selected| match selected {
 					Selected(file) =>
-						match file.slice({ start: 0, len: file.size().min(256) }) {
+						match file.slice({ start: 0, len: file.size().min(Inspector.preview_limit) }) {
 							Ok(head) => [head.read_bytes({})]
 							Err(_) => []
 						}
@@ -55,12 +55,7 @@ view = || {
 				},
 				Engine.react(
 					|_, result| [
-						cells.preview.set(
-							match result {
-								Ok(bytes) => preview(bytes)
-								Err(error) => "Read failed: ${Str.inspect(error)}"
-							},
-						),
+						change(Preview(result.map_err(Str.inspect))),
 					],
 				),
 			),
@@ -72,12 +67,7 @@ view = || {
 				},
 				Engine.react(
 					|_, result| [
-						cells.digest.set(
-							match result {
-								Ok(bytes) => "SHA-256: ${hex(bytes)}"
-								Err(error) => "Digest failed: ${Str.inspect(error)}"
-							},
-						),
+						change(Digest(result.map_err(Str.inspect))),
 					],
 				),
 			),
@@ -90,32 +80,14 @@ receive = |{ files, refused }|
 	match files.first() {
 		Ok(file) => [
 			cells.selection.set(Selected(file)),
-			cells.status.set("${file.name()} · ${file.size().to_str()} bytes"),
-			cells.preview.set("Reading…"),
-			cells.digest.set("Hashing…"),
+			change(Choose(file.name(), file.size())),
 		]
-		Err(_) if refused > 0 => reset("Could not open the selected file.")
+		Err(_) if refused > 0 => reset(Refused)
 		Err(_) => []
 	}
 
-reset : Str -> List(Engine.Write(_))
-reset = |status| [cells.selection.set(None), cells.status.set(status), cells.preview.set(""), cells.digest.set("")]
+change : Inspector.Action -> Engine.Write(_)
+change = |action| cells.display.update(|display| Inspector.update(display, action))
 
-preview : List(U8) -> Str
-preview = |bytes|
-	if bytes.is_empty() {
-		"The file is empty."
-	} else {
-		Str.join_with(Str.from_utf8_lossy(bytes).split_on("\n").map(|line| line.trim()), " ")
-	}
-
-hex : List(U8) -> Str
-hex = |bytes| {
-	digits = "0123456789abcdef".to_utf8()
-	Str.from_utf8_lossy(
-		bytes.fold([], |out, byte| out.append(digits.get((byte // 16).to_u64()) ?? '0').append(digits.get((byte % 16).to_u64()) ?? '0')),
-	)
-}
-
-expect hex([0, 15, 255]) == "000fff"
-expect preview("hello\n world".to_utf8()) == "hello world"
+reset : Inspector.Action -> List(Engine.Write(_))
+reset = |action| [cells.selection.set(None), change(action)]

@@ -1,0 +1,9 @@
+README.md
+assets/reading-list.bmp
+logic/ReadingList.roc
+logic/main.roc
+src/main.roc
+tests/fuzz/main.roc
+tests/specs/demo.scm
+tests/specs/reading-list.scm
+windows.json

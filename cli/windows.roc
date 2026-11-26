@@ -6,6 +6,7 @@ app [main!] {
 }
 
 import cli.Cmd
+import cli.Duration
 import cli.Env
 import cli.Http
 import cli.OsStr
@@ -24,9 +25,21 @@ PackageFormat : [Msi, Zip]
 
 PackageOptions : { target : Str, format : PackageFormat, id : Str, version : Str, publisher : Str }
 
-Command : [Help, Init(Str, Str), Build(Str), Run(Str), Test, Package(PackageOptions)]
+MsiMetadata : { id : Str, version : Str, publisher : Str }
+
+app_manifest = "windows.json"
+
+TestOptions : { check : Bool, failure_screenshot : Bool, target : Str }
+
+RecordFormat : [Gif, Png]
+
+Command : [Help, Init(Str, Str, Bool), Build(Str), Run(Str), Test(TestOptions), Record(Str, RecordFormat, Str), Fuzz(Bool), Package(PackageOptions)]
+
+ScaffoldFile : { path : Str, bytes : List(U8) }
 
 # scripts/release.roc replaces these defaults with the release's exact assets.
+release_version = "development"
+
 release_platform = ""
 
 release_launcher = ""
@@ -35,6 +48,9 @@ release_launcher_sha256 = ""
 
 release_packagers : List({ system : Str, url : Str, sha256 : Str })
 release_packagers = []
+
+release_scaffold : List(ScaffoldFile)
+release_scaffold = []
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |raw_args| {
@@ -67,9 +83,11 @@ parser =
 			Cli.map(
 				SubCmd.optional([
 					init_command,
-					target_command("build", "Build an EXE and copy assets/.", |target| Build(target)),
+					target_command("build", "Build a Windows EXE and copy assets/.", |target| Build(target)),
 					target_command("run", "Build and launch the app on Windows.", |target| Run(target)),
-					SubCmd.empty({ name: "test", description: "Check source and run Roc expects.", value: Test }),
+					test_command,
+					record_command,
+					fuzz_command,
 					package_command,
 					SubCmd.empty({ name: "help", description: "Show this help.", value: Help }),
 				]),
@@ -78,7 +96,7 @@ parser =
 			{
 				name: "windows",
 				description: description,
-				version: "development",
+				version: release_version,
 				authors: [],
 				text_style: Plain,
 			},
@@ -90,14 +108,25 @@ description =
 	\\
 	\\Run build, run, test and package from the app directory. The entry point
 	\\is src/main.roc, or main.roc for an existing single-file application.
-	\\Build output goes in build/<target>/. Build, test and package work on
-	\\macOS as well as on Windows. Set ROC_WINDOWS_ROC to use a particular
-	\\Roc compiler instead of roc on PATH.
+	\\Build, test and package work on Windows, macOS and Linux. You can
+	\\cross-compile for Windows x64 or ARM64 from any of those systems.
+	\\The EXE and installer run on Windows. The run command requires Windows.
+	\\
+	\\For MSI packaging, the release tool automatically downloads a packager
+	\\for the OS and CPU running Roc. For example, roc-windows-msi-0.1.0-macos-arm64
+	\\runs on Apple Silicon Macs and can create either Windows installer.
+	\\Choose the Windows architecture with --target.
+	\\
+	\\  roc windows.roc -- package --target arm64mingw
+	\\
+	\\Build output goes in build/<target>/. Packages go in dist/.
+	\\Set ROC_WINDOWS_ROC to use a particular Roc compiler instead of roc on PATH.
 
 init_command : SubCmd.SubcommandParserConfig(Command)
 init_command =
 	SubCmd.finish(
 		{
+			simple: Opt.flag({ short: "", long: "simple", help: "Create a minimal counter with no separate logic or test directories." }),
 			source: Opt.str({
 				short: "",
 				long: "platform",
@@ -110,19 +139,60 @@ init_command =
 				default: Value("."),
 			}),
 		}.Cli,
-		{ name: "init", description: "Create a starter app.", mapper: |{ dir, source }| Init(dir, source) },
+		{ name: "init", description: "Create the reading-list starter with a logic package, behaviour specs and fuzz tests.", mapper: |{ dir, source, simple }| Init(dir, source, simple) },
 	)
 
 target_command : Str, Str, (Str -> Command) -> SubCmd.SubcommandParserConfig(Command)
 target_command = |name, summary, mapper|
 	SubCmd.finish(target_option, { name, description: summary, mapper })
 
+test_command : SubCmd.SubcommandParserConfig(Command)
+test_command =
+	SubCmd.finish(
+		{
+			check: Opt.flag({ short: "", long: "check", help: "Check source, expects and spec syntax without launching the app." }),
+			failure_screenshot: Opt.flag({ short: "", long: "screenshot-on-failure", help: "Capture the failed step's window under build/specs/ on Windows." }),
+			target: target_option,
+		}.Cli,
+		{ name: "test", description: "Run Roc expects and the app's Win32 behaviour specs.", mapper: |options| Test(options) },
+	)
+
+record_command : SubCmd.SubcommandParserConfig(Command)
+record_command =
+	SubCmd.finish(
+		{
+			format: Opt.single({
+				short: "",
+				long: "format",
+				type: "format",
+				help: "gif (default) or png for a sequence of PNG frames.",
+				parser: |arg| match arg.to_str() {
+					Ok("gif") => Ok(Gif)
+					Ok("png") => Ok(Png)
+					Ok(_) => Err(InvalidValue("expected gif or png"))
+					Err(_) => Err(InvalidUtf8)
+				},
+				default: Value(Gif),
+			}),
+			target: target_option,
+			path: Param.str({ name: "file", help: "A .scm file containing one demo.", default: NoDefault }),
+		}.Cli,
+		{ name: "record", description: "Record a demo spec on Windows.", mapper: |{ path, format, target }| Record(path, format, target) },
+	)
+
+fuzz_command : SubCmd.SubcommandParserConfig(Command)
+fuzz_command =
+	SubCmd.finish(
+		Opt.flag({ short: "", long: "check", help: "Run the declared examples without a generated-input campaign." }),
+		{ name: "fuzz", description: "Build the roc-fuzz suite and fuzz each target for ten seconds.", mapper: |check| Fuzz(check) },
+	)
+
 target_option =
 	Opt.single({
 		short: "",
 		long: "target",
 		type: "target",
-		help: "x64mingw or arm64mingw. Defaults to the Windows Roc process architecture, or x64mingw on other systems.",
+		help: "Windows architecture. Use x64mingw for x64 or arm64mingw for ARM64. Defaults to Roc's architecture on Windows and x64mingw on macOS and Linux.",
 		parser: |arg|
 			match arg.to_str() {
 				Ok("x64mingw") => Ok("x64mingw")
@@ -142,7 +212,7 @@ package_command =
 				short: "",
 				long: "format",
 				type: "format",
-				help: "msi (default) or zip for portable distribution.",
+				help: "msi (default) uses a packager that runs on your build machine. zip creates a portable Windows app archive.",
 				parser: |arg| match arg.to_str() {
 					Ok("msi") => Ok(Msi)
 					Ok("zip") => Ok(Zip)
@@ -151,11 +221,11 @@ package_command =
 				},
 				default: Value(Msi),
 			}),
-			id: Opt.str({ short: "", long: "id", help: "Stable reverse-DNS upgrade identity for MSI releases.", default: Value("") }),
-			version: Opt.str({ short: "", long: "app-version", help: "MSI product version (MAJOR.MINOR.PATCH).", default: Value("0.1.0") }),
-			publisher: Opt.str({ short: "", long: "publisher", help: "Publisher shown by Windows for the MSI.", default: Value("Local development") }),
+			id: Opt.str({ short: "", long: "id", help: "Override the MSI upgrade identity in windows.json.", default: Value("") }),
+			version: Opt.str({ short: "", long: "app-version", help: "Override the MSI product version in windows.json (MAJOR.MINOR.PATCH).", default: Value("") }),
+			publisher: Opt.str({ short: "", long: "publisher", help: "Override the MSI publisher in windows.json.", default: Value("") }),
 		}.Cli,
-		{ name: "package", description: "Build and create an MSI installer or portable ZIP in dist/.", mapper: |options| Package(options) },
+		{ name: "package", description: "Build a Windows app and create an MSI installer or portable ZIP in dist/.", mapper: |options| Package(options) },
 	)
 
 parse_text = |args| Cli.parse_or_display_message(parser, args, |arg| Utf8(arg))
@@ -170,10 +240,12 @@ execute! : Command => Try({}, _)
 execute! = |command|
 	match command {
 		Help => Stdout.line!(help_text)
-		Init(dir, source) => init!(dir, source)
+		Init(dir, source, simple) => init!(dir, source, simple)
 		Build(target) => build!(target).map_ok(|_| {})
 		Run(target) => run!(target)
-		Test => test!()
+		Test(options) => test!(options)
+		Record(path, format, target) => record!(path, format, target)
+		Fuzz(check) => fuzz!(check)
 		Package(options) => package!(options)
 	}
 
@@ -225,11 +297,502 @@ roc! = |args, step| {
 check_exit = |status, step|
 	if (status == Exited(0)) Ok({}) else Err(ChildFailed(step, Str.inspect(status)))
 
-test! : () => Try({}, _)
-test! = || {
+test! : TestOptions => Try({}, _)
+test! = |options| {
 	entry = entry!()?
 	roc!(["check", entry], "check")?
-	roc!(["test", entry], "test")
+	roc!(["test", entry], "test")?
+	spec_dir = Path.utf8("tests/specs")
+	if (!Path.is_dir!(spec_dir)?) return Ok({})
+	paths = Path.list!(spec_dir)?.map(Path.display).keep_if(|path| path.ends_with(".scm")).sort_with(compare_name_text)
+	if (paths.is_empty()) return Ok({})
+
+	var $scenarios = []
+	for path in paths {
+		$scenarios = $scenarios.append(read_scenario!(path)?)
+	}
+	Stdout.line!("Validated ${paths.len().to_str()} spec files.")?
+
+	tests = $scenarios.keep_if(|scenario| scenario.mode == TestMode)
+	own = windows_target!()
+	if (tests.is_empty()) return Ok({})
+	if options.check or own.is_empty() {
+		return Stdout.line!("${tests.len().to_str()} Win32 scenarios require a native test run on Windows.")
+	}
+
+	target = if (options.target.is_empty()) own else options.target
+	program = spec_executable!(target)?
+	var $failed = 0.U64
+	for scenario in tests {
+		match run_scenario!(program, scenario, "", options.failure_screenshot) {
+			Ok(output) => {
+				Stdout.line!("PASS ${scenario.path}")?
+				if !output.is_empty() {
+					Stdout.line!("  Artifacts in ${output}")?
+				}
+			}
+			Err(problem) => {
+				$failed = $failed + 1
+				Stderr.line!("FAIL ${scenario.path}\n  ${problem}")?
+			}
+		}
+	}
+	Stdout.line!("Executed ${tests.len().to_str()} Win32 scenarios. ${$failed.to_str()} failed.")?
+	if ($failed == 0) Ok({}) else Err(SpecSuiteFailed($failed))
+}
+
+record! : Str, RecordFormat, Str => Try({}, _)
+record! = |path, format, requested| {
+	scenario = read_scenario!(path)?
+	if (scenario.mode != DemoMode) return Err(SpecProblem(path, "Record requires a (demo ...) scenario"))
+	own = windows_target!()
+	if (own.is_empty()) return Err(RecordRequiresWindows)
+	target = if (requested.is_empty()) own else requested
+	program = spec_executable!(target)?
+	output = run_scenario!(program, scenario, if (format == Gif) "gif" else "png", Bool.False) ? |detail| SpecProblem(path, detail)
+	Stdout.line!("Recorded ${scenario.name} in ${output}.")
+}
+
+spec_executable! : Str => Try(Path.Path, _)
+spec_executable! = |target| {
+	built = build!(target)?
+	Path.absolute!(Path.utf8("${built.dir}/${built.name}.exe"))
+}
+
+read_scenario! : Str => Try(Scenario, _)
+read_scenario! = |path| {
+	source = Path.read_utf8!(Path.utf8(path))?
+	spec_parse(path, source).map_err(|issue| SpecProblem("${path}:${issue.pos.line.to_str()}:${issue.pos.column.to_str()}", issue.message))
+}
+
+run_scenario! : Path.Path, Scenario, Str, Bool => Try(Str, Str)
+run_scenario! = |program, scenario, record_format, failure_screenshot| {
+	ensure_dir!("build/specs") ? |issue| "Could not prepare build/specs: ${Str.inspect(issue)}"
+	name = Path.filename(Path.utf8(scenario.path)).map_ok(Path.display) ?? "scenario"
+	stem = name.drop_suffix(".scm")
+	prefix = if (valid_asset_name(stem)) stem else "scenario"
+	directory = Env.create_temp_dir_in!(Path.utf8("build/specs"), "${prefix}-") ? |issue| "Could not create an artifact directory: ${Str.inspect(issue)}"
+	absolute = Path.absolute!(directory) ? |issue| "Could not resolve the artifact directory: ${Str.inspect(issue)}"
+	plan = absolute.join("plan.bin")
+	Path.write_bytes!(plan, spec_encode(scenario)) ? |issue| "Could not write the scenario plan: ${Str.inspect(issue)}"
+	result = Cmd.new(program.to_os_str())
+		.env("ROC_WINDOWS_SPEC", plan.to_os_str())
+		.env("ROC_WINDOWS_SPEC_OUT", absolute.to_os_str())
+		.env("ROC_WINDOWS_SPEC_RECORD", OsStr.from_str(record_format))
+		.env("ROC_WINDOWS_SPEC_FAILURE_SCREENSHOT", OsStr.from_str(if (failure_screenshot) "1" else ""))
+		.stdin(Null)
+		.stdout(Capture)
+		.stderr(Capture)
+		.timeout(Duration.seconds(120))
+		.output_limit(MaxBytes(1_000_000))
+		.run!()
+	Path.delete!(plan) ?? {}
+	Path.delete_all!(absolute.join("storage")) ?? {}
+	entries = (Path.list!(absolute) ?? []).keep_if(|asset| asset != plan)
+	if entries.is_empty() {
+		Path.delete_all!(absolute) ?? {}
+	}
+	artifact_note = if (entries.is_empty()) "" else "\n  Artifacts: ${absolute.display()}"
+	outcome = result ? |issue| "Could not complete the native run: ${Str.inspect(issue)}${artifact_note}"
+	stdout = Str.from_utf8_lossy(outcome.stdout_bytes)
+	stderr = Str.from_utf8_lossy(outcome.stderr_bytes).trim()
+	match (outcome.status, stdout.trim().split_on("\n").last().map_ok(Str.trim)) {
+		(Exited(0), Ok("roc-windows-spec 1 done")) => {
+			ready = recording_ready!(record_format, absolute) ? |issue| "Could not inspect the recording: ${Str.inspect(issue)}"
+			if !ready {
+				Err("Recording finished without producing the expected artifact")
+			} else {
+				Ok(if (entries.is_empty()) "" else absolute.display())
+			}
+		}
+		_ => {
+			details = [stderr, stdout.trim()].drop_if(Str.is_empty)
+			explanation = if details.is_empty() {
+				"the app exited without the completion marker for protocol 1"
+			} else {
+				Str.join_with(details, "\n  ")
+			}
+			Err("Native scenario failed (${Str.inspect(outcome.status)}): ${explanation}${artifact_note}")
+		}
+	}
+}
+
+recording_ready! : Str, Path.Path => Try(Bool, _)
+recording_ready! = |format, directory| match format {
+	"gif" => Path.is_file!(directory.join("demo.gif"))
+	"png" => Path.is_file!(directory.join("frame-0000.png"))
+	_ => Ok(Bool.True)
+}
+
+# S-expression reading follows roc-native-macos's UPL-licensed positional
+# reader. The Win32 capabilities and wire plan are defined here.
+SpecPos : { line : U64, column : U64 }
+
+SpecIssue : { pos : SpecPos, message : Str }
+
+SpecExpr := [Word(Str, SpecPos), Quoted(Str, SpecPos), Form(List(SpecExpr), SpecPos)]
+
+SpecReader : { bytes : List(U8), at : U64, line : U64, column : U64 }
+
+SpecMode : [TestMode, DemoMode]
+
+SpecStep : { pos : SpecPos, op : Str, fields : List(Str) }
+
+Scenario : { path : Str, mode : SpecMode, name : Str, steps : List(SpecStep) }
+
+spec_parse : Str, Str -> Try(Scenario, SpecIssue)
+spec_parse = |path, source| {
+	reader = { bytes: source.to_utf8(), at: 0, line: 1, column: 1 }
+	if (reader.bytes.len() > 1_000_000) return Err(spec_error(spec_here(reader), "The spec is larger than 1 MB"))
+	(expr, rest) = spec_expr(reader, 0)?
+	after = spec_trivia(rest)
+	if (after.at != after.bytes.len()) return Err(spec_error(spec_here(after), "A spec file holds exactly one form"))
+	match expr {
+		Form([Word(kind, at), Quoted(name, name_pos), .. as body], _) => {
+			mode = match kind {
+				"test" => Ok(TestMode)
+				"demo" => Ok(DemoMode)
+				_ => Err(spec_error(at, "Expected a test or demo form"))
+			}?
+			if (name.is_empty()) return Err(spec_error(name_pos, "Expected a nonempty scenario name"))
+			(setup, steps) = match body {
+				[Form([Word("steps", _), .. as forms], _)] => Ok(([], forms))
+				[Form([Word("setup", _), .. as settings], _), Form([Word("steps", _), .. as forms], _)] => Ok((settings, forms))
+				_ => Err(spec_error(at, "Expected optional (setup ...) followed by (steps ...)"))
+			}?
+			if (steps.is_empty()) return Err(spec_error(at, "A scenario needs at least one step"))
+			var $compiled = []
+			for line in setup {
+				$compiled = $compiled.append(spec_setup(line)?)
+			}
+			for line in steps {
+				$compiled = $compiled.append(spec_step(line)?)
+			}
+			Ok({ path, mode, name, steps: $compiled })
+		}
+		_ => Err(spec_error(spec_position(expr), "Expected (test \"name\" (steps ...)) or (demo \"name\" (steps ...))"))
+	}
+}
+
+spec_error : SpecPos, Str -> SpecIssue
+spec_error = |pos, message| { pos, message }
+
+spec_here : SpecReader -> SpecPos
+spec_here = |reader| { line: reader.line, column: reader.column }
+
+spec_position : SpecExpr -> SpecPos
+spec_position = |expr| match expr {
+	Word(_, pos) | Quoted(_, pos) | Form(_, pos) => pos
+}
+
+spec_peek : SpecReader -> Try(U8, [OutOfBounds])
+spec_peek = |reader| reader.bytes.get(reader.at)
+
+spec_advance : SpecReader -> SpecReader
+spec_advance = |reader| match spec_peek(reader) {
+	Ok('\n') => { ..reader, at: reader.at + 1, line: reader.line + 1, column: 1 }
+	Ok(byte) if byte >= 0x80 and byte < 0xC0 => { ..reader, at: reader.at + 1 }
+	_ => { ..reader, at: reader.at + 1, column: reader.column + 1 }
+}
+
+spec_space : U8 -> Bool
+spec_space = |byte| [' ', '\t', '\r', '\n'].contains(byte)
+
+spec_trivia : SpecReader -> SpecReader
+spec_trivia = |start| {
+	var $reader = start
+	var $comment = Bool.False
+	while $reader.at < $reader.bytes.len() {
+		byte = spec_peek($reader) ?? 0
+		if $comment {
+			$comment = byte != '\n'
+		} else if byte == ';' {
+			$comment = Bool.True
+		} else if !spec_space(byte) {
+			return $reader
+		}
+		$reader = spec_advance($reader)
+	}
+	$reader
+}
+
+spec_expr : SpecReader, U64 -> Try((SpecExpr, SpecReader), SpecIssue)
+spec_expr = |start, depth| {
+	reader = spec_trivia(start)
+	at = spec_here(reader)
+	if (depth > 64) return Err(spec_error(at, "The spec contains too many nested forms"))
+	match spec_peek(reader) {
+		Err(_) => Err(spec_error(at, "Unexpected end of file"))
+		Ok(')') => Err(spec_error(at, "Unexpected closing parenthesis"))
+		Ok(0) => Err(spec_error(at, "NUL is not allowed in a spec"))
+		Ok('"') => spec_quoted(reader)
+		Ok('(') => {
+			var $rest = spec_trivia(spec_advance(reader))
+			var $items = []
+			while spec_peek($rest) != Ok(')') {
+				if ($rest.at >= $rest.bytes.len()) return Err(spec_error(at, "This form is never closed"))
+				(item, next) = spec_expr($rest, depth + 1)?
+				$items = $items.append(item)
+				$rest = spec_trivia(next)
+			}
+			Ok((Form($items, at), spec_advance($rest)))
+		}
+		Ok(_) => {
+			var $rest = reader
+			while $rest.at < $rest.bytes.len() {
+				byte = spec_peek($rest) ?? 0
+				if spec_space(byte) or ['(', ')', '"', ';', 0].contains(byte) {
+					break
+				}
+				$rest = spec_advance($rest)
+			}
+			word = Str.from_utf8_lossy(reader.bytes.sublist({ start: reader.at, len: $rest.at - reader.at }))
+			Ok((Word(word, at), $rest))
+		}
+	}
+}
+
+spec_quoted : SpecReader -> Try((SpecExpr, SpecReader), SpecIssue)
+spec_quoted = |start| {
+	at = spec_here(start)
+	var $reader = spec_advance(start)
+	var $bytes = []
+	while $reader.at < $reader.bytes.len() {
+		match spec_peek($reader) ?? 0 {
+			'"' => return Ok((Quoted(Str.from_utf8_lossy($bytes), at), spec_advance($reader)))
+			'\r' | '\n' => return Err(spec_error(spec_here($reader), "Use an escape for a line break inside a string"))
+			0 => return Err(spec_error(spec_here($reader), "NUL is not allowed in a spec"))
+			'\\' => {
+				escape_pos = spec_here($reader)
+				$reader = spec_advance($reader)
+				decoded = match spec_peek($reader) {
+					Ok('n') => '\n'
+					Ok('r') => '\r'
+					Ok('t') => '\t'
+					Ok('"') => '"'
+					Ok('\\') => '\\'
+					_ => return Err(spec_error(escape_pos, "Unknown string escape"))
+				}
+				$bytes = $bytes.append(decoded)
+			}
+			byte => {
+				$bytes = $bytes.append(byte)
+			}
+		}
+		$reader = spec_advance($reader)
+	}
+	Err(spec_error(at, "This string is never closed"))
+}
+
+spec_setup : SpecExpr -> Try(SpecStep, SpecIssue)
+spec_setup = |expr| {
+	at = spec_position(expr)
+	(op, fields) = match expr {
+		Form([Word("live-effects", _)], _) => Ok(("setup-live-effects", []))
+		Form([Word("live-effects", _), Word(scope, _)], _) if ["http", "time"].contains(scope) => Ok(("setup-live-effects", [scope]))
+		Form([Word("window-size", _), width, height], _) => {
+			w = spec_number(width, "window width", 1, 3840)?
+			h = spec_number(height, "window height", 1, 2160)?
+			Ok(("setup-window-size", [w, h]))
+		}
+		Form([Word("initial-time", _), value], _) => {
+			time = spec_number(value, "clock time", -9223372036854775808, 9223372036854775807)?
+			Ok(("setup-initial-time", [time]))
+		}
+		Form([Word("worker-pool", _), value], _) => {
+			count = spec_number(value, "worker limit", 1, 32)?
+			Ok(("setup-worker-pool", [count]))
+		}
+		Form([Word(verb, _), Quoted(key, _), Quoted(value, _)], _) if ["local-storage", "session-storage"].contains(verb) =>
+			Ok(("setup-${verb}", [key, value]))
+		_ => Err(spec_error(at, "Unknown setup form or invalid arguments"))
+	}?
+	Ok({ pos: at, op, fields })
+}
+
+spec_step : SpecExpr -> Try(SpecStep, SpecIssue)
+spec_step = |expr| {
+	at = spec_position(expr)
+	(op, args) = match expr {
+		Form([Word(name, _), .. as arguments], _) => Ok((name, arguments))
+		_ => Err(spec_error(at, "Expected a scenario step"))
+	}?
+	fields = match (op, args) {
+		("click", [locator]) | ("toggle", [locator]) | ("expect-visible", [locator]) | ("expect-absent", [locator]) =>
+			spec_locator(locator)
+		("fill", [locator, Quoted(value, _)]) | ("expect-text", [locator, Quoted(value, _)]) =>
+			spec_locator(locator).map_ok(|parts| parts.append(value))
+		("expect-checked", [locator, value]) | ("expect-disabled", [locator, value]) => {
+			parts = spec_locator(locator)?
+			word = match value {
+				Word("true", _) | Word("#t", _) => Ok("true")
+				Word("false", _) | Word("#f", _) => Ok("false")
+				_ => Err(spec_error(spec_position(value), "Expected true or false"))
+			}?
+			Ok(parts.append(word))
+		}
+		("files", _) => spec_texts(args, "Expected a fixture path in quotes")
+		("await-work", []) => Ok([])
+		("screenshot", [Quoted(name, pos)]) =>
+			if (valid_asset_name(name)) Ok([name]) else Err(spec_error(pos, "Expected a Windows-safe screenshot name"))
+		("wait", [value]) => spec_number(value, "wait in milliseconds", 0, 30000).map_ok(|number| [number])
+		("run-effect", [value]) | ("expect-cancelled", [value]) =>
+			spec_number(value, "effect number", 1, 4294967295).map_ok(|number| [number])
+		("tick-interval", [value]) | ("fire-timer", [value]) =>
+			spec_number(value, "period in milliseconds", 1, 4294967295).map_ok(|number| [number])
+		("advance-time", [value]) =>
+			spec_number(value, "milliseconds to advance", 0, 9223372036854775807).map_ok(|number| [number])
+		("expect-pending-effects", [value]) =>
+			spec_number(value, "expected count", 0, 4294967295).map_ok(|number| [number])
+		("expect-interval", [period, count]) => {
+			ms = spec_number(period, "interval in milliseconds", 1, 4294967295)?
+			n = spec_number(count, "expected count", 0, 4294967295)?
+			Ok([ms, n])
+		}
+		("stub-http", [Quoted(_, _), .. as options]) =>
+			spec_stub(options, { url: "", status: "200", body: "", headers: [] })
+		("fail-http", [Quoted(_, _), .. as options]) => spec_failure(options, { kind: "network", detail: "" })
+		("expect-request", [number, _, ..]) => {
+			index = spec_number(number, "effect number", 1, 4294967295)?
+			pairs = spec_request_fields(args.drop_first(1), [])?
+			Ok([index, (pairs.len() // 2).to_str()].concat(pairs))
+		}
+		_ => Err(spec_error(at, "Unknown or malformed step ${op}"))
+	}?
+	Ok({ pos: at, op, fields })
+}
+
+spec_number : SpecExpr, Str, I64, I64 -> Try(Str, SpecIssue)
+spec_number = |expr, what, lo, hi| {
+	bad = spec_error(spec_position(expr), "Expected ${what} from ${lo.to_str()} through ${hi.to_str()}")
+	match expr {
+		Word(word, _) => {
+			number = I64.from_str(word) ? |_| bad
+			if (number >= lo and number <= hi) Ok(number.to_str()) else Err(bad)
+		}
+		_ => Err(bad)
+	}
+}
+
+spec_texts : List(SpecExpr), Str -> Try(List(Str), SpecIssue)
+spec_texts = |nodes, problem| {
+	var $fields = []
+	for node in nodes {
+		match node {
+			Quoted(value, _) if !value.is_empty() => {
+				$fields = $fields.append(value)
+			}
+			_ => return Err(spec_error(spec_position(node), problem))
+		}
+	}
+	Ok($fields)
+}
+
+spec_locator : SpecExpr -> Try(List(Str), SpecIssue)
+spec_locator = |expr| {
+	parts = spec_locator_parts(expr)?
+	Ok([(parts.len() // 2).to_str()].concat(parts))
+}
+
+spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
+spec_locator_parts = |expr| {
+	kinds = ["button", "checkbox", "text-field", "text", "file-button", "image", "test-id"]
+	match expr {
+		Form([Word("within", _), outer, inner], _) => {
+			left = spec_locator_parts(outer)?
+			right = spec_locator_parts(inner)?
+			Ok(left.concat(right))
+		}
+		Form([Word(kind, _), Quoted(label, _)], _) if kinds.contains(kind) and (kind != "test-id" or !label.is_empty()) => Ok([kind, label])
+		Form([Word(kind, _)], _) if kinds.contains(kind) and kind != "test-id" => Ok([kind, ""])
+		_ => Err(spec_error(spec_position(expr), "Expected a control locator, optionally scoped with within"))
+	}
+}
+
+spec_stub : List(SpecExpr), { url : Str, status : Str, body : Str, headers : List(Str) } -> Try(List(Str), SpecIssue)
+spec_stub = |options, state| match options {
+	[] => Ok([state.url, state.status, state.body, (state.headers.len() // 2).to_str()].concat(state.headers))
+	[Word(":url", _), Quoted(url, _), .. as rest] => spec_stub(rest, { ..state, url })
+	[Word(":status", _), status, .. as rest] => {
+		code = spec_number(status, "HTTP status", 100, 999)?
+		spec_stub(rest, { ..state, status: code })
+	}
+	[Word(":body", _), Quoted(body, _), .. as rest] => spec_stub(rest, { ..state, body })
+	[Word(":headers", _), Form(values, _), .. as rest] => {
+		var $headers = []
+		for value in values {
+			match value {
+				Form([Quoted(name, _), Quoted(text, _)], _) if !name.is_empty() => {
+					$headers = $headers.concat([name, text])
+				}
+				_ => return Err(spec_error(spec_position(value), "Expected a (name value) header pair in quotes"))
+			}
+		}
+		spec_stub(rest, { ..state, headers: $headers })
+	}
+	[first, ..] => Err(spec_error(spec_position(first), "Use :url, :status, :body or :headers with a value"))
+}
+
+spec_failure : List(SpecExpr), { kind : Str, detail : Str } -> Try(List(Str), SpecIssue)
+spec_failure = |options, state| match options {
+	[] => Ok([state.kind, state.detail])
+	[Word(":kind", _), Word(kind, _), .. as rest] if ["network", "timeout"].contains(kind) =>
+		spec_failure(rest, { ..state, kind })
+	[Word(":detail", _), Quoted(detail, _), .. as rest] => spec_failure(rest, { ..state, detail })
+	[first, ..] => Err(spec_error(spec_position(first), "Use :kind network or :kind timeout and optionally :detail"))
+}
+
+spec_request_fields : List(SpecExpr), List(Str) -> Try(List(Str), SpecIssue)
+spec_request_fields = |options, fields| match options {
+	[] => Ok(fields)
+	[Word(":timeout", _), value, .. as rest] => {
+		timeout = spec_number(value, "request timeout", 0, 4294967295)?
+		spec_request_fields(rest, fields.concat(["timeout", timeout]))
+	}
+	[Word(key, _), Quoted(value, _), .. as rest] if [":method", ":url", ":body"].contains(key) =>
+		spec_request_fields(rest, fields.concat([key.drop_prefix(":"), value]))
+	[first, ..] => Err(spec_error(spec_position(first), "Use :method, :url, :body or :timeout with a value"))
+}
+
+# The CLI and native host exchange a versioned UTF-8 plan, in a file so
+# neither the size nor the quoting of Windows environment variables limits
+# scenarios. A step carries its source line, column, operation and arguments.
+spec_encode : Scenario -> List(U8)
+spec_encode = |scenario| {
+	mode = if (scenario.mode == TestMode) "test" else "demo"
+	fields = scenario.steps.fold(
+		["roc-windows-spec 1", mode, scenario.name],
+		|out, step| {
+			out.concat([step.pos.line.to_str(), step.pos.column.to_str(), (step.fields.len() + 1).to_str(), step.op]).concat(step.fields)
+		},
+	)
+	fields.fold([], |bytes, field| bytes.concat(field.to_utf8()).append(0))
+}
+
+compare_name_text = |left, right| compare_name(left.to_utf8(), right.to_utf8())
+
+fuzz! : Bool => Try({}, _)
+fuzz! = |check| {
+	target = "tests/fuzz/main.roc"
+	if !Path.is_file!(Path.utf8(target))? {
+		return Err(MissingFuzz)
+	}
+	system = System.target!()
+	match (system.os(), system.arch()) {
+		(MacOS(_), Arm64) | (Linux(_), X64) => {}
+		_ => return Err(FuzzHost)
+	}
+	ensure_dir!("build")?
+	roc!(["build", "--fuzz", target, "--output=build/fuzz"], "build the roc-fuzz suite")?
+	program = Path.absolute!(Path.utf8("build/fuzz"))?.to_os_str()
+	listed = Cmd.new(program).args([OsStr.from_str("--list-targets")]).capture!()?
+	for name in listed.split_on("\n").map(Str.trim).drop_if(Str.is_empty) {
+		operation = if (check) ["check"] else ["run", "--time=10"]
+		args = ["--target=${name}"].concat(operation).map(OsStr.from_str)
+		outcome = Cmd.new(program).args(args).inherit_stdio().run!()?
+		check_exit(outcome.status, "fuzz target ${name}")?
+	}
+	Ok({})
 }
 
 build! : Str => Try({ dir : Str, name : Str, target : Str }, _)
@@ -408,6 +971,7 @@ reserved_name = |name| {
 
 package! : PackageOptions => Try({}, _)
 package! = |options| {
+	metadata = if (options.format == Msi) msi_metadata!(options)? else empty_metadata
 	built = build!(options.target)?
 	extension = if (options.format == Msi) "msi" else "zip"
 	ensure_dir!("dist")?
@@ -418,13 +982,45 @@ package! = |options| {
 	}
 	stage = Env.create_temp_dir_in!(Path.utf8("dist"), ".windows-")?
 	file = stage.join("candidate.${extension}")
-	saved = match write_package!(built, options, stage, file) {
+	saved = match write_package!(built, options.format, metadata, stage, file) {
 		Ok({}) => Path.rename!(file, path)
 		Err(problem) => Err(problem)
 	}
 	Path.delete_all!(stage) ?? {}
 	saved?
 	Stdout.line!("Packaged ${output}")
+}
+
+empty_metadata : MsiMetadata
+empty_metadata = { id: "", version: "", publisher: "" }
+
+parse_metadata : Str -> Try(MsiMetadata, Str)
+parse_metadata = |source| {
+	fields : Dict(Str, Str)
+	fields = Json.parse(source) ? |_| "expected a JSON object with string values"
+	if fields.keys().any(|key| !["id", "version", "publisher"].contains(key)) {
+		return Err("the supported fields are id, version and publisher")
+	}
+	Ok({ id: fields.get("id") ?? "", version: fields.get("version") ?? "", publisher: fields.get("publisher") ?? "" })
+}
+
+metadata_override = |flag, setting, fallback|
+	[flag, setting].find_first(|value| !value.is_empty()) ?? fallback
+
+merge_metadata : MsiMetadata, MsiMetadata -> MsiMetadata
+merge_metadata = |flags, settings| {
+	id: metadata_override(flags.id, settings.id, ""),
+	version: metadata_override(flags.version, settings.version, "0.1.0"),
+	publisher: metadata_override(flags.publisher, settings.publisher, "Local development"),
+}
+
+msi_metadata! = |options| {
+	path = Path.utf8(app_manifest)
+	settings = if Path.exists!(path)? {
+		source = Path.read_utf8!(path)?
+		parse_metadata(source) ? |problem| InvalidManifest(problem)
+	} else empty_metadata
+	Ok(merge_metadata({ id: options.id, version: options.version, publisher: options.publisher }, settings))
 }
 
 msi_helper! = |stage| {
@@ -470,11 +1066,11 @@ download! = |url, limit| {
 	response.read_to_end!(MaxBytes(limit)).map_err(|problem| DownloadFailed(url, Str.inspect(problem)))
 }
 
-write_package! = |built, options, stage, file| {
-	if options.format == Msi {
+write_package! = |built, format, metadata, stage, file| {
+	if format == Msi {
 		helper = msi_helper!(stage)?
-		id = if (options.id.is_empty()) "org.roc-lang.local.${built.name}" else options.id
-		args = [built.target, built.name, id, options.version, options.publisher, built.dir, file.display()]
+		id = if (metadata.id.is_empty()) "org.roc-lang.local.${built.name}" else metadata.id
+		args = [built.target, built.name, id, metadata.version, metadata.publisher, built.dir, file.display()]
 		outcome = Cmd.new(OsStr.from_str(helper)).args(args.map(OsStr.from_str)).inherit_stdio().run!()?
 		check_exit(outcome.status, "MSI packaging")
 	} else {
@@ -517,43 +1113,91 @@ compare_name = |a, b|
 		([x, .. as xs], [y, .. as ys]) => if (x < y) Before else if (x > y) After else compare_name(xs, ys)
 	}
 
-init! : Str, Str => Try({}, _)
-init! = |dir, requested| {
+init! : Str, Str, Bool => Try({}, _)
+init! = |dir, requested, simple| {
 	configured = env!("ROC_WINDOWS_PLATFORM")
 	source = [requested, configured, release_platform].find_first(|candidate| !candidate.is_empty()) ?? "platform/main.roc"
 	main_path = "${dir}/src/main.roc"
-	ignore_path = "${dir}/.gitignore"
 	tool_path = "${dir}/windows.roc"
-	standalone = Path.utf8("windows.roc")
-	local_path = if (Path.is_file!(standalone)?) standalone else Path.utf8("cli/windows.roc")
-	local_tool = Path.is_file!(local_path)?
-	copy_tool = (dir != "." and local_tool) or (!local_tool and !release_launcher_sha256.is_empty())
-	for destination in [main_path, ignore_path].concat(if (copy_tool) [tool_path] else []) {
+	var $local_name = ""
+	for candidate in ["windows-${release_version}.roc", "windows.roc", "cli/windows.roc"] {
+		if Path.is_file!(Path.utf8(candidate))? {
+			$local_name = candidate
+			break
+		}
+	}
+	local_path = Path.utf8($local_name)
+	launcher_source = match (release_launcher_sha256, $local_name, dir) {
+		("", "", _) | ("", "windows.roc", ".") => Skip
+		("", _, _) => Local
+		(_, _, _) => Release
+	}
+	source_ref = platform_source!(source, "${dir}/src")?
+	files = if simple {
+		[{ path: "src/main.roc", bytes: simple_counter(source_ref).to_utf8() }]
+	} else {
+		template = scaffold!(release_scaffold)?
+		project = app_name(Path.absolute!(Path.utf8(dir))?.display())
+		template.map(
+			|file|
+				if file.path == "src/main.roc" {
+					{ ..file, bytes: starter_entry(file.bytes, source_ref) }
+				} else if file.path == app_manifest {
+					text = Str.from_utf8_lossy(file.bytes).replace_each("\"com.example.reading-list\"", "\"com.example.${project}\"")
+					{ ..file, bytes: text.to_utf8() }
+				} else file,
+		)
+	}
+	all = files.append({ path: ".gitignore", bytes: "/build/\n/dist/\n/.roc-fuzz/\n".to_utf8() })
+	for destination in all.map(|file| "${dir}/${file.path}").concat(if (launcher_source == Skip) [] else [tool_path]) {
 		if Path.exists!(Path.utf8(destination))? {
 			return Err(InitConflict(destination))
 		}
 	}
-	source_ref = platform_source!(source, "${dir}/src")?
-	launcher = if copy_tool and !local_tool {
-		bytes = download!(release_launcher, 1024 * 1024)?
-		if Crypto.SHA256.hash(bytes).to_hex() != release_launcher_sha256 {
-			return Err(DownloadDigest(release_launcher))
+	launcher = match launcher_source {
+		Release => {
+			bytes = download!(release_launcher, 1024 * 1024)?
+			if Crypto.SHA256.hash(bytes).to_hex() != release_launcher_sha256 {
+				return Err(DownloadDigest(release_launcher))
+			}
+			bytes
 		}
-		bytes
-	} else []
-	ensure_dir!(dir)?
-	ensure_dir!("${dir}/src")?
-	Path.write_utf8!(Path.utf8(main_path), starter(source_ref))?
-	Path.write_utf8!(Path.utf8(ignore_path), "/build/\n/dist/\n")?
-	if copy_tool {
-		if local_tool {
-			Path.copy!(local_path, Path.utf8(tool_path))?
-		} else {
-			Path.write_bytes!(Path.utf8(tool_path), launcher)?
+		Local | Skip => []
+	}
+	for file in all {
+		destination = Path.utf8("${dir}/${file.path}")
+		parent = Path.parent(destination) ? |_| InitConflict(destination.display())
+		Path.create_all!(parent)?
+		Path.write_bytes!(destination, file.bytes)?
+	}
+	match launcher_source {
+		Release => Path.write_bytes!(Path.utf8(tool_path), launcher)?
+		Local => {
+			_ = Path.copy!(local_path, Path.utf8(tool_path))?
 		}
+		Skip => {}
 	}
 	Stdout.line!("Created ${main_path}. Run roc windows.roc build from ${dir}.")
 }
+
+scaffold! : List(ScaffoldFile) => Try(List(ScaffoldFile), _)
+scaffold! = |embedded| match embedded {
+	[] => {
+		root = "examples/starter"
+		manifest = Path.read_utf8!(Path.utf8("${root}/scaffold.txt")) ? |_| MissingScaffold
+		var $files = []
+		for path in manifest.split_on("\n").map(Str.trim).drop_if(Str.is_empty) {
+			bytes = Path.read_bytes!(Path.utf8("${root}/${path}"))?
+			$files = $files.append({ path, bytes })
+		}
+		Ok($files)
+	}
+	files => Ok(files)
+}
+
+starter_entry : List(U8), Str -> List(U8)
+starter_entry = |entry, source|
+	Str.from_utf8_lossy(entry).replace_each("../../../platform/main.roc", source).to_utf8()
 
 platform_source! : Str, Str => Try(Str, _)
 platform_source! = |source, from| {
@@ -631,8 +1275,8 @@ app_name = |root| {
 	}
 }
 
-starter : Str -> Str
-starter = |source_ref|
+simple_counter : Str -> Str
+simple_counter = |source_ref|
 	\\app [main] { pf: platform "${source_ref}" }
 	\\
 	\\import pf.Engine exposing [Elem, In, Root, State]
@@ -662,6 +1306,12 @@ explain = |problem|
 		BadExecutable(reason) => "Roc did not produce a usable Windows executable (${reason})."
 		MissingExecutable(path) => "Roc did not produce the executable at ${path}."
 		MissingEntry => "Expected src/main.roc or main.roc in the current directory."
+		SpecProblem(location, detail) => "${location}: ${detail}"
+		SpecSuiteFailed(count) => "${count.to_str()} native scenarios failed."
+		RecordRequiresWindows => "Recording requires a Windows x64 or ARM64 machine."
+		MissingFuzz => "Expected a roc-fuzz app at tests/fuzz/main.roc."
+		FuzzHost => "The bundled roc-fuzz suite runs on Apple Silicon macOS or x64 Linux."
+		MissingScaffold => "Use the released tool or run init from the platform checkout. Pass --simple for a minimal counter."
 		RunRequiresWindows => "Run requires a Windows x64 or ARM64 machine. You can use build here."
 		CompilerMissing(compiler) => "Could not find ${compiler}. Put Roc on PATH or set ROC_WINDOWS_ROC."
 		PackagerMissing(helper) => "Could not find ${helper}. Put roc-windows-msi on PATH or set ROC_WINDOWS_MSI to its path. From a platform checkout, build it with blueprint run packager."
@@ -671,6 +1321,7 @@ explain = |problem|
 		ExpectedDirectory(path) => "Expected a directory at ${path}."
 		InvalidAsset(path) => "Expected a regular file or directory with a Windows-safe name at ${path}."
 		InvalidOutput(path) => "Expected a regular file at ${path}."
+		InvalidManifest(detail) => "${app_manifest}: ${detail}."
 		BuildRecovery(path) => "Could not restore the previous build. It is saved at ${path}."
 		ArchiveFailed(why) => "Could not create a ZIP archive (${why})."
 		InitConflict(path) => "Refusing to overwrite ${path}."
@@ -681,9 +1332,67 @@ explain = |problem|
 		other => Str.inspect(other)
 	}
 
+expect {
+	source = "; utf-8 labels and Windows line endings\r\n(test \"Café\"\r\n  (steps (fill (text-field \"Title\") \"quoted \\\"text\\\"\\n\\tab\")))"
+	scenario = spec_parse("tests/specs/reading.scm", source)
+	fields = ["roc-windows-spec 1", "test", "Café", "3", "10", "5", "fill", "1", "text-field", "Title", "quoted \"text\"\n\tab"]
+	expected = fields.fold([], |bytes, field| bytes.concat(field.to_utf8()).append(0))
+	scenario.map_ok(spec_encode) == Ok(expected)
+}
+
+expect spec_parse("broken.scm", "(test \"a\"\n  (steps\n    (clik (button \"Add\"))))") ==
+	Err({ pos: { line: 3, column: 5 }, message: "Unknown or malformed step clik" })
+
+expect {
+	source =
+		\\(demo "run"
+		\\  (setup (window-size 640 480) (live-effects http))
+		\\  (steps
+		\\    (expect-checked (within (test-id "row") (checkbox "Read")) #t)
+		\\    (stub-http "OK" :url "http://localhost/" :status 201 :headers (("content-type" "text/plain")))
+		\\    (expect-request 1 :method "GET" :timeout 25)
+		\\    (fail-http "refused" :kind network :detail "Connection refused")))
+		\\
+	spec_parse("demo.scm", source).map_ok(
+		|scenario| {
+			mode: scenario.mode,
+			steps: scenario.steps.map(|step| (step.op, step.fields)),
+		},
+	) == Ok({
+		mode: DemoMode,
+		steps: [
+			("setup-window-size", ["640", "480"]),
+			("setup-live-effects", ["http"]),
+			("expect-checked", ["2", "test-id", "row", "checkbox", "Read", "true"]),
+			("stub-http", ["http://localhost/", "201", "", "1", "content-type", "text/plain"]),
+			("expect-request", ["1", "2", "method", "GET", "timeout", "25"]),
+			("fail-http", ["network", "Connection refused"]),
+		],
+	})
+}
+
+expect {
+	invalid = [
+		"(test \"a\" (steps))",
+		"(test \"a\" (steps (await-work))) trailing",
+		"(test \"a\" (steps (screenshot \"../outside\")))",
+		"(test \"a\" (steps (expect-checked (checkbox \"X\") yes)))",
+		"(test \"a\" (steps (advance-time -1)))",
+		"(test \"a\" (steps (expect-visible (test-id \"\"))))",
+		"(test \"a\" (steps (files \"\")))",
+		"(test \"a\" (steps (files \"bad\\z\")))",
+		"(test \"a\" (steps (await-work))",
+	]
+	invalid.all(|source| spec_parse("invalid.scm", source).is_err())
+}
+
 expect parse_text(["build", "--target", "arm64mingw"]) == Ok(Build("arm64mingw"))
 expect parse_text(["run", "--target=x64mingw"]) == Ok(Run("x64mingw"))
-expect parse_text(["test"]) == Ok(Test)
+expect parse_text(["test"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, target: "" }))
+expect parse_text(["test", "--check"]) == Ok(Test({ check: Bool.True, failure_screenshot: Bool.False, target: "" }))
+expect parse_text(["record", "tests/specs/demo.scm", "--format", "png"]) == Ok(Record("tests/specs/demo.scm", Png, ""))
+expect parse_text(["test", "--target", "arm64mingw", "--screenshot-on-failure"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.True, target: "arm64mingw" }))
+expect parse_text(["record", "--target", "arm64mingw", "tests/specs/demo.scm"]) == Ok(Record("tests/specs/demo.scm", Gif, "arm64mingw"))
 expect parse_text(["help"]) == Ok(Help)
 expect parse_text([]) == Ok(Help)
 expect {
@@ -698,16 +1407,20 @@ expect {
 		_ => Bool.False
 	}
 }
-expect parse_text(["package"]) == Ok(Package({ target: "", format: Msi, id: "", version: "0.1.0", publisher: "Local development" }))
-expect parse_text(["package", "--format", "zip", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", format: Zip, id: "", version: "0.1.0", publisher: "Local development" }))
+expect parse_text(["package"]) == Ok(Package({ target: "", format: Msi, id: "", version: "", publisher: "" }))
+expect parse_text(["package", "--format", "zip", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", format: Zip, id: "", version: "", publisher: "" }))
+expect parse_metadata("{\"id\":\"com.example.app\",\"version\":\"1.2.3\"}") == Ok({ id: "com.example.app", version: "1.2.3", publisher: "" })
+expect parse_metadata("{\"id\": 1}").is_err()
+expect parse_metadata("{\"product\":\"App\"}").is_err()
+expect merge_metadata({ ..empty_metadata, version: "2.0.0" }, { id: "com.example.app", version: "1.2.3", publisher: "" }) == { id: "com.example.app", version: "2.0.0", publisher: "Local development" }
 expect {
 	match parse_text(["package", "--format", "exe"]) {
 		Err(InvalidUsage(message)) => message.contains("--format") and message.contains("msi or zip")
 		_ => Bool.False
 	}
 }
-expect parse_text(["init", "--platform", "platform/main.roc", "starter"]) == Ok(Init("starter", "platform/main.roc"))
-expect parse_text(["init", "starter", "--platform", "platform/main.roc"]) == Ok(Init("starter", "platform/main.roc"))
+expect parse_text(["init", "--platform", "platform/main.roc", "starter"]) == Ok(Init("starter", "platform/main.roc", Bool.False))
+expect parse_text(["init", "starter", "--simple", "--platform", "platform/main.roc"]) == Ok(Init("starter", "platform/main.roc", Bool.True))
 expect relative_to("/dev/demo/src", "/dev/platform/main.roc") == Ok("../../platform/main.roc")
 expect relative_to("C:\\dev\\demo\\src", "D:\\platform\\main.roc") == Err(DifferentDrive)
 expect relative_to("C:\\dev\\demo\\src", "C:\\dev\\platform\\main.roc") == Ok("../../platform/main.roc")
