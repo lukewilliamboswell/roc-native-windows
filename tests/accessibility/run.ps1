@@ -1,6 +1,7 @@
 param(
     [string] $Roc = "roc",
     [ValidateSet("x64mingw", "arm64mingw")] [string] $Target,
+    [ValidateSet("speed", "size")] [string] $BuildProfile = "speed",
     [ValidateSet("counter", "starter", "todos", "files", "http", "workers", "progress")] [string[]] $Example,
     [string] $Starter,
     [switch] $FreshStarter,
@@ -46,7 +47,7 @@ Write-Output "Windows build $($windows.CurrentBuild).$($windows.UBR), OS $archit
 function Invoke-ExampleProbe($name, $directory, $tool, $label) {
     Push-Location $directory
     try {
-        & $Roc $tool -- build --target $Target
+        & $Roc $tool -- build --target $Target --profile $BuildProfile
         if ($LASTEXITCODE -ne 0) { throw "Could not build $label for $Target." }
         $exe = @(Get-ChildItem -File "build/$Target" -Filter "*.exe")
         if ($exe.Count -ne 1) { throw "Expected exactly one built executable for $label in build/$Target." }
