@@ -20,7 +20,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::UpdateWindow;
-use windows_sys::Win32::UI::Controls::TCN_SELCHANGE;
+use windows_sys::Win32::UI::Controls::{TCN_SELCHANGE, WM_MOUSEHOVER, WM_MOUSELEAVE};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -300,14 +300,28 @@ impl Windows {
                     self.exited = true;
                     return Ok(());
                 }
-                if !(WM_KEYFIRST..=WM_KEYLAST).contains(&message.message) {
-                    TranslateMessage(&message);
+                // Spec steps deliver input directly. Keep system and app
+                // messages flowing without applying queued desktop input.
+                if !desktop_input(message.message) {
                     DispatchMessageW(&message);
                 }
             }
         }
         Ok(())
     }
+}
+
+fn desktop_input(message: u32) -> bool {
+    matches!(
+        message,
+        WM_KEYFIRST..=WM_KEYLAST
+            | WM_MOUSEFIRST..=WM_MOUSELAST
+            | WM_NCMOUSEMOVE..=WM_NCXBUTTONDBLCLK
+            | WM_MOUSEHOVER
+            | WM_MOUSELEAVE
+            | WM_NCMOUSEHOVER
+            | WM_NCMOUSELEAVE
+    )
 }
 
 fn pump(windows: &mut Windows, capture: &mut Capture, started: Instant) -> Result<()> {
@@ -1227,5 +1241,75 @@ fn expect<T: PartialEq + Debug>(actual: T, expected: T) -> Result<()> {
         Ok(())
     } else {
         Err(format!("expected {expected:?}, observed {actual:?}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+
+    const CHECKPOINT: u32 = WM_APP + 1;
+
+    unsafe extern "system" fn observe(
+        window: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _: usize,
+        data: usize,
+    ) -> LRESULT {
+        // SAFETY: The test owns the data until after the subclass window is destroyed.
+        unsafe {
+            if matches!(
+                message,
+                WM_KEYDOWN | WM_MOUSEWHEEL | WM_NCLBUTTONDOWN | CHECKPOINT
+            ) {
+                (*(data as *const RefCell<Vec<u32>>))
+                    .borrow_mut()
+                    .push(message);
+                return 0;
+            }
+            DefSubclassProc(window, message, wparam, lparam)
+        }
+    }
+
+    #[test]
+    fn scenario_message_loop_ignores_queued_desktop_input() {
+        let observed = RefCell::<Vec<u32>>::default();
+        let window = unsafe {
+            // SAFETY: STATIC is a system window class. Using a hidden window avoids
+            // moving desktop focus while exercising the actual Win32 queue.
+            OwnedWindow(CreateWindowExW(
+                0,
+                windows_sys::w!("STATIC"),
+                std::ptr::null(),
+                WS_POPUP,
+                0,
+                0,
+                16,
+                16,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                std::ptr::null(),
+            ))
+        };
+        assert!(!window.0.is_null());
+        // SAFETY: This test owns the window and observer on the current thread.
+        unsafe {
+            assert_ne!(
+                SetWindowSubclass(window.0, Some(observe), 1, &raw const observed as usize),
+                0
+            );
+            for message in [WM_KEYDOWN, WM_MOUSEWHEEL, WM_NCLBUTTONDOWN, CHECKPOINT] {
+                assert_ne!(PostMessageW(window.0, message, 0, 0), 0);
+            }
+        }
+        Windows::new((16, 16), false).messages().unwrap();
+        assert_eq!(*observed.borrow(), [CHECKPOINT]);
     }
 }

@@ -1362,6 +1362,16 @@ pub(crate) unsafe extern "system" fn window_proc(
     // SAFETY: The OS calls this on its window's UI thread with documented
     // WPARAM/LPARAM payloads. Nested callbacks skip app state if busy.
     unsafe {
+        if message == WM_MOUSEACTIVATE
+            && APP.with(|state| {
+                state.try_borrow().is_ok_and(|app| {
+                    app.as_ref()
+                        .is_some_and(|app| app.driven && app.surface.for_handle(hwnd).is_some())
+                })
+            })
+        {
+            return MA_NOACTIVATEANDEAT as LRESULT;
+        }
         let theme_change = matches!(
             message,
             WM_THEMECHANGED | WM_SYSCOLORCHANGE | WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED

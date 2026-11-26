@@ -109,15 +109,11 @@ impl App {
             && let Some(target) = self.input_target(drag.key, Phase::Cancel)
             && target.hwnd == drag.hwnd as usize
         {
+            let modifiers = if drag.native { native::modifiers() } else { 0 };
             self.input.queue.push(Packet {
                 target,
                 phase: Phase::Cancel,
-                payload: surface_input::pointer_payload(
-                    Phase::Cancel,
-                    None,
-                    0,
-                    native::modifiers(),
-                ),
+                payload: surface_input::pointer_payload(Phase::Cancel, None, 0, modifiers),
             });
         }
     }
