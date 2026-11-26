@@ -66,63 +66,72 @@ view = || {
 					],
 				),
 			),
-			Win.Ui.combo_box({
-				label: "Status filter",
-				choices: Engine.const([
-					Win.Ui.Choice.{ key: "all", label: "All statuses" },
-					Win.Ui.Choice.{ key: "unread", label: "Unread" },
-					Win.Ui.Choice.{ key: "read", label: "Read" },
-				]),
-				selected: filter,
-				on_select: Engine.handle(|value| [cells.filter.set(value)]),
-			}),
-			Win.Ui.toolbar(
-				{ label: "Reading list actions" },
-				[
-					Win.Ui.toolbar_button(
-						active.map(
-							|result| match result {
-								Ok(item) if item.read => "Mark unread"
-								_ => "Mark read"
-							},
+			Win.Ui.panel(
+				design.browse_panel,
+				Win.Ui.vstack(
+					design.browse,
+					[
+						Win.Ui.combo_box({
+							label: "Status filter",
+							choices: Engine.const([
+								Win.Ui.Choice.{ key: "all", label: "All statuses" },
+								Win.Ui.Choice.{ key: "unread", label: "Unread" },
+								Win.Ui.Choice.{ key: "read", label: "Read" },
+							]),
+							selected: filter,
+							on_select: Engine.handle(|value| [cells.filter.set(value)]),
+						}),
+						Win.Ui.toolbar(
+							{ label: "Reading list actions" },
+							[
+								Win.Ui.toolbar_button(
+									active.map(
+										|result| match result {
+											Ok(item) if item.read => "Mark unread"
+											_ => "Mark read"
+										},
+									),
+									{
+										key: "mark",
+										icon: active.map(
+											|result| match result {
+												Ok(item) if !item.read => IconAsset(Win.asset("app-icon"))
+												_ => NoIcon
+											},
+										),
+										enabled: active.map(Try.is_ok),
+										on_press: Engine.handle_by(
+											active,
+											|result, _| match result {
+												Ok(item) => [change(Toggle(item.title))]
+												Err(_) => []
+											},
+										),
+									},
+								),
+								Win.Ui.toolbar_button(
+									"Remove",
+									{
+										key: "remove",
+										enabled: active.map(Try.is_ok),
+										on_press: Engine.handle_by(
+											active,
+											|result, _| match result {
+												Ok(item) => [change(Remove(item.title)), cells.selected.set(NoSelection)]
+												Err(_) => []
+											},
+										),
+									},
+								),
+							],
 						),
-						{
-							key: "mark",
-							icon: active.map(
-								|result| match result {
-									Ok(item) if !item.read => IconAsset(Win.asset("app-icon"))
-									_ => NoIcon
-								},
-							),
-							enabled: active.map(Try.is_ok),
-							on_press: Engine.handle_by(
-								active,
-								|result, _| match result {
-									Ok(item) => [change(Toggle(item.title))]
-									Err(_) => []
-								},
-							),
-						},
-					),
-					Win.Ui.toolbar_button(
-						"Remove",
-						{
-							key: "remove",
-							enabled: active.map(Try.is_ok),
-							on_press: Engine.handle_by(
-								active,
-								|result, _| match result {
-									Ok(item) => [change(Remove(item.title)), cells.selected.set(NoSelection)]
-									Err(_) => []
-								},
-							),
-						},
-					),
-				],
+					],
+				),
 			),
 			Win.Ui.list_view(
 				{
 					label: "Titles",
+					visible_rows: 6,
 					columns: [{ key: "title", heading: "Title" }, { key: "status", heading: "Status" }],
 					selected,
 					on_select: Engine.handle(|selection| [cells.selected.set(selection)]),
