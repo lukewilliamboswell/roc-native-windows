@@ -41,8 +41,7 @@ if (-not $Example) {
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $env:ROC_WINDOWS_ROC = $Roc
 $windows = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-$architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-Write-Output "Windows build $($windows.CurrentBuild).$($windows.UBR), OS $architecture, PowerShell $env:PROCESSOR_ARCHITECTURE, app target $Target"
+Write-Output "Windows build $($windows.CurrentBuild).$($windows.UBR), app target $Target"
 
 function Invoke-ExampleProbe($name, $directory, $tool, $label) {
     Push-Location $directory

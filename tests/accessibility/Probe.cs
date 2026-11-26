@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -15,6 +16,14 @@ public static class RocWindowsAccessibility
     {
         Require(Thread.CurrentThread.GetApartmentState() == ApartmentState.MTA,
                 "The UI Automation client requires an MTA thread.");
+        using (var client = Process.GetCurrentProcess())
+        {
+            ushort native;
+            var appMachine = ProcessMachine(process, out native);
+            var clientMachine = ProcessMachine(client, out native);
+            Console.WriteLine("OS {0}, app {1}, UI Automation client {2}, session {3}",
+                MachineName(native), MachineName(appMachine), MachineName(clientMachine), client.SessionId);
+        }
         var window = WaitFor("visible app window", () =>
         {
             process.Refresh();
@@ -24,6 +33,9 @@ public static class RocWindowsAccessibility
             return element.Current.ProcessId == process.Id && !element.Current.IsOffscreen
                 ? element : null;
         });
+
+        if (example == "starter" || example == "todos" || example == "http" || example == "workers")
+            EnsureForeground(window);
 
         switch (example)
         {
@@ -38,6 +50,60 @@ public static class RocWindowsAccessibility
         }
     }
 
+    private static ushort ProcessMachine(Process process, out ushort nativeMachine)
+    {
+        ushort machine;
+        if (!IsWow64Process2(process.Handle, out machine, out nativeMachine))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not query the process architecture.");
+        return machine == 0 ? nativeMachine : machine;
+    }
+
+    private static string MachineName(ushort machine)
+    {
+        switch (machine)
+        {
+            case 0x014c: return "x86";
+            case 0x8664: return "x64";
+            case 0xaa64: return "ARM64";
+            default: return "0x" + machine.ToString("x4");
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWow64Process2(IntPtr process, out ushort machine, out ushort nativeMachine);
+
+    private static void EnsureForeground(AutomationElement window)
+    {
+        var expected = new IntPtr(window.Current.NativeWindowHandle);
+        var appPid = window.Current.ProcessId;
+        Require(expected != IntPtr.Zero, "The app's UI Automation root has no native window handle.");
+        if (GetForegroundWindow() == expected) return;
+        var activated = SetForegroundWindow(expected);
+        WaitFor("the app owns the interactive desktop foreground", () =>
+            GetForegroundWindow() == expected ? window : null,
+            () => String.Format("Expected HWND 0x{0:x}, PID {1}. SetForegroundWindow returned {2}. {3}",
+                expected.ToInt64(), appPid, activated, ForegroundWindowDetails()));
+    }
+
+    private static string ForegroundWindowDetails()
+    {
+        var foreground = GetForegroundWindow();
+        uint pid;
+        GetWindowThreadProcessId(foreground, out pid);
+        return String.Format("Observed foreground HWND 0x{0:x}, PID {1}.", foreground.ToInt64(), pid);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
     private static void Counter(AutomationElement root)
     {
         Find(root, "Decrease", ControlType.Button);
@@ -51,8 +117,7 @@ public static class RocWindowsAccessibility
         var title = Find(root, "Title", ControlType.Edit);
         var label = title.GetCurrentPropertyValue(AutomationElement.LabeledByProperty) as AutomationElement;
         Require(label != null && label.Current.Name == "Title", "Title has no associated visible label.");
-        title.SetFocus();
-        WaitFor("Title keyboard focus", () => title.Current.HasKeyboardFocus ? title : null);
+        FocusControl(title);
         using (var change = new AutoResetEvent(false))
         {
             AutomationPropertyChangedEventHandler handler = (sender, args) =>
@@ -121,15 +186,14 @@ public static class RocWindowsAccessibility
         PostKey(time, 0x0d);
         WaitFor("valid time is committed", () => time.Current.HelpText == timeHint && Value(time) != ""
             ? time : null);
-        date.SetFocus();
+        FocusControl(date);
         SetValue(date, "");
         PostKey(date, 0x0d);
         WaitFor("clearing the date clears the time and restores both hints", () =>
             date.Current.HelpText == dateHint && time.Current.HelpText == timeHint &&
             Value(date) == "" && Value(time) == "" && !time.Current.IsEnabled ? date : null);
         var chooser = Find(root, "Choose date", ControlType.Button);
-        chooser.SetFocus();
-        WaitFor("date chooser takes focus", () => chooser.Current.HasKeyboardFocus ? chooser : null);
+        FocusControl(chooser);
         PostKey(chooser, 0x0d);
         var calendar = WaitFor("owned date chooser", () => ActivePopup(root, "Choose date for New due date"));
         Find(calendar, "Cancel", ControlType.Button);
@@ -154,7 +218,7 @@ public static class RocWindowsAccessibility
         WaitFor("aggregate checkbox reports a mixed state", () =>
             aggregate.Current.ToggleState == ToggleState.Indeterminate ? all : null);
         var opener = Find(root, "Notes for Accessibility task", ControlType.Button);
-        opener.SetFocus();
+        FocusControl(opener);
         Invoke(opener);
         var dialog = WaitFor("owned Notes window", () => ActivePopup(root, "Notes for Accessibility task"));
         var notes = Find(dialog, "Notes", ControlType.Document, ControlType.Edit);
@@ -167,7 +231,7 @@ public static class RocWindowsAccessibility
 
     private static void CheckCivilValidation(AutomationElement field, string invalid, string error, string hint)
     {
-        field.SetFocus();
+        FocusControl(field);
         SetValue(field, invalid);
         PostKey(field, 0x0d);
         WaitFor(error + " is exposed on the edit", () =>
@@ -273,7 +337,7 @@ public static class RocWindowsAccessibility
         {
             var url = Find(root, "URL", ControlType.Edit);
             SetValue(url, response.Url);
-            url.SetFocus();
+            FocusControl(url);
             var live = AutomationElementIdentifiers.LiveRegionChangedEvent;
             Require(live != null, "This UI Automation client does not support LiveRegionChanged.");
             int completed = 0;
@@ -306,10 +370,12 @@ public static class RocWindowsAccessibility
                     animations ? ControlType.ProgressBar : ControlType.Text);
                 Require(!progress.Current.IsOffscreen, "The request progress indicator is offscreen.");
                 var focused = AutomationElement.FocusedElement;
+                Require(focused != null && focused.Current.ProcessId == root.Current.ProcessId,
+                        "The app lost keyboard focus before request completion. " + ForegroundWindowDetails());
                 response.Complete.Set();
                 Require(changed.WaitOne(8000), "HTTP completion did not raise a live-region event.");
                 Require(!changed.WaitOne(350) && completed == 1, "HTTP completion was announced more than once.");
-                Require(focused != null && Automation.Compare(focused, AutomationElement.FocusedElement),
+                Require(Automation.Compare(focused, AutomationElement.FocusedElement),
                         "Status feedback moved focus from the control that held it during the request.");
             }
             finally { Automation.RemoveAutomationEventHandler(live, root, handler); }
@@ -379,7 +445,7 @@ public static class RocWindowsAccessibility
         Require(Value(sameCell) == "7" && identity.SequenceEqual(sameCell.GetRuntimeId()),
                 "Rejected edit changed the committed value or live cell identity.");
         sameCell.SetFocus();
-        WaitFor("Counted cell takes focus", () => CurrentFocus(sameCell));
+        WaitFor("Counted cell takes focus", () => CurrentFocus(sameCell), ForegroundWindowDetails);
         PostKey(grid, 0x71); // F2 enters a native EDIT.
         var editor = WaitFor("native Counted editor takes focus", () =>
         {
@@ -464,6 +530,13 @@ public static class RocWindowsAccessibility
     {
         var focused = AutomationElement.FocusedElement;
         return focused != null && Automation.Compare(focused, expected) ? focused : null;
+    }
+
+    private static void FocusControl(AutomationElement control)
+    {
+        control.SetFocus();
+        WaitFor(control.Current.Name + " takes keyboard focus", () =>
+            control.Current.HasKeyboardFocus ? control : null, ForegroundWindowDetails);
     }
 
     private static void PostKey(AutomationElement target, int key)
