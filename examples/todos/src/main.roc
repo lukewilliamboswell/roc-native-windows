@@ -51,37 +51,50 @@ view = || {
 		|{ draft: text, due_date: date, due_time: time, id }| { id, title: text.trim(), done: Bool.False, notes: "", due_date: date, due_time: time },
 	)
 	content = Win.Ui.vstack(
-		{ padding: 16, spacing: 12 },
+		{ padding: 20, spacing: 12 },
 		[
 			Win.Ui.hstack(
 				{ spacing: 12 },
 				[
 					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Decorative, width: 32, height: 32 }),
-					Win.Ui.text_with("To-do list", { style: Heading }),
-				],
-			),
-			Win.Ui.text_with(todos.map(TaskList.remaining), { style: Caption, tone: SecondaryText }),
-			Win.Ui.aggregate_checkbox(
-				"Complete all visible tasks",
-				{
-					state: todos.map(TaskList.completion),
-					enabled: todos.map(|all| !all.is_empty()),
-					on_change: Engine.handle(|done| [cells.todos.update(|all| all.map(|task| { ..task, done }))]),
-				},
-			),
-			Win.Ui.hstack(
-				{},
-				[
-					Win.Ui.text_field(draft, { label: "New to-do", placeholder: "What needs doing?", on_input: Engine.handle(|text| [cells.draft.set(text)]) }),
-					Win.Ui.button("Add", { enabled: new_todo.map(|t| !t.title.is_empty()), on_press: Engine.handle_by(new_todo, |todo, _| add(todo)) }),
+					Win.Ui.text_with("To-do list", { style: Title }),
 				],
 			),
 			Win.Ui.hstack(
-				{},
+				{ spacing: 16, stack_below: 304 },
 				[
-					Win.Ui.date_field(due_date, { label: "New due date", on_change: Engine.handle(draft_date) }),
-					Win.Ui.time_field(due_time, { label: "New due time", enabled: due_date.map(TaskList.has_due_date), on_change: Engine.handle(|time| [cells.due_time.set(time)]) }),
+					Win.Ui.text_with(todos.map(TaskList.remaining), { style: Heading, tone: AccentText }),
+					Win.Ui.aggregate_checkbox(
+						"Complete all visible tasks",
+						{
+							state: todos.map(TaskList.completion),
+							enabled: todos.map(|all| !all.is_empty()),
+							on_change: Engine.handle(|done| [cells.todos.update(|all| all.map(|task| { ..task, done }))]),
+						},
+					),
 				],
+			),
+			Win.Ui.panel(
+				{ surface: AccentTint, border: Outline, width: Fill },
+				Win.Ui.vstack(
+					{ spacing: 8 },
+					[
+						Win.Ui.hstack(
+							{ stack_below: 280 },
+							[
+								Win.Ui.text_field(draft, { label: "New to-do", placeholder: "What needs doing?", on_input: Engine.handle(|text| [cells.draft.set(text)]) }),
+								Win.Ui.button("Add", { enabled: new_todo.map(|t| !t.title.is_empty()), on_press: Engine.handle_by(new_todo, |todo, _| add(todo)) }),
+							],
+						),
+						Win.Ui.hstack(
+							{ stack_below: 420 },
+							[
+								Win.Ui.date_field(due_date, { label: "New due date", on_change: Engine.handle(draft_date) }),
+								Win.Ui.time_field(due_time, { label: "New due time", enabled: due_date.map(TaskList.has_due_date), on_change: Engine.handle(|time| [cells.due_time.set(time)]) }),
+							],
+						),
+					],
+				),
 			),
 			notes_panel(),
 			Engine.each(
@@ -118,11 +131,11 @@ todo_row = |item| {
 	today = cells.clock.signal().map(|sample| TaskList.project_date(sample.zone, sample.now))
 	date = item.map(|todo| todo.due_date)
 	detail = { item, today }.Signal.map(|reading| TaskList.due_summary(reading.item, reading.today))
-	Win.Ui.vstack(
-		{ spacing: 4, padding: 4 },
+	content = Win.Ui.vstack(
+		{ spacing: 6 },
 		[
 			Win.Ui.hstack(
-				{},
+				{ stack_below: 400 },
 				[
 					Win.Ui.checkbox(
 						item.map(|todo| todo.title),
@@ -136,7 +149,7 @@ todo_row = |item| {
 				],
 			),
 			Win.Ui.hstack(
-				{},
+				{ stack_below: 420 },
 				[
 					Win.Ui.date_field(
 						date,
@@ -158,6 +171,7 @@ todo_row = |item| {
 			Win.Ui.text_with(detail, { style: Caption, tone: SecondaryText }),
 		],
 	)
+	Win.Ui.panel({ border: Outline, width: Fill, padding: 10 }, content)
 }
 
 notes_panel : () -> Elem(Engine.StoreRoot(_))
