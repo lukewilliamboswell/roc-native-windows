@@ -12,6 +12,26 @@ the outermost element to set its title, close behaviour, or chrome.
 `title` defaults to `AppTitle`, which uses the application's configured
 display name. Use `Title(text)` to supply a title from an app signal.
 
+The optional `startup` record requests placement and state when a window
+opens. This example opens maximized on the monitor Windows chooses.
+
+[source,roc]
+----
+Ui.window({ startup: { position: Centered, state: Maximized } }, content)
+----
+
+* `position` defaults to `SystemPosition`. `Centered` centers the window
+  in the chosen monitor's work area. `At({ x, y })` takes signed
+  virtual-screen pixels. Windows uses the monitor containing or nearest
+  that point and fits the starting window into its work area.
+* `state` defaults to `Normal`. `Minimized` opens without taking focus,
+  and `Maximized` uses the normal Windows title bar and taskbar work area.
+  `Fullscreen` opens borderless at monitor size. Use `At` to choose a
+  specific monitor for fullscreen and Alt+F4 to request close.
+
+Placement is applied when each independent window mounts. Scenario and
+recording windows use the spec's scripted geometry and visibility.
+
 Use `Ui.windows(declarations)` at the root for independent windows sharing
 one app store. For example, use `Engine.each` with a stable key per window
 and return a `Ui.window` from each row. A managed window requires
