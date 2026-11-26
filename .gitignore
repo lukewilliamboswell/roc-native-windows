@@ -1,0 +1,8 @@
+/.blueprint/
+/build/
+/dist/
+/host/target/
+/platform/targets/
+/examples/*/build/
+/examples/*/dist/
+.zig-cache/
