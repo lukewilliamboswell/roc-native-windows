@@ -156,6 +156,41 @@ Before publication, validate one exact set of versioned release assets.
 Collect the native Windows run results, dependency license texts, SBOMs,
 and provenance alongside the installer and bootstrap checks.
 
+[#windows-diagnostics]
+== Diagnose a local Windows build
+
+Use the example's `build/x64mingw/` or `build/arm64mingw/` executable from
+the commit under test. Save traces and local tools under the ignored
+repository-root `build/windows-diagnostics/` directory.
+
+* For a UI Automation failure, open the example and use Live Inspect in
+  https://accessibilityinsights.io/downloads/[Accessibility Insights for Windows].
+  Inspect the control's name, relationships, patterns, and events around the
+  failing action. Compare them with the out-of-process probe and the
+  xref:accessibility.adoc#verify-uia[keyboard and Narrator walkthrough].
+* For a slow or unresponsive app, use `wpr -profiles` to find a recording
+  profile. From an elevated PowerShell, check `wpr -status`, then start a CPU
+  recording with `wpr -start CPU -filemode`. Reproduce the action once and
+  use `wpr -stop build/windows-diagnostics/workers.etl`. Open the trace in
+  WPA and filter to the app's process. WPA is available through the
+  https://learn.microsoft.com/en-us/windows-hardware/test/wpt/[Windows Performance Toolkit].
+* For suspected Win32 heap, handle, or lock misuse, use the Windows SDK's
+  https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/application-verifier-testing-applications[Application Verifier].
+  Give a copy of the app a unique executable name, enable its Basics tests,
+  and launch it under a debugger. Delete the settings for that name when
+  finished with `appverif -delete settings -for workers-verifier.exe`.
+* For image metadata and hashes, extract
+  https://learn.microsoft.com/sysinternals/downloads/sigcheck[Sigcheck].
+  From the repository root, run `sigcheck64 -a -h -r examples/workers/build/x64mingw/workers.exe`
+  with the tool on `PATH`, or use its extracted path. Use `sigcheck64a` on
+  Windows on Arm. Compare the SHA-256 with the executable being debugged.
+* For file, registry, and DLL activity, extract
+  https://learn.microsoft.com/sysinternals/downloads/procmon[Process Monitor].
+  Stop capture while setting an include filter on the executable's process
+  name. Start capture, reproduce the operation, then stop and save the events
+  as a `.PML` file. Check the filtered trace before sharing it because paths
+  and process details can contain local information.
+
 [#review-host-authority]
 == Review each feature's security model
 
