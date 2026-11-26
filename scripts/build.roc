@@ -94,31 +94,8 @@ check! = |roc| {
 }
 
 check_glue! = |roc| {
-	override = Env.var_str!("ROC_WINDOWS_GLUE_SPEC") ?? ""
-	path = Env.var_str!("PATH") ?? ""
-	var $spec = override
-	for dir in path.split_on(":") {
-		candidate = "${dir}/roc-rust-glue"
-		if $spec.is_empty() {
-			match Path.canonicalize!(Path.utf8(candidate)) {
-				Ok(found) => {
-					mkdir!("build")?
-					staged = Path.utf8("build/RustGlue.roc")
-					bytes = Path.read_bytes!(found) ? |error| "Could not read the locked Rust glue spec: ${Str.inspect(error)}"
-					if (Path.read_bytes!(staged) ?? []) != bytes {
-						if Path.exists!(staged) ?? Bool.False {
-							Path.set_permissions!(staged, OwnerOnly) ? |error| "Could not refresh the Rust glue spec: ${Str.inspect(error)}"
-						}
-						Path.write_bytes!(staged, bytes) ? |error| "Could not stage the Rust glue spec: ${Str.inspect(error)}"
-					}
-					$spec = "build/RustGlue.roc"
-				}
-				Err(_) => {}
-			}
-		}
-	}
-	if ($spec.is_empty()) return Err("Use Blueprint or set ROC_WINDOWS_GLUE_SPEC to the pinned compiler's RustGlue.roc")
-	step!(roc, ["run", "scripts/check_glue.roc", "--", "--roc", roc, "--spec", $spec])
+	spec = Env.var_str!("ROC_WINDOWS_GLUE_SPEC") ?? "host/glue/RustGlue.roc"
+	step!(roc, ["run", "scripts/check_glue.roc", "--", "--roc", roc, "--spec", spec])
 }
 
 build! = |roc| {

@@ -1,0 +1,3960 @@
+## A glue script for generating a Rust source file with hosted function bindings.
+app [make_glue] { pf: platform glue }
+
+import pf.Types
+import pf.File
+import pf.RecordFieldInfo
+import pf.TypeRepr
+import pf.AbiLayout
+import pf.AbiFieldLayout
+import pf.AbiTagLayout
+import pf.AbiWidth
+import pf.ArgShape
+import pf.GlueInput
+import pf.HostedFunctionInfo
+import pf.TypeNamePlan
+import pf.RecordRepr
+import pf.TagUnionRepr
+import pf.RecordField
+import pf.TagVariant
+import pf.ProvidesEntry
+import pf.TypeInfo
+import pf.TypeTable
+import pf.RocName
+
+make_glue : List(Types) -> Try(List(File), Str)
+make_glue = |types_list| {
+	input = GlueInput.from_types(types_list)
+	type_table = TypeTable.from_list(input.types)
+	symbols = TypeNamePlan.platform_symbols(input.hosted_functions, input.provides_entries)
+	undeclarable_symbol_rust(symbols)?
+	renamed_roots = renamed_roots_rust(input.hosted_functions, input.provides_entries, type_table, symbols)?
+	duplicate_names = duplicate_type_names(input.hosted_functions, type_table, symbols, renamed_roots)?
+	rust_content = generate_rust_file(input.hosted_functions, type_table, input.provides_entries, duplicate_names)
+
+	Ok([{ name: "roc_platform_abi.rs", content: rust_content }])
+}
+
+# =============================================================================
+# TypeRepr-based Type Mapping
+# =============================================================================
+
+## Map a type table entry to its Rust type string using structured TypeRepr
+type_id_to_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64 -> Str
+type_id_to_rust = |type_table, duplicate_names, preferred_names, type_id| {
+	# A zero-sized value has no host representation.
+	if type_table.is_zero_sized(type_id) {
+		return "()"
+	}
+
+	type_repr = type_table.get(type_id)
+	match type_repr {
+		RocRecord(rec) =>
+			if rec.name == "" {
+				"*mut c_void"
+			} else {
+				record_struct_name(type_table, duplicate_names, type_id, rec)
+			}
+		RocTagUnion(tu) => resolve_tag_union_type_rust(type_table, duplicate_names, preferred_names, type_id, tu)
+		_ => type_repr_to_rust(type_table, duplicate_names, preferred_names, type_id, type_repr)
+	}
+}
+
+## Render one struct field declaration for a record field. Unnamed
+## nominal-record padding fields become fixed-size byte arrays (`[u8; size]`);
+## named fields use their resolved Rust type.
+## The named fields of a record, whose names settle each one's member name.
+field_names_rust : List(AbiFieldLayout) -> List(Str)
+field_names_rust = |fields| {
+	var $names = []
+
+	for field in fields {
+		if !field.is_padding {
+			$names = $names.append(field.name)
+		}
+	}
+
+	$names
+}
+
+## The member names of the fields named `field_names`. Every identifier
+## `name_to_rust_field_ident` gives is lowercase, so a ranked one is no other
+## field's own.
+field_idents_rust : List(Str) -> TypeNamePlan.MemberIdents
+field_idents_rust = |field_names|
+	TypeNamePlan.member_idents(field_names, name_to_rust_field_ident, "_Member")
+
+## The lint level a declaration needs when two of its members share a
+## spelling: a ranked member name holds an uppercase letter, which is what
+## keeps it from being another member's own spelling.
+member_lint_rust : TypeNamePlan.MemberIdents -> Str
+member_lint_rust = |member_idents|
+	if member_idents.any_ranked() {
+		"#[allow(non_snake_case)]\n"
+	} else {
+		""
+	}
+
+## For each tag of a union, the lowercase name its payload union member and
+## payload accessors are named from. Every name `to_lower_snake_case` gives is
+## lowercase, so a ranked one is no other tag's own.
+tag_snakes_rust : TagUnionRepr -> TypeNamePlan.MemberIdents
+tag_snakes_rust = |tu|
+	TypeNamePlan.member_idents(List.map(tu.tags, |tag| tag.name), to_lower_snake_case, "_Member")
+
+rust_record_field_decl : TypeTable, List(Str), TypeNamePlan.PreferredNames, Str, AbiFieldLayout, AbiWidth -> Str
+rust_record_field_decl = |type_table, duplicate_names, preferred_names, member_name, field, width| {
+	if field.is_padding {
+		"    pub ${name_to_rust_field_ident(field.name)}: [u8; ${U64.to_str(AbiFieldLayout.size(field, width))}],\n"
+	} else {
+		rust_type = type_id_to_rust(type_table, duplicate_names, preferred_names, field.type_id)
+		"    pub ${member_name}: ${rust_type},\n"
+	}
+}
+
+## Fields arrive in committed layout order (valid at both pointer widths);
+## only per-width padding byte counts differ between the two renderings.
+rust_record_fields_decl : TypeTable, List(Str), TypeNamePlan.PreferredNames, TypeNamePlan.MemberIdents, List(AbiFieldLayout), AbiWidth -> Str
+rust_record_fields_decl = |type_table, duplicate_names, preferred_names, field_idents, fields, width| {
+	var $field_strs = ""
+	var $member_index = 0
+	for field in fields {
+		member_name = if field.is_padding {
+			""
+		} else {
+			field_idents.at($member_index)
+		}
+		if !field.is_padding {
+			$member_index = $member_index + 1
+		}
+
+		# A zero-sized field occupies no storage and is not a struct member.
+		if !field.is_zero_sized() {
+			$field_strs = Str.concat($field_strs, rust_record_field_decl(type_table, duplicate_names, preferred_names, member_name, field, width))
+		}
+	}
+	$field_strs
+}
+
+rust_size_align_assertions : Str, U64, U64, U64, U64 -> Str
+rust_size_align_assertions = |type_name, size_32, alignment_32, size_64, alignment_64| {
+	if size_32 > 0 or size_64 > 0 {
+		"#[cfg(target_pointer_width = \"32\")]\nconst _: () = assert!(core::mem::size_of::<${type_name}>() == ${U64.to_str(size_32)}, \"${type_name} size mismatch\");\n#[cfg(target_pointer_width = \"32\")]\nconst _: () = assert!(core::mem::align_of::<${type_name}>() == ${U64.to_str(alignment_32)}, \"${type_name} alignment mismatch\");\n#[cfg(target_pointer_width = \"64\")]\nconst _: () = assert!(core::mem::size_of::<${type_name}>() == ${U64.to_str(size_64)}, \"${type_name} size mismatch\");\n#[cfg(target_pointer_width = \"64\")]\nconst _: () = assert!(core::mem::align_of::<${type_name}>() == ${U64.to_str(alignment_64)}, \"${type_name} alignment mismatch\");\n\n"
+	} else {
+		""
+	}
+}
+
+## Convert a TypeRepr to its Rust type string
+type_repr_to_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64, TypeRepr -> Str
+type_repr_to_rust = |type_table, duplicate_names, preferred_names, type_id, type_repr| {
+	match type_repr {
+		RocBool => "bool"
+		RocBox(inner_id) =>
+			match type_table.get(inner_id) {
+				RocUnknown(_) => "RocBox"
+				_ => {
+					inner_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, inner_id)
+					if inner_rust == "*mut c_void" or type_table.is_zero_sized(inner_id) {
+						"RocBox"
+					} else {
+						"*mut ${inner_rust}"
+					}
+				}
+			}
+		RocStr => "RocStr"
+		RocUnit => "()"
+		RocU8 => "u8"
+		RocU8x16 => "RocU8x16"
+		RocI8x16 => "RocI8x16"
+		RocU16x8 => "RocU16x8"
+		RocI16x8 => "RocI16x8"
+		RocU32x4 => "RocU32x4"
+		RocI32x4 => "RocI32x4"
+		RocU64x2 => "RocU64x2"
+		RocI64x2 => "RocI64x2"
+		RocU16 => "u16"
+		RocU32 => "u32"
+		RocU64 => "u64"
+		RocU128 => "u128"
+		RocI8 => "i8"
+		RocI16 => "i16"
+		RocI32 => "i32"
+		RocI64 => "i64"
+		RocI128 => "i128"
+		RocF32 => "f32"
+		RocF64 => "f64"
+		RocDec => "RocDec"
+		RocList(elem_id) =>
+			match type_table.get(elem_id) {
+				# The item has no layout the host can know, so the list has no
+				# item type.
+				RocUnknown(_) => "RocOpaqueList"
+				_ =>
+					if is_roc_released(type_table, elem_id) {
+						# The items are readable, but the allocation header
+						# depends on whether the opaque values they hold are
+						# refcounted, which only Roc knows.
+						"RocHeldList<${type_id_to_rust(type_table, duplicate_names, preferred_names, elem_id)}>"
+					} else if is_type_refcounted(type_table, elem_id) {
+						"RocList<${type_id_to_rust(type_table, duplicate_names, preferred_names, elem_id)}>"
+					} else {
+						"RocListWith<${type_id_to_rust(type_table, duplicate_names, preferred_names, elem_id)}, false>"
+					}
+				}
+		RocRecord(rec) =>
+			if rec.name == "" {
+				"*mut c_void"
+			} else {
+				record_struct_name(type_table, duplicate_names, type_id, rec)
+			}
+		RocTagUnion(tu) => resolve_tag_union_type_rust(type_table, duplicate_names, preferred_names, type_id, tu)
+		# A function stored inside a value is one erased-callable allocation,
+		# exactly like `Box(fn)`.
+		RocErasedCallable(_) => "RocErasedCallable"
+		RocUnknown(_) => "*mut c_void"
+	}
+}
+
+## Resolve a tag union to a Rust type. A single-variant union is unwrapped to
+## its payload, or names the generated struct of its several payloads.
+## Multi-variant unions with a name return a generated struct name.
+resolve_tag_union_type_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64, TagUnionRepr -> Str
+resolve_tag_union_type_rust = |type_table, duplicate_names, preferred_names, type_id, tu|
+	match type_table.single_variant_payload(type_id, tu) {
+		SinglePayload(payload_id) => type_id_to_rust(type_table, duplicate_names, preferred_names, payload_id)
+		SinglePayloadStruct(_) => tag_union_struct_name(type_table, preferred_names, duplicate_names, type_id, tu)
+		SingleNoPayload => "()"
+		NotSingleVariant =>
+			if tu.name != "" {
+				tag_union_struct_name(type_table, preferred_names, duplicate_names, type_id, tu)
+			} else {
+				"*mut c_void"
+			}
+		}
+
+## Determine whether a type is refcounted (heap-allocated).
+## Refcounted types need 2*ptr_width header space in list allocations.
+is_type_refcounted : TypeTable, U64 -> Bool
+is_type_refcounted = |type_table, type_id| type_table.is_refcounted(type_id)
+
+## True when a host that owns a value of this type cannot release it, because
+## the value holds an opaque Roc value. See `HostRcPlan`.
+is_roc_released : TypeTable, U64 -> Bool
+is_roc_released = |type_table, type_id| type_table.is_roc_released(type_id)
+
+## Comment emitted where a type's `decref` would be, when the type holds an
+## opaque Roc value.
+roc_released_note : Str -> Str
+roc_released_note = |indent|
+	"${indent}// No `decref`: this value holds an opaque Roc value, which only Roc can\n${indent}// release. Release its other parts one at a time and pass the opaque value\n${indent}// to a Roc function that takes ownership of it.\n"
+
+is_repr_refcounted : TypeTable, TypeRepr -> Bool
+is_repr_refcounted = |type_table, type_repr| type_table.repr_is_refcounted(type_repr)
+
+type_table_entries : TypeTable -> List(TypeInfo)
+type_table_entries = |type_table| type_table.entries()
+
+abi_record_fields : AbiLayout -> List(AbiFieldLayout)
+abi_record_fields = |abi_layout| abi_layout.record_fields()
+
+abi_tag_layouts : AbiLayout -> List(AbiTagLayout)
+abi_tag_layouts = |abi_layout| abi_layout.tag_layouts()
+
+abi_discriminant_offset : AbiLayout, AbiWidth -> U64
+abi_discriminant_offset = |abi_layout, width| abi_layout.discriminant_offset(width)
+
+abi_discriminant_size : AbiLayout -> U64
+abi_discriminant_size = |abi_layout| abi_layout.discriminant_size()
+
+# =============================================================================
+# String Utilities
+# =============================================================================
+
+## Replace all occurrences of a substring
+str_replace_all : Str, Str, Str -> Str
+str_replace_all = |s, from, to| RocName.replace_all(s, from, to)
+
+## Checks `str_replace_all` for this representative case.
+expect str_replace_all("a.b.c", ".", "_") == "a_b_c"
+
+## Checks `str_replace_all` for this representative case.
+expect str_replace_all("hello!", "!", "") == "hello"
+
+## Convert a string to lower_snake_case
+to_lower_snake_case : Str -> Str
+to_lower_snake_case = |s| RocName.lower_snake_ascii(s)
+
+## Checks `to_lower_snake_case` for this representative case.
+expect to_lower_snake_case("FooBar") == "foo_bar"
+
+## Checks `to_lower_snake_case` for this representative case.
+expect to_lower_snake_case("fooBar") == "foo_bar"
+
+## Checks `to_lower_snake_case` for this representative case.
+expect to_lower_snake_case("foo") == "foo"
+
+## Checks `to_lower_snake_case` for this representative case.
+expect to_lower_snake_case("FOO") == "foo"
+
+## Checks `to_lower_snake_case` for this representative case.
+expect to_lower_snake_case("Stdout_line") == "stdout_line"
+
+## Convert a string to SCREAMING_SNAKE_CASE (for Rust constants)
+to_screaming_snake_case : Str -> Str
+to_screaming_snake_case = |s| RocName.screaming_snake_ascii(s)
+
+## Checks `to_screaming_snake_case` for this representative case.
+expect to_screaming_snake_case("FooBar") == "FOO_BAR"
+
+## Checks `to_screaming_snake_case` for this representative case.
+expect to_screaming_snake_case("fooBar") == "FOO_BAR"
+
+## Checks `to_screaming_snake_case` for this representative case.
+expect to_screaming_snake_case("foo") == "FOO"
+
+## Checks `to_screaming_snake_case` for this representative case.
+expect to_screaming_snake_case("FOO") == "FOO"
+
+## Checks `to_screaming_snake_case` for this representative case.
+expect to_screaming_snake_case("Stdout_line") == "STDOUT_LINE"
+
+## Capitalize the first character of a string
+capitalize_first : Str -> Str
+capitalize_first = |s| RocName.capitalize_first(s)
+
+## Checks `capitalize_first` for this representative case.
+expect capitalize_first("hello") == "Hello"
+
+## Checks `capitalize_first` for this representative case.
+expect capitalize_first("Hello") == "Hello"
+
+## Checks `capitalize_first` for this representative case.
+expect capitalize_first("") == ""
+
+## Lowercase the first character of a string
+lowercase_first : Str -> Str
+lowercase_first = |s| RocName.lowercase_first(s)
+
+## Checks `lowercase_first` for this representative case.
+expect lowercase_first("Hello") == "hello"
+
+## Checks `lowercase_first` for this representative case.
+expect lowercase_first("hello") == "hello"
+
+## Checks `lowercase_first` for this representative case.
+expect lowercase_first("") == ""
+
+# =============================================================================
+# Name Conversion
+# =============================================================================
+
+## Convert function name to PascalCase struct name (e.g., "Stdout.line!" -> "StdoutLine")
+name_to_struct_name : Str -> Str
+name_to_struct_name = |name| RocName.from_str(name).to_pascal_clean()
+
+## Checks `name_to_struct_name` for this representative case.
+expect name_to_struct_name("Stdout.line!") == "StdoutLine"
+
+## Checks `name_to_struct_name` for this representative case.
+expect name_to_struct_name("line!") == "Line"
+
+## Checks `name_to_struct_name` for this representative case.
+expect name_to_struct_name("Foo.bar.baz!") == "FooBarBaz"
+
+## Checks `name_to_struct_name` for this representative case.
+expect name_to_struct_name("Builder.print_value!") == "BuilderPrintValue"
+
+## Checks `name_to_struct_name` for this representative case.
+expect name_to_struct_name("__AnonStruct10") == "AnonStruct10"
+
+## Roc names emitted under id-derived names. For host types these are the
+## named multi-variant tag unions and named records whose name appears in the
+## type table with different shapes, and those whose declarations would
+## collide with another declaration in the generated file; they take
+## shape-derived names. `renamed_roots` are the hosted functions and provided
+## entries that take index-derived names. The result is computed once per glue
+## run and reused while rendering names.
+duplicate_type_names : List(HostedFunctionInfo), TypeTable, List(Str), List(Str) -> Try(List(Str), Str)
+duplicate_type_names = |hosted_functions, type_table, symbols, renamed_roots|
+	TypeNamePlan.disambiguated(
+		List.concat(reserved_type_names_rust(hosted_functions, type_table, renamed_roots), symbols),
+		List.concat(renamed_roots, List.concat(type_table.duplicate_tag_union_names(), type_table.duplicate_record_names())),
+		|renamed| declared_types_rust(type_table, renamed),
+	)
+
+## Return the default Rust struct name for a multi-variant tag union.
+##
+## Generic tag unions used heavily by hosted functions can appear many times in
+## the type table with different payload layouts. Rust needs a distinct concrete
+## type for each layout.
+default_tag_union_struct_name : TypeTable, List(Str), U64, TagUnionRepr -> Str
+default_tag_union_struct_name = |type_table, duplicate_names, type_id, tu| {
+	Str.concat(name_to_struct_name(tu.name), type_table.shape_suffix(duplicate_names, tu.name, type_id))
+}
+
+## Return the emitted Rust type name for a named record. Two instantiations of
+## one generic nominal share a Roc name and are different host types, so each
+## shape gets its own name.
+record_struct_name : TypeTable, List(Str), U64, RecordRepr -> Str
+record_struct_name = |type_table, duplicate_names, type_id, rec|
+	Str.concat(name_to_struct_name(rec.name), type_table.shape_suffix(duplicate_names, rec.name, type_id))
+
+## Return the emitted Rust struct name for a multi-variant tag union.
+tag_union_struct_name : TypeTable, TypeNamePlan.PreferredNames, List(Str), U64, TagUnionRepr -> Str
+tag_union_struct_name = |type_table, preferred_names, duplicate_names, type_id, tu| {
+	preferred = preferred_names.lookup(type_id)
+	if preferred.found {
+		preferred.name
+	} else {
+		default_tag_union_struct_name(type_table, duplicate_names, type_id, tu)
+	}
+}
+
+hosted_module_name_to_struct_name : Str -> Str
+hosted_module_name_to_struct_name = |name|
+	match List.first(Str.split_on(name, ".")) {
+		Ok(module_name) => name_to_struct_name(module_name)
+		Err(_) => {
+			crash "glue invariant violated: module name split produced no segments"
+		}
+	}
+
+## Type names the runtime support in every generated file declares, imports,
+## or takes unqualified from the Rust prelude, and `Self`, which Rust keeps for
+## itself. A host type declared under one of them would redefine or shadow it.
+runtime_type_names_rust : List(Str)
+runtime_type_names_rust = [
+	"AtomicIsize",
+	"Clone",
+	"Copy",
+	"DefaultAllocators",
+	"DefaultHandlers",
+	"Drop",
+	"Layout",
+	"NonNull",
+	"Option",
+	"Ordering",
+	"RocBox",
+	"RocBoxPayloadDecref",
+	"RocBoxRelease",
+	"RocBoxSpineRelease",
+	"RocDec",
+	"RocErasedCallable",
+	"RocErasedCallableFn",
+	"RocErasedCallableOnDrop",
+	"RocErasedCallablePayload",
+	"RocErasedCallableRelease",
+	"RocHeldList",
+	"RocHost",
+	"RocI16x8",
+	"RocI16x8Native",
+	"RocI32x4",
+	"RocI32x4Native",
+	"RocI64x2",
+	"RocI64x2Native",
+	"RocI8x16",
+	"RocI8x16Native",
+	"RocList",
+	"RocListRelease",
+	"RocListSpineRelease",
+	"RocListWith",
+	"RocNoopRelease",
+	"RocOpaqueList",
+	"RocOwned",
+	"RocRelease",
+	"RocStr",
+	"RocStrRelease",
+	"RocU16x8",
+	"RocU16x8Native",
+	"RocU32x4",
+	"RocU32x4Native",
+	"RocU64x2",
+	"RocU64x2Native",
+	"RocU8x16",
+	"RocU8x16Native",
+	"Self",
+]
+
+## Names in Rust's value namespace that the runtime support in every generated
+## file declares, imports, or takes unqualified from the Rust prelude. The
+## file declares each platform symbol as a function or a static under the
+## symbol's own name, which would redefine or shadow one of these.
+runtime_value_names_rust : List(Str)
+runtime_value_names_rust = [
+	"DefaultAllocators",
+	"DefaultHandlers",
+	"None",
+	"ROC_ERASED_CALLABLE_CAPTURE_ALIGNMENT",
+	"ROC_ERASED_CALLABLE_CAPTURE_OFFSET",
+	"ROC_ERASED_CALLABLE_PAYLOAD_ALIGNMENT",
+	"ROC_SEAMLESS_SLICE_TAG",
+	"ROC_SMALL_STR_BIT",
+	"ROC_SMALL_STR_MAX_LEN",
+	"ROC_STR_SIZE",
+	"RocBoxRelease",
+	"RocBoxSpineRelease",
+	"RocErasedCallableRelease",
+	"RocI16x8",
+	"RocI32x4",
+	"RocI64x2",
+	"RocI8x16",
+	"RocListRelease",
+	"RocListSpineRelease",
+	"RocNoopRelease",
+	"RocStrRelease",
+	"RocU16x8",
+	"RocU32x4",
+	"RocU64x2",
+	"RocU8x16",
+	"Some",
+	"allocate_box",
+	"box_data_ptr",
+	"box_refcount_ptr",
+	"checked_add_usize",
+	"checked_mul_usize",
+	"decref_box",
+	"decref_box_with",
+	"decref_erased_callable",
+	"direct_roc_alloc",
+	"direct_roc_crashed",
+	"direct_roc_dbg",
+	"direct_roc_dealloc",
+	"direct_roc_expect_failed",
+	"direct_roc_host",
+	"direct_roc_realloc",
+	"drop_erased_callable_payload",
+	"fence",
+	"free_box_allocation",
+	"free_box_with",
+	"incref_box",
+	"incref_erased_callable",
+	"is_unique_box",
+	"make_roc_host",
+	"release_box_payload",
+	"retain_list_allocation",
+	"roc_erased_callable_allocate",
+	"roc_erased_callable_capture_ptr",
+	"roc_erased_callable_payload_ptr",
+	"roc_erased_callable_payload_size",
+	"shifted_capacity",
+]
+
+## Words Rust keeps for itself, which cannot name a declaration.
+keywords_rust : List(Str)
+keywords_rust = [
+	"Self",
+	"abstract",
+	"as",
+	"async",
+	"await",
+	"become",
+	"box",
+	"break",
+	"const",
+	"continue",
+	"crate",
+	"do",
+	"dyn",
+	"else",
+	"enum",
+	"extern",
+	"false",
+	"final",
+	"fn",
+	"for",
+	"gen",
+	"if",
+	"impl",
+	"in",
+	"let",
+	"loop",
+	"macro",
+	"match",
+	"mod",
+	"move",
+	"mut",
+	"override",
+	"priv",
+	"pub",
+	"ref",
+	"return",
+	"self",
+	"static",
+	"struct",
+	"super",
+	"trait",
+	"true",
+	"try",
+	"type",
+	"typeof",
+	"unsafe",
+	"unsized",
+	"use",
+	"virtual",
+	"where",
+	"while",
+	"yield",
+]
+
+## An error when the generated file cannot declare one of the platform's
+## symbols under its own name: the name is a keyword, belongs to the runtime
+## support, or belongs to a family of helper names the file derives from type
+## ids, list item types, and other symbols.
+undeclarable_symbol_rust : List(Str) -> Try({}, Str)
+undeclarable_symbol_rust = |symbols| {
+	TypeNamePlan.undeclarable_symbol(symbols, List.concat(runtime_value_names_rust, keywords_rust))?
+
+	for symbol in symbols {
+		is_helper = Str.starts_with(symbol, "decref_box_payload_type") or Str.starts_with(symbol, "decref_list_of_")
+		is_owned_wrapper = Str.ends_with(symbol, "_owned") and List.contains(symbols, Str.drop_suffix(symbol, "_owned"))
+		if is_helper or is_owned_wrapper {
+			return Err(TypeNamePlan.symbol_error(symbol))
+		}
+	}
+
+	Ok({})
+}
+
+## The name a hosted function's argument and result types, and the aliases of
+## the types it reaches, are derived from.
+hosted_struct_name_rust : List(Str), HostedFunctionInfo -> Str
+hosted_struct_name_rust = |renamed, func|
+	Str.concat(name_to_struct_name(func.name), TypeNamePlan.index_suffix(renamed, func.name, func.index, "Hosted"))
+
+## The name the aliases of the types a provided entry reaches are derived
+## from. `position` is the entry's place in the platform's provides list.
+provided_struct_name_rust : List(Str), ProvidesEntry, U64 -> Str
+provided_struct_name_rust = |renamed, entry, position|
+	Str.concat(name_to_struct_name(entry.name), TypeNamePlan.index_suffix(renamed, entry.name, position, "Provided"))
+
+## The argument and result types the generated file declares for a hosted
+## function.
+hosted_type_names_rust : ArgShape, List(Str), HostedFunctionInfo -> List(Str)
+hosted_type_names_rust = |arg_shape, renamed, func| {
+	struct_name = hosted_struct_name_rust(renamed, func)
+
+	ret_names = match arg_shape.record_lookup(func.ret_type_id) {
+		ArgRecordFound(_) => ["${struct_name}RetRecord"]
+		ArgNotRecord => []
+	}
+
+	match arg_shape.hosted_args(func) {
+		NoMeaningfulArgs => ret_names
+		SingleRecordArg(_) => List.concat(ret_names, ["${struct_name}Args", "${struct_name}ArgsRelease"])
+		PositionalArgs(_) => ret_names.append("${struct_name}Args")
+	}
+}
+
+## What the generated file derives from the name of each hosted function and
+## each provided entry when the Roc names in `renamed` take index-derived
+## names: the base its aliases are named from, which is not itself declared
+## and so is compared only with other bases, and a hosted function's argument
+## and result types.
+declared_roots_rust : List(HostedFunctionInfo), List(ProvidesEntry), TypeTable, List(Str) -> List(TypeNamePlan.Declared)
+declared_roots_rust = |hosted_functions, provides_list, type_table, renamed| {
+	arg_shape = ArgShape.from_table(type_table)
+	var $declared = []
+
+	for func in hosted_functions {
+		$declared = $declared.append({
+			roc_name: func.name,
+			id: func.index * 2,
+			names: hosted_type_names_rust(arg_shape, renamed, func).append("base ${hosted_struct_name_rust(renamed, func)}"),
+		})
+	}
+
+	var $position = 0
+	for entry in provides_list {
+		$declared = $declared.append({
+			roc_name: entry.name,
+			id: $position * 2 + 1,
+			names: ["base ${provided_struct_name_rust(renamed, entry, $position)}"],
+		})
+		$position = $position + 1
+	}
+
+	$declared
+}
+
+## The hosted functions and provided entries whose derived names take
+## index-derived names, because they would collide with another declaration.
+renamed_roots_rust : List(HostedFunctionInfo), List(ProvidesEntry), TypeTable, List(Str) -> Try(List(Str), Str)
+renamed_roots_rust = |hosted_functions, provides_list, type_table, symbols|
+	TypeNamePlan.disambiguated(
+		List.concat(runtime_type_names_rust, symbols),
+		[],
+		|renamed| declared_roots_rust(hosted_functions, provides_list, type_table, renamed),
+	)
+
+## Type names the generated file declares whatever the type table's own types
+## are named: the runtime support and each hosted function's argument and
+## result types.
+reserved_type_names_rust : List(HostedFunctionInfo), TypeTable, List(Str) -> List(Str)
+reserved_type_names_rust = |hosted_functions, type_table, renamed| {
+	arg_shape = ArgShape.from_table(type_table)
+	var $names = runtime_type_names_rust
+
+	for func in hosted_functions {
+		$names = List.concat($names, hosted_type_names_rust(arg_shape, renamed, func))
+	}
+
+	$names
+}
+
+## Every top-level type name the generated file declares for the host type at
+## `type_id` when it emits that type as `struct_name`: the type itself and each
+## helper type named after it.
+type_names_declared_as_rust : TypeTable, U64, Str -> List(Str)
+type_names_declared_as_rust = |type_table, type_id, struct_name|
+	match type_table.get(type_id) {
+		RocRecord(rec) =>
+			if rec.name != "" and !type_table.is_zero_sized(type_id) {
+				[struct_name, "${struct_name}Release"]
+			} else {
+				[]
+			}
+		RocTagUnion(tu) =>
+			match type_table.single_variant_payload(type_id, tu) {
+				SinglePayloadStruct(_) => [struct_name, "${struct_name}Release"]
+				NotSingleVariant => type_names_declared_as_union_rust(type_table, type_id, tu, struct_name)
+				SinglePayload(_) => []
+				SingleNoPayload => []
+			}
+		_ => []
+	}
+
+## `type_names_declared_as_rust` of the tag union `tu` with several variants.
+type_names_declared_as_union_rust : TypeTable, U64, TagUnionRepr, Str -> List(Str)
+type_names_declared_as_union_rust = |type_table, type_id, tu, struct_name|
+	if tu.name != "" {
+		abi_layout = type_table.layout(type_id)
+		if abi_layout.tag_union_has_payload() {
+			abi_tags = abi_tag_layouts(abi_layout)
+			var $names = [
+				struct_name,
+				"${struct_name}Tag",
+				"${struct_name}Payload",
+				"${struct_name}PayloadAlignment",
+				"${struct_name}Release",
+			]
+			var $tag_idx = 0
+			for tag in tu.tags {
+				if abi_tag_has_payload(abi_tag_at(abi_tags, $tag_idx)) and List.len(tag.payload) > 1 {
+					$names = $names.append("${struct_name}${capitalize_first(tag.name)}Payload")
+				}
+				$tag_idx = $tag_idx + 1
+			}
+			$names
+		} else {
+			[struct_name, "${struct_name}Release"]
+		}
+	} else {
+		[]
+	}
+
+## What the generated file declares for each named host type when the Roc
+## names in `duplicate_names` are emitted under shape-derived names.
+declared_types_rust : TypeTable, List(Str) -> List(TypeNamePlan.Declared)
+declared_types_rust = |type_table, duplicate_names| {
+	var $declared = []
+	var $type_id = 0
+
+	for type_info in type_table_entries(type_table) {
+		if type_info.shape_id == $type_id {
+			match type_info.repr {
+				RocRecord(rec) =>
+					if rec.name != "" and !type_table.is_zero_sized($type_id) {
+						struct_name = record_struct_name(type_table, duplicate_names, $type_id, rec)
+						$declared = $declared.append({
+							roc_name: rec.name,
+							id: $type_id,
+							names: type_names_declared_as_rust(type_table, $type_id, struct_name),
+						})
+					}
+				RocTagUnion(tu) =>
+					if type_table.declares_tag_union($type_id, tu) {
+						struct_name = default_tag_union_struct_name(type_table, duplicate_names, $type_id, tu)
+						$declared = $declared.append({
+							roc_name: tu.name,
+							id: $type_id,
+							names: type_names_declared_as_rust(type_table, $type_id, struct_name),
+						})
+					}
+				_ => {}
+			}
+		}
+
+		$type_id = $type_id + 1
+	}
+
+	$declared
+}
+
+## Every name the generated file declares before any preferred name or alias
+## is chosen, which neither of those may take.
+declared_type_names_rust : List(HostedFunctionInfo), List(ProvidesEntry), TypeTable, List(Str) -> List(Str)
+declared_type_names_rust = |hosted_functions, provides_list, type_table, duplicate_names| {
+	var $names = List.concat(
+		reserved_type_names_rust(hosted_functions, type_table, duplicate_names),
+		TypeNamePlan.platform_symbols(hosted_functions, provides_list),
+	)
+
+	for declared in declared_types_rust(type_table, duplicate_names) {
+		$names = List.concat($names, declared.names)
+	}
+
+	$names
+}
+
+## A named type lends its name to the aliases of the root it is reached
+## from, unless that name is ambiguous: a name several host types are emitted
+## under denotes none of them, so the root keeps its own name.
+type_name_root_alias_base_rust : TypeTable, List(Str), Str, U64 -> Str
+type_name_root_alias_base_rust = |type_table, ambiguous_names, fallback, type_id|
+	match type_table.get(type_id) {
+		RocRecord(rec) =>
+			if rec.name != "" and !rec.anonymous and !List.contains(ambiguous_names, rec.name) {
+				name_to_struct_name(rec.name)
+			} else {
+				fallback
+			}
+		RocTagUnion(tu) =>
+			if tu.name != "" and tu.name != "Try" and tu.name != "IOErr" and !List.contains(ambiguous_names, tu.name) {
+				name_to_struct_name(tu.name)
+			} else {
+				fallback
+			}
+		_ => fallback
+	}
+
+## The fields a record's aliases are named from: those of the row its
+## declaration is emitted from, which is the first row with its shape.
+record_alias_fields_rust : TypeTable, U64 -> List(RecordField)
+record_alias_fields_rust = |type_table, type_id|
+	match type_table.get(type_table.shape_id(type_id)) {
+		RocRecord(declared) => declared.fields
+		_ => {
+			crash "glue invariant violated: a record's shape id named a row that is not a record"
+		}
+	}
+
+type_name_roots_rust : List(HostedFunctionInfo), List(ProvidesEntry), TypeTable, List(Str) -> List(TypeNamePlan.Root)
+type_name_roots_rust = |hosted_functions, provides_list, type_table, ambiguous_names| {
+	var $roots = []
+
+	for func in hosted_functions {
+		base = hosted_struct_name_rust(ambiguous_names, func)
+		module_base = hosted_module_name_to_struct_name(func.name)
+
+		var $arg_idx = 0
+		for arg_type_id in func.arg_type_ids {
+			arg_fallback = "${base}Arg${U64.to_str($arg_idx)}"
+			$roots = $roots.append({
+				alias_base: type_name_root_alias_base_rust(type_table, ambiguous_names, arg_fallback, arg_type_id),
+				module_base,
+				type_id: arg_type_id,
+			})
+			$arg_idx = $arg_idx + 1
+		}
+
+		$roots = $roots.append({
+			alias_base: base,
+			module_base,
+			type_id: func.ret_type_id,
+		})
+	}
+
+	var $position = 0
+	for entry in provides_list {
+		base = provided_struct_name_rust(ambiguous_names, entry, $position)
+		module_base = hosted_module_name_to_struct_name(entry.name)
+		$position = $position + 1
+
+		match entry.exported {
+			ProvidedProcedure(func) => {
+				var $arg_idx = 0
+				for arg_type_id in func.args {
+					arg_fallback = "${base}Arg${U64.to_str($arg_idx)}"
+					$roots = $roots.append({
+						alias_base: type_name_root_alias_base_rust(type_table, ambiguous_names, arg_fallback, arg_type_id),
+						module_base,
+						type_id: arg_type_id,
+					})
+					$arg_idx = $arg_idx + 1
+				}
+
+				$roots = $roots.append({
+					alias_base: base,
+					module_base,
+					type_id: func.ret,
+				})
+			}
+			ProvidedData(type_id) => {
+				$roots = $roots.append({
+					alias_base: type_name_root_alias_base_rust(type_table, ambiguous_names, base, type_id),
+					module_base,
+					type_id,
+				})
+			}
+		}
+	}
+
+	$roots
+}
+
+append_type_alias_roots_rust : List(TypeNamePlan.Root), TypeTable, List(Str), Str, Str, U64, List(U64) -> List(TypeNamePlan.Root)
+append_type_alias_roots_rust = |roots, type_table, ambiguous_names, alias_base, module_base, type_id, visited_type_ids| {
+	if List.contains(visited_type_ids, type_id) {
+		return roots
+	}
+
+	next_visited = visited_type_ids.append(type_id)
+	root_alias_base = type_name_root_alias_base_rust(type_table, ambiguous_names, alias_base, type_id)
+
+	var $roots = roots.append({ alias_base: root_alias_base, module_base, type_id })
+
+	match type_table.get(type_id) {
+		RocRecord(_) => {
+			for field in record_alias_fields_rust(type_table, type_id) {
+				field_base = "${root_alias_base}${RocName.from_str(field.name).to_pascal_clean()}"
+				$roots = append_type_alias_roots_rust($roots, type_table, ambiguous_names, field_base, module_base, field.type_id, next_visited)
+			}
+			$roots
+		}
+		RocList(elem_id) => append_type_alias_roots_rust($roots, type_table, ambiguous_names, root_alias_base, module_base, elem_id, next_visited)
+		RocBox(inner_id) => append_type_alias_roots_rust($roots, type_table, ambiguous_names, root_alias_base, module_base, inner_id, next_visited)
+		RocTagUnion(tu) => {
+			var $next = $roots
+			for tag in tu.tags {
+				child_base = "${root_alias_base}${RocName.capitalize_first(tag.name)}"
+				for payload_id in tag.payload {
+					$next = append_type_alias_roots_rust($next, type_table, ambiguous_names, child_base, module_base, payload_id, next_visited)
+				}
+			}
+			$next
+		}
+		_ => $roots
+	}
+}
+
+type_alias_roots_rust : List(HostedFunctionInfo), List(ProvidesEntry), TypeTable, List(Str) -> List(TypeNamePlan.Root)
+type_alias_roots_rust = |hosted_functions, provides_list, type_table, ambiguous_names| {
+	var $roots = []
+
+	for func in hosted_functions {
+		base = hosted_struct_name_rust(ambiguous_names, func)
+		module_base = hosted_module_name_to_struct_name(func.name)
+
+		var $arg_idx = 0
+		for arg_type_id in func.arg_type_ids {
+			arg_fallback = "${base}Arg${U64.to_str($arg_idx)}"
+			$roots = append_type_alias_roots_rust($roots, type_table, ambiguous_names, arg_fallback, module_base, arg_type_id, [])
+			$arg_idx = $arg_idx + 1
+		}
+
+		$roots = append_type_alias_roots_rust($roots, type_table, ambiguous_names, base, module_base, func.ret_type_id, [])
+	}
+
+	var $position = 0
+	for entry in provides_list {
+		base = provided_struct_name_rust(ambiguous_names, entry, $position)
+		module_base = hosted_module_name_to_struct_name(entry.name)
+		$position = $position + 1
+
+		match entry.exported {
+			ProvidedProcedure(func) => {
+				var $arg_idx = 0
+				for arg_type_id in func.args {
+					arg_fallback = "${base}Arg${U64.to_str($arg_idx)}"
+					$roots = append_type_alias_roots_rust($roots, type_table, ambiguous_names, arg_fallback, module_base, arg_type_id, [])
+					$arg_idx = $arg_idx + 1
+				}
+
+				$roots = append_type_alias_roots_rust($roots, type_table, ambiguous_names, base, module_base, func.ret, [])
+			}
+			ProvidedData(type_id) => {
+				$roots = append_type_alias_roots_rust($roots, type_table, ambiguous_names, base, module_base, type_id, [])
+			}
+		}
+	}
+
+	$roots
+}
+
+preferred_type_names_rust : List(HostedFunctionInfo), List(ProvidesEntry), TypeTable, List(Str) -> TypeNamePlan.PreferredNames
+preferred_type_names_rust = |hosted_functions, provides_list, type_table, duplicate_names|
+	TypeNamePlan.from_table(type_table).preferred_names(
+		declared_type_names_rust(hosted_functions, provides_list, type_table, duplicate_names),
+		type_name_roots_rust(hosted_functions, provides_list, type_table, duplicate_names),
+		|type_id, struct_name| type_names_declared_as_rust(type_table, type_id, struct_name),
+	)
+
+## RustGlue must keep distinct concrete structs for generic Roc types such as
+## `Try` because different hosted functions can use different payload layouts.
+## These aliases give platform authors stable API names for secondary names that
+## share a concrete layout.
+add_type_alias_rust : { content : Str, seen : List(Str) }, Str, Str -> { content : Str, seen : List(Str) }
+add_type_alias_rust = |state, alias, target| {
+	if alias == target or List.contains(state.seen, alias) {
+		state
+	} else {
+		{
+			content: Str.concat(state.content, "pub type ${alias} = ${target};\n"),
+			seen: state.seen.append(alias),
+		}
+	}
+}
+
+add_tag_union_aliases_rust : { content : Str, seen : List(Str) }, Str, Str, AbiLayout -> { content : Str, seen : List(Str) }
+add_tag_union_aliases_rust = |state, alias, target, abi_layout| {
+	# The helper aliases are named after the union's alias, so they are its
+	# helpers only when that alias names the union.
+	if alias != target and List.contains(state.seen, alias) {
+		return state
+	}
+
+	with_main_alias = add_type_alias_rust(state, alias, target)
+
+	if abi_layout.tag_union_has_payload() {
+		with_payload_alias = add_type_alias_rust(with_main_alias, "${alias}Payload", "${target}Payload")
+		add_type_alias_rust(with_payload_alias, "${alias}Tag", "${target}Tag")
+	} else {
+		with_main_alias
+	}
+}
+
+generate_platform_type_aliases_rust : List(HostedFunctionInfo), List(ProvidesEntry), TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_platform_type_aliases_rust = |hosted_functions, provides_list, type_table, duplicate_names, preferred_names| {
+	var $state = { content: "", seen: preferred_names.declared_names() }
+	name_plan = TypeNamePlan.from_table(type_table)
+
+	for plan in name_plan.alias_plan(type_alias_roots_rust(hosted_functions, provides_list, type_table, duplicate_names)) {
+		target = type_id_to_rust(type_table, duplicate_names, preferred_names, plan.type_id)
+		$state = match plan.kind {
+			PlainAlias => add_type_alias_rust($state, plan.alias, target)
+			TagUnionAlias =>
+				match type_table.get(plan.type_id) {
+					RocTagUnion(_) => add_tag_union_aliases_rust($state, plan.alias, target, type_table.layout(plan.type_id))
+					_ => add_type_alias_rust($state, plan.alias, target)
+				}
+			}
+	}
+
+	if $state.content == "" {
+		""
+	} else {
+		"// Platform Type Aliases\n\n${$state.content}\n"
+	}
+}
+
+## Convert function name to snake_case (e.g., "Stdout.line!" -> "stdout_line")
+name_to_snake : Str -> Str
+name_to_snake = |name| {
+	name
+		|> str_replace_all(".", "_")
+		|> str_replace_all("!", "")
+		|> to_lower_snake_case
+}
+
+## Checks `name_to_snake` for this representative case.
+expect name_to_snake("Stdout.line!") == "stdout_line"
+
+## Checks `name_to_snake` for this representative case.
+expect name_to_snake("line!") == "line"
+
+## Checks `name_to_snake` for this representative case.
+expect name_to_snake("Foo.barBaz!") == "foo_bar_baz"
+
+## Checks `name_to_snake` for this representative case.
+expect name_to_snake("PartDef.Idx.get!") == "part_def_idx_get"
+
+## Convert a Roc name to a Rust snake_case function suffix.
+name_to_rust_fn_suffix : Str -> Str
+name_to_rust_fn_suffix = |name| {
+	suffix =
+		RocName.from_str(name).to_lower_snake_identifier()
+			|> RocName.strip_leading_underscores
+
+	if suffix == "" or suffix == "_" {
+		"anon"
+	} else {
+		suffix
+	}
+}
+
+## Checks `name_to_rust_fn_suffix` for this representative case.
+expect name_to_rust_fn_suffix("Host.Tree") == "host_tree"
+
+## Checks `name_to_rust_fn_suffix` for this representative case.
+expect name_to_rust_fn_suffix("TryType17") == "try_type17"
+
+## Checks `name_to_rust_fn_suffix` for this representative case.
+expect name_to_rust_fn_suffix("__AnonStruct10") == "anon_struct10"
+
+## Convert function name to SCREAMING_SNAKE_CASE (e.g., "Stdout.line!" -> "STDOUT_LINE")
+name_to_screaming_snake : Str -> Str
+name_to_screaming_snake = |name| {
+	name
+		|> str_replace_all(".", "_")
+		|> str_replace_all("!", "")
+		|> to_screaming_snake_case
+}
+
+## Checks `name_to_screaming_snake` for this representative case.
+expect name_to_screaming_snake("Stdout.line!") == "STDOUT_LINE"
+
+## Checks `name_to_screaming_snake` for this representative case.
+expect name_to_screaming_snake("line!") == "LINE"
+
+## Checks `name_to_screaming_snake` for this representative case.
+expect name_to_screaming_snake("Foo.barBaz!") == "FOO_BAR_BAZ"
+
+## Checks `name_to_screaming_snake` for this representative case.
+expect name_to_screaming_snake("PartDef.Idx.get!") == "PART_DEF_IDX_GET"
+
+## Convert a Roc record field name to a valid Rust field identifier.
+## Rust cannot quote arbitrary punctuation in identifiers, so ABI structs use
+## sanitized field names while preserving Roc's field order and repr(C) layout.
+name_to_rust_field_ident : Str -> Str
+name_to_rust_field_ident = |name| {
+	sanitized =
+		RocName.from_str(name).to_bang_snake_identifier()
+
+	match sanitized {
+		"" => "_field"
+		"_" => "_field"
+		_ => rust_keyword_safe_ident(sanitized)
+	}
+}
+
+## Spell `ident` so that Rust reads it as an identifier in every edition.
+##
+## Strict and reserved keywords, including the ones only some editions reserve,
+## become raw identifiers, which every edition accepts for any name. The path
+## keywords cannot be raw identifiers, so they get a distinct spelling instead.
+rust_keyword_safe_ident : Str -> Str
+rust_keyword_safe_ident = |ident| {
+	match ident {
+		"abstract" => "r#abstract"
+		"as" => "r#as"
+		"async" => "r#async"
+		"await" => "r#await"
+		"become" => "r#become"
+		"box" => "r#box"
+		"break" => "r#break"
+		"const" => "r#const"
+		"continue" => "r#continue"
+		"do" => "r#do"
+		"dyn" => "r#dyn"
+		"else" => "r#else"
+		"enum" => "r#enum"
+		"extern" => "r#extern"
+		"false" => "r#false"
+		"final" => "r#final"
+		"fn" => "r#fn"
+		"for" => "r#for"
+		"gen" => "r#gen"
+		"if" => "r#if"
+		"impl" => "r#impl"
+		"in" => "r#in"
+		"let" => "r#let"
+		"loop" => "r#loop"
+		"macro" => "r#macro"
+		"match" => "r#match"
+		"mod" => "r#mod"
+		"move" => "r#move"
+		"mut" => "r#mut"
+		"override" => "r#override"
+		"priv" => "r#priv"
+		"pub" => "r#pub"
+		"ref" => "r#ref"
+		"return" => "r#return"
+		"static" => "r#static"
+		"struct" => "r#struct"
+		"trait" => "r#trait"
+		"true" => "r#true"
+		"try" => "r#try"
+		"type" => "r#type"
+		"typeof" => "r#typeof"
+		"unsafe" => "r#unsafe"
+		"unsized" => "r#unsized"
+		"use" => "r#use"
+		"virtual" => "r#virtual"
+		"where" => "r#where"
+		"while" => "r#while"
+		"yield" => "r#yield"
+		"crate" => "crate_"
+		"self" => "self_"
+		"Self" => "self_type"
+		"super" => "super_"
+		_ => ident
+	}
+}
+
+## Spell a Roc tag name as a Rust enum variant. Every tag name is a valid
+## variant name except `Self`, which Rust reserves and does not accept as a raw
+## identifier.
+rust_variant_ident : Str -> Str
+rust_variant_ident = |tag_name| {
+	match capitalize_first(tag_name) {
+		"Self" => "Self_"
+		variant => variant
+	}
+}
+
+## Checks `rust_variant_ident` for this representative case.
+expect rust_variant_ident("Self") == "Self_"
+
+## Checks `rust_variant_ident` for this representative case.
+expect rust_variant_ident("Struct") == "Struct"
+
+## Checks `rust_keyword_safe_ident` for this representative case.
+expect rust_keyword_safe_ident("struct") == "r#struct"
+
+## Checks `rust_keyword_safe_ident` for this representative case.
+expect rust_keyword_safe_ident("gen") == "r#gen"
+
+## Checks `rust_keyword_safe_ident` for this representative case.
+expect rust_keyword_safe_ident("crate") == "crate_"
+
+## Checks `rust_keyword_safe_ident` for this representative case.
+expect rust_keyword_safe_ident("payload") == "payload"
+
+## Checks `name_to_rust_field_ident` for this representative case.
+expect name_to_rust_field_ident("init!") == "init_bang"
+
+## Checks `name_to_rust_field_ident` for this representative case.
+expect name_to_rust_field_ident("render!") == "render_bang"
+
+## Checks `name_to_rust_field_ident` for this representative case.
+expect name_to_rust_field_ident("type") == "r#type"
+
+## Checks `name_to_rust_field_ident` for this representative case.
+expect name_to_rust_field_ident("_") == "_field"
+
+## Return the Rust discriminant type for a committed discriminant size.
+disc_type_for_size : U64 -> Str
+disc_type_for_size = |size|
+	if size <= 1 {
+		"u8"
+	} else if size == 2 {
+		"u16"
+	} else if size == 4 {
+		"u32"
+	} else {
+		"u64"
+	}
+
+# =============================================================================
+# Type Table Helpers
+# =============================================================================
+
+abi_tag_at : List(AbiTagLayout), U64 -> AbiTagLayout
+abi_tag_at = |abi_tags, index| {
+	match List.get(abi_tags, index) {
+		Ok(tag) => tag
+		Err(_) => {
+			crash "glue invariant violated: missing ABI tag layout at index ${U64.to_str(index)}"
+		}
+	}
+}
+
+abi_tag_has_payload : AbiTagLayout -> Bool
+abi_tag_has_payload = |tag| tag.payload_size32 > 0 or tag.payload_size64 > 0
+
+rust_layout_assertions : Str, AbiLayout -> Str
+rust_layout_assertions = |type_name, abi_layout| {
+	if abi_layout.size64 > 0 or abi_layout.size32 > 0 {
+		block =
+			\\#[cfg(target_pointer_width = "64")]
+			\\const _: () = assert!(core::mem::size_of::<${type_name}>() == ${U64.to_str(abi_layout.size64)}, "${type_name} size mismatch");
+			\\#[cfg(target_pointer_width = "64")]
+			\\const _: () = assert!(core::mem::align_of::<${type_name}>() == ${U64.to_str(abi_layout.alignment64)}, "${type_name} alignment mismatch");
+			\\#[cfg(target_pointer_width = "32")]
+			\\const _: () = assert!(core::mem::size_of::<${type_name}>() == ${U64.to_str(abi_layout.size32)}, "${type_name} size mismatch");
+			\\#[cfg(target_pointer_width = "32")]
+			\\const _: () = assert!(core::mem::align_of::<${type_name}>() == ${U64.to_str(abi_layout.alignment32)}, "${type_name} alignment mismatch");
+		"${block}\n\n"
+	} else {
+		""
+	}
+}
+
+rust_tag_union_layout_assertions : Str, AbiLayout -> Str
+rust_tag_union_layout_assertions = |type_name, abi_layout| {
+	if abi_layout.size64 > 0 or abi_layout.size32 > 0 {
+		block =
+			\\#[cfg(target_pointer_width = "64")]
+			\\const _: () = assert!(core::mem::size_of::<${type_name}>() == ${U64.to_str(abi_layout.size64)}, "${type_name} size mismatch");
+			\\#[cfg(target_pointer_width = "64")]
+			\\const _: () = assert!(core::mem::align_of::<${type_name}>() == ${U64.to_str(abi_layout.alignment64)}, "${type_name} alignment mismatch");
+			\\#[cfg(target_pointer_width = "64")]
+			\\const _: () = assert!(core::mem::offset_of!(${type_name}, tag) == ${U64.to_str(abi_discriminant_offset(abi_layout, Pointer64))}, "${type_name} tag offset mismatch");
+			\\#[cfg(target_pointer_width = "32")]
+			\\const _: () = assert!(core::mem::size_of::<${type_name}>() == ${U64.to_str(abi_layout.size32)}, "${type_name} size mismatch");
+			\\#[cfg(target_pointer_width = "32")]
+			\\const _: () = assert!(core::mem::align_of::<${type_name}>() == ${U64.to_str(abi_layout.alignment32)}, "${type_name} alignment mismatch");
+			\\#[cfg(target_pointer_width = "32")]
+			\\const _: () = assert!(core::mem::offset_of!(${type_name}, tag) == ${U64.to_str(abi_discriminant_offset(abi_layout, Pointer32))}, "${type_name} tag offset mismatch");
+		"${block}\n\n"
+	} else {
+		""
+	}
+}
+
+rust_payload_layout_assertions : Str, AbiTagLayout -> Str
+rust_payload_layout_assertions = |type_name, tag_layout| {
+	if tag_layout.payload_size64 > 0 or tag_layout.payload_size32 > 0 {
+		block =
+			\\#[cfg(target_pointer_width = "64")]
+			\\const _: () = assert!(core::mem::size_of::<${type_name}>() == ${U64.to_str(tag_layout.payload_size64)}, "${type_name} size mismatch");
+			\\#[cfg(target_pointer_width = "64")]
+			\\const _: () = assert!(core::mem::align_of::<${type_name}>() == ${U64.to_str(tag_layout.payload_alignment64)}, "${type_name} alignment mismatch");
+			\\#[cfg(target_pointer_width = "32")]
+			\\const _: () = assert!(core::mem::size_of::<${type_name}>() == ${U64.to_str(tag_layout.payload_size32)}, "${type_name} size mismatch");
+			\\#[cfg(target_pointer_width = "32")]
+			\\const _: () = assert!(core::mem::align_of::<${type_name}>() == ${U64.to_str(tag_layout.payload_alignment32)}, "${type_name} alignment mismatch");
+		"${block}\n\n"
+	} else {
+		""
+	}
+}
+
+generate_record_struct_decl_rust : Str, Str, TypeTable, List(Str), TypeNamePlan.PreferredNames, List(AbiFieldLayout), Bool, AbiLayout -> Str
+generate_record_struct_decl_rust = |plain_doc, struct_name, type_table, duplicate_names, preferred_names, fields, _anonymous, abi_layout| {
+	field_idents = field_idents_rust(field_names_rust(fields))
+	doc = Str.concat(plain_doc, member_lint_rust(field_idents))
+	field_strs64 = rust_record_fields_decl(type_table, duplicate_names, preferred_names, field_idents, fields, Pointer64)
+	field_strs32 = rust_record_fields_decl(type_table, duplicate_names, preferred_names, field_idents, fields, Pointer32)
+	assertions = rust_layout_assertions(struct_name, abi_layout)
+
+	struct_decl =
+		\\${doc}#[cfg(target_pointer_width = "32")]
+		\\#[repr(C)]
+		\\#[derive(Clone, Copy)]
+		\\pub struct ${struct_name} {
+		\\${field_strs32}}
+		\\
+		\\${doc}#[cfg(not(target_pointer_width = "32"))]
+		\\#[repr(C)]
+		\\#[derive(Clone, Copy)]
+		\\pub struct ${struct_name} {
+		\\${field_strs64}}
+
+	"${struct_decl}\n\n${assertions}"
+}
+
+generate_payload_struct_decl_rust : Str, Str, TypeTable, List(Str), TypeNamePlan.PreferredNames, List(AbiFieldLayout), AbiTagLayout -> Str
+generate_payload_struct_decl_rust = |doc, struct_name, type_table, duplicate_names, preferred_names, fields, tag_layout| {
+	field_idents = field_idents_rust(field_names_rust(fields))
+	field_strs64 = rust_record_fields_decl(type_table, duplicate_names, preferred_names, field_idents, fields, Pointer64)
+	field_strs32 = rust_record_fields_decl(type_table, duplicate_names, preferred_names, field_idents, fields, Pointer32)
+	assertions = rust_payload_layout_assertions(struct_name, tag_layout)
+
+	struct_decl =
+		\\${doc}#[cfg(target_pointer_width = "32")]
+		\\#[repr(C)]
+		\\#[derive(Clone, Copy)]
+		\\pub struct ${struct_name} {
+		\\${field_strs32}}
+		\\
+		\\${doc}#[cfg(not(target_pointer_width = "32"))]
+		\\#[repr(C)]
+		\\#[derive(Clone, Copy)]
+		\\pub struct ${struct_name} {
+		\\${field_strs64}}
+
+	"${struct_decl}\n\n${assertions}"
+}
+
+# =============================================================================
+# Rust Code Generation
+# =============================================================================
+
+## Generate the complete Rust source file
+generate_rust_file : List(HostedFunctionInfo), TypeTable, List(ProvidesEntry), List(Str) -> Str
+generate_rust_file = |hosted_functions, type_table, provides_list, duplicate_names| {
+	preferred_names = preferred_type_names_rust(hosted_functions, provides_list, type_table, duplicate_names)
+
+	generate_rust_file_header
+		.concat(generate_rust_imports)
+		.concat("\n")
+		.concat(generate_host_abi_types_rust)
+		.concat("\n")
+		.concat(generate_roc_box_helpers_rust)
+		.concat("\n")
+		.concat(generate_rust_roc_str)
+		.concat("\n")
+		.concat(generate_rust_roc_list)
+		.concat("\n")
+		.concat(generate_rust_roc_held_lists)
+		.concat("\n")
+		.concat(generate_rust_release_support)
+		.concat("\n")
+		.concat(generate_element_type_structs_rust(type_table, duplicate_names, preferred_names))
+		.concat(generate_tag_union_structs_rust(type_table, duplicate_names, preferred_names))
+		.concat(generate_all_record_structs_rust(hosted_functions, type_table, duplicate_names, preferred_names))
+		.concat(generate_all_args_structs_rust(hosted_functions, type_table, duplicate_names, preferred_names))
+		.concat(generate_platform_type_aliases_rust(hosted_functions, provides_list, type_table, duplicate_names, preferred_names))
+		.concat(generate_refcount_helpers_rust(type_table, duplicate_names, preferred_names))
+		.concat("\n")
+		.concat(generate_runtime_symbol_externs_rust)
+		.concat("\n")
+		.concat(generate_hosted_symbol_externs_rust(hosted_functions, type_table, duplicate_names, preferred_names))
+		.concat("\n")
+		.concat(generate_host_helpers_rust)
+		.concat("\n")
+		.concat(generate_entrypoint_externs_rust(provides_list, type_table, duplicate_names, preferred_names))
+		.concat(generate_rust_file_footer)
+}
+
+## Opening of the generated file: a header comment, then the opening of the one
+## module that holds every generated item.
+##
+## The file has to work both as a module file (`mod abi;`) and spliced into a
+## module by `include!`, where inner doc comments and inner attributes are
+## syntax errors. A lint level attached to an item does not reach that item's
+## own `#[cfg]` attributes, so the lint levels the generated items need are
+## attached to a module that contains them, and `generate_rust_file_footer`
+## re-exports that module's contents into the including module.
+generate_rust_file_header : Str
+generate_rust_file_header =
+	\\// Roc Platform ABI
+	\\//
+	\\// This file defines the Rust interface for hosted functions in a Roc platform.
+	\\// It is automatically generated by the Roc glue generator.
+	\\//
+	\\// Hosted argument ownership:
+	\\// - Roc transfers ownership of refcounted arguments to the hosted function.
+	\\// - The hosted function must release owned refcounted arguments when done, using
+	\\//   the release call named in each hosted symbol's doc comment below.
+	\\// - Releasing a container releases its elements only when the container's own
+	\\//   count reaches zero, which is what compiled Roc code does when it drops one
+	\\//   it owns. Releasing the elements unconditionally double-frees them whenever
+	\\//   the Roc caller still holds the container.
+	\\// - If the host stores or returns an argument, it must retain or transfer ownership explicitly.
+	\\//
+	\\// Use this file from the platform host either as a module file (`mod abi;`) or
+	\\// through `mod abi { include!(...); }`, and implement the listed hosted symbols
+	\\// with the exact natural C ABI signatures shown below.
+	\\
+	\\#[rustfmt::skip]
+	\\#[allow(dead_code)]
+	\\#[allow(improper_ctypes)]
+	\\#[allow(improper_ctypes_definitions)]
+	\\// `no_roc_std_helpers` is supplied by host build tooling and cannot be registered from source.
+	\\#[allow(unexpected_cfgs)]
+	\\mod roc_platform_abi_items {
+	\\
+
+## Closing of the generated file: the end of the module `generate_rust_file_header`
+## opens, and the re-export of everything public in it.
+generate_rust_file_footer : Str
+generate_rust_file_footer =
+	\\}
+	\\
+	\\// A host need not use any generated item, so this re-export may be unused.
+	\\#[allow(unused_imports)]
+	\\pub use roc_platform_abi_items::*;
+	\\
+
+## Import section
+generate_rust_imports : Str
+generate_rust_imports =
+	\\use core::ffi::c_void;
+	\\use core::ptr::NonNull;
+	\\use core::sync::atomic::{fence, AtomicIsize, Ordering};
+	\\#[cfg(not(no_roc_std_helpers))]
+	\\use std::alloc::Layout;
+	\\
+
+## Generate self-contained host ABI type definitions (matching roc_ops.rs)
+generate_host_abi_types_rust : Str
+generate_host_abi_types_rust =
+	\\/// Runtime representation of Roc's fixed-point `Dec` value.
+	\\///
+	\\/// `num` stores the decimal value scaled by 10^18.
+	\\#[repr(C)]
+	\\#[derive(Clone, Copy)]
+	\\pub struct RocDec {
+	\\    pub num: i128,
+	\\}
+	\\
+	\\const _: [(); 16] = [(); core::mem::size_of::<RocDec>()];
+	\\const _: [(); 16] = [(); core::mem::align_of::<RocDec>()];
+	\\
+	\\#[cfg(target_arch = "x86_64")]
+	\\type RocU8x16Native = core::arch::x86_64::__m128i;
+	\\#[cfg(target_arch = "x86_64")]
+	\\type RocI8x16Native = core::arch::x86_64::__m128i;
+	\\#[cfg(target_arch = "x86_64")]
+	\\type RocU16x8Native = core::arch::x86_64::__m128i;
+	\\#[cfg(target_arch = "x86_64")]
+	\\type RocI16x8Native = core::arch::x86_64::__m128i;
+	\\#[cfg(target_arch = "x86_64")]
+	\\type RocU32x4Native = core::arch::x86_64::__m128i;
+	\\#[cfg(target_arch = "x86_64")]
+	\\type RocI32x4Native = core::arch::x86_64::__m128i;
+	\\#[cfg(target_arch = "x86_64")]
+	\\type RocU64x2Native = core::arch::x86_64::__m128i;
+	\\#[cfg(target_arch = "x86_64")]
+	\\type RocI64x2Native = core::arch::x86_64::__m128i;
+	\\#[cfg(target_arch = "aarch64")]
+	\\type RocU8x16Native = core::arch::aarch64::uint8x16_t;
+	\\#[cfg(target_arch = "aarch64")]
+	\\type RocI8x16Native = core::arch::aarch64::int8x16_t;
+	\\#[cfg(target_arch = "aarch64")]
+	\\type RocU16x8Native = core::arch::aarch64::uint16x8_t;
+	\\#[cfg(target_arch = "aarch64")]
+	\\type RocI16x8Native = core::arch::aarch64::int16x8_t;
+	\\#[cfg(target_arch = "aarch64")]
+	\\type RocU32x4Native = core::arch::aarch64::uint32x4_t;
+	\\#[cfg(target_arch = "aarch64")]
+	\\type RocI32x4Native = core::arch::aarch64::int32x4_t;
+	\\#[cfg(target_arch = "aarch64")]
+	\\type RocU64x2Native = core::arch::aarch64::uint64x2_t;
+	\\#[cfg(target_arch = "aarch64")]
+	\\type RocI64x2Native = core::arch::aarch64::int64x2_t;
+	\\#[cfg(target_arch = "wasm32")]
+	\\type RocU8x16Native = core::arch::wasm32::v128;
+	\\#[cfg(target_arch = "wasm32")]
+	\\type RocI8x16Native = core::arch::wasm32::v128;
+	\\#[cfg(target_arch = "wasm32")]
+	\\type RocU16x8Native = core::arch::wasm32::v128;
+	\\#[cfg(target_arch = "wasm32")]
+	\\type RocI16x8Native = core::arch::wasm32::v128;
+	\\#[cfg(target_arch = "wasm32")]
+	\\type RocU32x4Native = core::arch::wasm32::v128;
+	\\#[cfg(target_arch = "wasm32")]
+	\\type RocI32x4Native = core::arch::wasm32::v128;
+	\\#[cfg(target_arch = "wasm32")]
+	\\type RocU64x2Native = core::arch::wasm32::v128;
+	\\#[cfg(target_arch = "wasm32")]
+	\\type RocI64x2Native = core::arch::wasm32::v128;
+	\\
+	\\macro_rules! roc_simd_type {
+	\\    ($name:ident, $native:ident) => {
+	\\        #[repr(transparent)]
+	\\        #[derive(Clone, Copy)]
+	\\        pub struct $name(pub $native);
+	\\        const _: [(); 16] = [(); core::mem::size_of::<$name>()];
+	\\        const _: [(); 16] = [(); core::mem::align_of::<$name>()];
+	\\    };
+	\\}
+	\\roc_simd_type!(RocU8x16, RocU8x16Native);
+	\\roc_simd_type!(RocI8x16, RocI8x16Native);
+	\\roc_simd_type!(RocU16x8, RocU16x8Native);
+	\\roc_simd_type!(RocI16x8, RocI16x8Native);
+	\\roc_simd_type!(RocU32x4, RocU32x4Native);
+	\\roc_simd_type!(RocI32x4, RocI32x4Native);
+	\\roc_simd_type!(RocU64x2, RocU64x2Native);
+	\\roc_simd_type!(RocI64x2, RocI64x2Native);
+	\\
+	\\
+	\\/// Runtime representation of an opaque `Box(T)` value.
+	\\pub type RocBox = *mut c_void;
+	\\
+	\\/// Host-internal allocator and diagnostic context used by helper functions in this file.
+	\\///
+	\\/// Compiled Roc code does not receive this value. The real host ABI is the set of direct
+	\\/// linker symbols declared below (`roc_alloc`, hosted symbols, and provided entrypoints).
+	\\#[repr(C)]
+	\\pub struct RocHost {
+	\\    pub env: *mut c_void,
+	\\    /// Never returns null; see `roc_alloc` below.
+	\\    pub roc_alloc: unsafe extern "C" fn(*mut RocHost, usize, usize) -> NonNull<c_void>,
+	\\    pub roc_dealloc: unsafe extern "C" fn(*mut RocHost, *mut c_void, usize),
+	\\    /// Never returns null; see `roc_realloc` below.
+	\\    pub roc_realloc: unsafe extern "C" fn(*mut RocHost, *mut c_void, usize, usize) -> NonNull<c_void>,
+	\\    pub roc_dbg: unsafe extern "C" fn(*mut RocHost, *const u8, usize),
+	\\    pub roc_expect_failed: unsafe extern "C" fn(*mut RocHost, *const u8, usize),
+	\\    pub roc_crashed: unsafe extern "C" fn(*mut RocHost, *const u8, usize),
+	\\}
+	\\
+	\\impl RocHost {
+	\\    /// Allocate memory with the given alignment and length.
+	\\    ///
+	\\    /// # Safety
+	\\    /// The returned pointer must be used only according to Roc allocation layout
+	\\    /// rules and later released through the matching host deallocator.
+	\\    #[inline]
+	\\    pub unsafe fn alloc(&self, alignment: usize, length: usize) -> *mut c_void {
+	\\        let host = self as *const RocHost as *mut RocHost;
+	\\        unsafe { (self.roc_alloc)(host, length, alignment).as_ptr() }
+	\\    }
+	\\
+	\\    /// Deallocate memory previously allocated with `alloc`.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `ptr` must have been allocated by this host with the same alignment and must
+	\\    /// not be used after this call.
+	\\    #[inline]
+	\\    pub unsafe fn dealloc(&self, ptr: *mut c_void, alignment: usize) {
+	\\        let host = self as *const RocHost as *mut RocHost;
+	\\        unsafe { (self.roc_dealloc)(host, ptr, alignment); }
+	\\    }
+	\\
+	\\    /// Reallocate memory to a new size.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `old_ptr` must have been allocated by this host with the same alignment.
+	\\    /// The returned pointer replaces `old_ptr`; the old pointer must not be used.
+	\\    #[inline]
+	\\    pub unsafe fn realloc(
+	\\        &self,
+	\\        old_ptr: *mut c_void,
+	\\        alignment: usize,
+	\\        new_length: usize,
+	\\    ) -> *mut c_void {
+	\\        let host = self as *const RocHost as *mut RocHost;
+	\\        unsafe { (self.roc_realloc)(host, old_ptr, new_length, alignment).as_ptr() }
+	\\    }
+	\\}
+	\\
+	\\#[inline]
+	\\fn checked_add_usize(left: usize, right: usize, context: &str) -> usize {
+	\\    left.checked_add(right).expect(context)
+	\\}
+	\\
+	\\#[inline]
+	\\fn checked_mul_usize(left: usize, right: usize, context: &str) -> usize {
+	\\    left.checked_mul(right).expect(context)
+	\\}
+	\\
+	\\#[inline]
+	\\fn shifted_capacity(capacity: usize) -> usize {
+	\\    capacity.checked_shl(1).expect("Roc capacity does not fit shifted representation")
+	\\}
+	\\
+	\\/// Uniform ABI function pointer stored in `RocErasedCallablePayload`.
+	\\///
+	\\/// The final `reuse` pointer is nullable. Non-null must be the callable data
+	\\/// pointer whose inline capture begins at `capture`; it transfers one owned
+	\\/// reference to the callee. The caller must not use or decref that ownership
+	\\/// unit after the call. The callee consumes it exactly once, whether or not the
+	\\/// result can reuse the allocation.
+	\\pub type RocErasedCallableFn = unsafe extern "C" fn(*mut RocHost, *mut u8, *const u8, *mut u8, *mut u8, *mut *const c_void);
+	\\
+	\\/// Final-drop callback for inline erased-callable captures.
+	\\pub type RocErasedCallableOnDrop = unsafe extern "C" fn(*mut u8, *mut RocHost);
+	\\
+	\\/// Payload header for `Box(function)`.
+	\\#[repr(C)]
+	\\#[derive(Debug, Clone, Copy)]
+	\\pub struct RocErasedCallablePayload {
+	\\    pub callable_fn_ptr: RocErasedCallableFn,
+	\\    pub on_drop: Option<RocErasedCallableOnDrop>,
+	\\    pub on_copy: Option<unsafe extern "C" fn(*mut u8, isize)>,
+	\\    pub capture_size: usize,
+	\\}
+	\\
+	\\const _: () = assert!(core::mem::size_of::<RocErasedCallablePayload>() == 4 * core::mem::size_of::<usize>(), "RocErasedCallablePayload size mismatch");
+	\\const _: () = assert!(core::mem::offset_of!(RocErasedCallablePayload, callable_fn_ptr) == 0, "RocErasedCallablePayload.callable_fn_ptr offset mismatch");
+	\\const _: () = assert!(core::mem::offset_of!(RocErasedCallablePayload, on_drop) == core::mem::size_of::<usize>(), "RocErasedCallablePayload.on_drop offset mismatch");
+	\\
+	\\/// Runtime representation of `Box(function)`.
+	\\pub type RocErasedCallable = *mut u8;
+	\\
+	\\pub const ROC_ERASED_CALLABLE_CAPTURE_ALIGNMENT: usize = 16;
+	\\pub const ROC_ERASED_CALLABLE_PAYLOAD_ALIGNMENT: usize = 16;
+	\\pub const ROC_ERASED_CALLABLE_CAPTURE_OFFSET: usize =
+	\\    (core::mem::size_of::<RocErasedCallablePayload>() + 15) & !15;
+	\\
+	\\#[inline]
+	\\pub fn roc_erased_callable_payload_size(capture_size: usize) -> usize {
+	\\    checked_add_usize(
+	\\        ROC_ERASED_CALLABLE_CAPTURE_OFFSET,
+	\\        capture_size,
+	\\        "Roc erased-callable payload size overflow",
+	\\    )
+	\\}
+	\\
+	\\#[inline]
+	\\/// # Safety
+	\\/// `callable` must be a non-null Roc erased-callable data pointer.
+	\\pub unsafe fn roc_erased_callable_payload_ptr(callable: RocErasedCallable) -> *mut RocErasedCallablePayload {
+	\\    callable as *mut RocErasedCallablePayload
+	\\}
+	\\
+	\\#[inline]
+	\\/// # Safety
+	\\/// `callable` must be a non-null Roc erased-callable data pointer.
+	\\pub unsafe fn roc_erased_callable_capture_ptr(callable: RocErasedCallable) -> *mut u8 {
+	\\    unsafe { callable.add(ROC_ERASED_CALLABLE_CAPTURE_OFFSET) }
+	\\}
+	\\
+	\\/// Allocate a Roc erased callable payload.
+	\\///
+	\\/// # Safety
+	\\/// The caller must initialize and use the returned callable according to Roc's
+	\\/// erased-callable ABI. `callable_fn_ptr` and `on_drop` must have matching ABI
+	\\/// signatures for the captured payload.
+	\\pub unsafe fn roc_erased_callable_allocate(
+	\\    roc_host: &RocHost,
+	\\    callable_fn_ptr: RocErasedCallableFn,
+	\\    on_drop: Option<RocErasedCallableOnDrop>,
+	\\    capture_size: usize,
+	\\) -> RocErasedCallable {
+	\\    let ptr_width = core::mem::size_of::<usize>();
+	\\    let alignment = core::cmp::max(ptr_width, ROC_ERASED_CALLABLE_PAYLOAD_ALIGNMENT);
+	\\    let extra_bytes = core::cmp::max(ptr_width, ROC_ERASED_CALLABLE_PAYLOAD_ALIGNMENT);
+	\\    let total = checked_add_usize(
+	\\        extra_bytes,
+	\\        roc_erased_callable_payload_size(capture_size),
+	\\        "Roc erased-callable allocation size overflow",
+	\\    );
+	\\    unsafe {
+	\\        let base = roc_host.alloc(alignment, total) as *mut u8;
+	\\        let data = base.add(extra_bytes);
+	\\        let rc = data.sub(core::mem::size_of::<isize>()) as *mut isize;
+	\\        *rc = 1;
+	\\        let payload = roc_erased_callable_payload_ptr(data);
+	\\        *payload = RocErasedCallablePayload { callable_fn_ptr, on_drop, on_copy: None, capture_size };
+	\\        data
+	\\    }
+	\\}
+	\\
+
+## Generate self-contained RocBox refcount helpers.
+generate_roc_box_helpers_rust : Str
+generate_roc_box_helpers_rust =
+	\\/// Payload drop callback for a boxed value.
+	\\///
+	\\/// The callback receives the boxed payload data pointer and must recursively
+	\\/// decref any Roc refcounted values inside the payload. It must not free the
+	\\/// box allocation; `decref_box_with` and `free_box_with` free it after the callback.
+	\\pub type RocBoxPayloadDecref = unsafe extern "C" fn(*mut c_void, *mut RocHost);
+	\\
+	\\/// Increment the refcount of a boxed payload data pointer.
+	\\///
+	\\/// # Safety
+	\\/// `data_ptr` must be a valid Roc box payload pointer. The caller must ensure
+	\\/// that the extra retained references are balanced by later decrefs.
+	\\pub unsafe fn incref_box(data_ptr: RocBox, amount: isize) {
+	\\    let data = match box_data_ptr(data_ptr) {
+	\\        Some(ptr) => ptr,
+	\\        None => return,
+	\\    };
+	\\    let rc = box_refcount_ptr(data);
+	\\    if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\        return; // REFCOUNT_STATIC_DATA
+	\\    }
+	\\    unsafe {
+	\\        (*rc).fetch_add(amount, Ordering::Relaxed);
+	\\    }
+	\\}
+	\\
+	\\/// Allocate a Roc box and return a pointer to its payload data.
+	\\///
+	\\/// # Safety
+	\\/// The returned payload memory is uninitialized. The caller must initialize it
+	\\/// according to the Roc type before exposing it to safe APIs or Roc code.
+	\\pub unsafe fn allocate_box(
+	\\    payload_size: usize,
+	\\    payload_alignment: usize,
+	\\    payload_contains_refcounted: bool,
+	\\    roc_host: &RocHost,
+	\\) -> RocBox {
+	\\    let ptr_width = core::mem::size_of::<usize>();
+	\\    let required_space = if payload_contains_refcounted { checked_mul_usize(2, ptr_width, "Roc box header size overflow") } else { ptr_width };
+	\\    let header_bytes = required_space.max(payload_alignment);
+	\\    let alloc_alignment = ptr_width.max(payload_alignment);
+	\\    let total = checked_add_usize(header_bytes, payload_size, "Roc box allocation size overflow");
+	\\    unsafe {
+	\\        let base = roc_host.alloc(alloc_alignment, total) as *mut u8;
+	\\        let data = base.add(header_bytes);
+	\\        let rc = data.sub(core::mem::size_of::<isize>()) as *mut isize;
+	\\        *rc = 1;
+	\\        data as RocBox
+	\\    }
+	\\}
+	\\
+	\\/// Decrement a pointer-aligned boxed payload with no Roc refcounted values.
+	\\///
+	\\/// # Safety
+	\\/// `data_ptr` must be a valid Roc box payload pointer owned by this reference.
+	\\pub unsafe fn decref_box(data_ptr: RocBox, roc_host: &RocHost) {
+	\\    unsafe {
+	\\        decref_box_with(data_ptr, core::mem::align_of::<usize>(), false, None, roc_host);
+	\\    }
+	\\}
+	\\
+	\\/// Increment a boxed function closure.
+	\\///
+	\\/// # Safety
+	\\/// `callable` must be a valid Roc erased-callable payload pointer.
+	\\pub unsafe fn incref_erased_callable(callable: RocErasedCallable, amount: isize) {
+	\\    unsafe {
+	\\        incref_box(callable as RocBox, amount);
+	\\    }
+	\\}
+	\\
+	\\/// Decrement a boxed function closure and run its capture drop callback on final release.
+	\\///
+	\\/// # Safety
+	\\/// `callable` must be a valid Roc erased-callable payload pointer owned by this reference.
+	\\pub unsafe fn decref_erased_callable(callable: RocErasedCallable, roc_host: &RocHost) {
+	\\    unsafe {
+	\\        decref_box_with(
+	\\            callable as RocBox,
+	\\            ROC_ERASED_CALLABLE_PAYLOAD_ALIGNMENT,
+	\\            false,
+	\\            Some(drop_erased_callable_payload),
+	\\            roc_host,
+	\\        );
+	\\    }
+	\\}
+	\\
+	\\unsafe extern "C" fn drop_erased_callable_payload(data_ptr: *mut c_void, roc_host: *mut RocHost) {
+	\\    if data_ptr.is_null() || roc_host.is_null() {
+	\\        return;
+	\\    }
+	\\    unsafe {
+	\\        let callable = data_ptr as RocErasedCallable;
+	\\        let payload = roc_erased_callable_payload_ptr(callable);
+	\\        if let Some(on_drop) = (*payload).on_drop {
+	\\            on_drop(roc_erased_callable_capture_ptr(callable), roc_host);
+	\\        }
+	\\    }
+	\\}
+	\\
+	\\/// Decrement a boxed payload and run payload teardown when this is the final ref.
+	\\///
+	\\/// `payload_contains_refcounted` must match the value passed to `allocate_box`:
+	\\/// it determines the box header size, and is independent of whether a
+	\\/// `payload_decref` teardown callback is supplied. A host resource handle such
+	\\/// as `Box(U64)` holding a raw pointer has `payload_contains_refcounted: false`
+	\\/// even when it provides a teardown callback to free the underlying resource.
+	\\///
+	\\/// # Safety
+	\\/// `data_ptr` must be a valid Roc box payload pointer owned by this reference,
+	\\/// and `payload_alignment`/`payload_contains_refcounted` must match allocation.
+	\\pub unsafe fn decref_box_with(
+	\\    data_ptr: RocBox,
+	\\    payload_alignment: usize,
+	\\    payload_contains_refcounted: bool,
+	\\    payload_decref: Option<RocBoxPayloadDecref>,
+	\\    roc_host: &RocHost,
+	\\) {
+	\\    let data = match box_data_ptr(data_ptr) {
+	\\        Some(ptr) => ptr,
+	\\        None => return,
+	\\    };
+	\\    let rc = box_refcount_ptr(data);
+	\\    if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\        return; // REFCOUNT_STATIC_DATA
+	\\    }
+	\\    let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };
+	\\    if prev == 1 {
+	\\        fence(Ordering::Acquire);
+	\\        if let Some(callback) = payload_decref {
+	\\            unsafe { callback(data_ptr, roc_host as *const RocHost as *mut RocHost); }
+	\\        }
+	\\        free_box_allocation(data, payload_alignment, payload_contains_refcounted, roc_host);
+	\\    }
+	\\}
+	\\
+	\\/// Free a boxed payload allocation immediately after running payload teardown.
+	\\///
+	\\/// See `decref_box_with` for the meaning of `payload_contains_refcounted`.
+	\\///
+	\\/// # Safety
+	\\/// `data_ptr` must be a valid Roc box payload pointer that will not be used after this call.
+	\\pub unsafe fn free_box_with(
+	\\    data_ptr: RocBox,
+	\\    payload_alignment: usize,
+	\\    payload_contains_refcounted: bool,
+	\\    payload_decref: Option<RocBoxPayloadDecref>,
+	\\    roc_host: &RocHost,
+	\\) {
+	\\    let data = match box_data_ptr(data_ptr) {
+	\\        Some(ptr) => ptr,
+	\\        None => return,
+	\\    };
+	\\    if let Some(callback) = payload_decref {
+	\\        unsafe { callback(data_ptr, roc_host as *const RocHost as *mut RocHost); }
+	\\    }
+	\\    free_box_allocation(data, payload_alignment, payload_contains_refcounted, roc_host);
+	\\}
+	\\
+	\\/// Return true when a boxed payload data pointer has exactly one live ref.
+	\\pub fn is_unique_box(data_ptr: RocBox) -> bool {
+	\\    let data = match box_data_ptr(data_ptr) {
+	\\        Some(ptr) => ptr,
+	\\        None => return true,
+	\\    };
+	\\    let rc = box_refcount_ptr(data);
+	\\    unsafe { (*rc).load(Ordering::Acquire) == 1 }
+	\\}
+	\\
+	\\fn box_data_ptr(data_ptr: RocBox) -> Option<*mut u8> {
+	\\    if data_ptr.is_null() {
+	\\        None
+	\\    } else {
+	\\        Some(data_ptr as *mut u8)
+	\\    }
+	\\}
+	\\
+	\\fn box_refcount_ptr(data: *mut u8) -> *mut AtomicIsize {
+	\\    unsafe { data.sub(core::mem::size_of::<isize>()) as *mut AtomicIsize }
+	\\}
+	\\
+	\\fn free_box_allocation(
+	\\    data: *mut u8,
+	\\    payload_alignment: usize,
+	\\    payload_contains_refcounted: bool,
+	\\    roc_host: &RocHost,
+	\\) {
+	\\    let ptr_width = core::mem::size_of::<usize>();
+	\\    let required_space = if payload_contains_refcounted { checked_mul_usize(2, ptr_width, "Roc box header size overflow") } else { ptr_width };
+	\\    let header_bytes = required_space.max(payload_alignment);
+	\\    let alloc_alignment = ptr_width.max(payload_alignment);
+	\\    let base = unsafe { data.sub(header_bytes) } as *mut c_void;
+	\\    unsafe {
+	\\        roc_host.dealloc(base, alloc_alignment);
+	\\    }
+	\\}
+	\\
+
+## Generate self-contained RocStr type (simplified, raw pointer approach)
+generate_rust_roc_str : Str
+generate_rust_roc_str =
+	\\/// A Roc string value. Small strings (up to 23 bytes on 64-bit) are stored inline;
+	\\/// larger strings are heap-allocated with a reference count.
+	\\///
+	\\/// `bytes` is never tagged. Operations, host code, glue code, and object-file
+	\\/// relocations can use it directly as the UTF-8 byte pointer for non-small
+	\\/// strings. Seamless-slice tagging lives in `capacity_or_alloc_ptr` instead.
+	\\/// Big-string capacity is stored shifted left by one bit, so max capacity is
+	\\/// essentially `isize::MAX` bytes: about 2 GiB on 32-bit targets and 8 EiB on
+	\\/// 64-bit targets.
+	\\///
+	\\/// This type is ABI-compatible with the Zig RocStr (24 bytes, `#[repr(C)]`).
+	\\#[repr(C)]
+	\\#[derive(Clone, Copy)]
+	\\pub struct RocStr {
+	\\    pub bytes: *mut u8,
+	\\    pub capacity_or_alloc_ptr: usize,
+	\\    pub length: usize,
+	\\}
+	\\
+	\\const _: () = assert!(core::mem::size_of::<RocStr>() == 3 * core::mem::size_of::<usize>(), "RocStr size mismatch");
+	\\const _: () = assert!(core::mem::align_of::<RocStr>() == core::mem::align_of::<usize>(), "RocStr alignment mismatch");
+	\\const _: () = assert!(core::mem::offset_of!(RocStr, bytes) == 0, "RocStr.bytes offset mismatch");
+	\\const _: () = assert!(core::mem::offset_of!(RocStr, capacity_or_alloc_ptr) == core::mem::size_of::<usize>(), "RocStr.capacity_or_alloc_ptr offset mismatch");
+	\\const _: () = assert!(core::mem::offset_of!(RocStr, length) == 2 * core::mem::size_of::<usize>(), "RocStr.length offset mismatch");
+	\\
+	\\const ROC_STR_SIZE: usize = core::mem::size_of::<RocStr>();
+	\\const ROC_SMALL_STR_MAX_LEN: usize = ROC_STR_SIZE - 1;
+	\\const ROC_SMALL_STR_BIT: usize = isize::MIN as usize;
+	\\const ROC_SEAMLESS_SLICE_TAG: usize = 1;
+	\\
+	\\impl RocStr {
+	\\    /// Return an empty RocStr (small string with zero length).
+	\\    pub fn empty() -> Self {
+	\\        Self {
+	\\            bytes: core::ptr::null_mut(),
+	\\            capacity_or_alloc_ptr: 0,
+	\\            length: ROC_SMALL_STR_BIT,
+	\\        }
+	\\    }
+	\\
+	\\    /// Return true if this string is stored inline (small string optimization).
+	\\    #[inline]
+	\\    pub fn is_small_str(&self) -> bool {
+	\\        (self.length as isize) < 0
+	\\    }
+	\\
+	\\    /// Return true if this string is a seamless slice into another allocation.
+	\\    #[inline]
+	\\    pub fn is_seamless_slice(&self) -> bool {
+	\\        !self.is_small_str() && (self.capacity_or_alloc_ptr & ROC_SEAMLESS_SLICE_TAG) != 0
+	\\    }
+	\\
+	\\    /// Return the length of the string in bytes.
+	\\    #[inline]
+	\\    pub fn len(&self) -> usize {
+	\\        if self.is_small_str() {
+	\\            let bytes_ptr = self as *const Self as *const u8;
+	\\            let last_byte = unsafe { *bytes_ptr.add(ROC_STR_SIZE - 1) };
+	\\            (last_byte ^ 0b1000_0000) as usize
+	\\        } else {
+	\\            self.length
+	\\        }
+	\\    }
+	\\
+	\\    /// Return true if the string has zero length.
+	\\    #[inline]
+	\\    pub fn is_empty(&self) -> bool {
+	\\        self.len() == 0
+	\\    }
+	\\
+	\\    /// Return the string contents as a byte slice.
+	\\    pub fn as_slice(&self) -> &[u8] {
+	\\        let ptr = self.as_u8_ptr();
+	\\        unsafe { core::slice::from_raw_parts(ptr, self.len()) }
+	\\    }
+	\\
+	\\    /// Return a pointer to the raw UTF-8 bytes.
+	\\    #[inline]
+	\\    pub fn as_u8_ptr(&self) -> *const u8 {
+	\\        if self.is_small_str() {
+	\\            self as *const Self as *const u8
+	\\        } else {
+	\\            self.bytes as *const u8
+	\\        }
+	\\    }
+	\\
+	\\    /// Return the string contents as a `&str`.
+	\\    pub fn as_str(&self) -> &str {
+	\\        core::str::from_utf8(self.as_slice()).expect("RocStr contained invalid UTF-8")
+	\\    }
+	\\
+	\\    /// Create a RocStr from a UTF-8 byte slice, using `roc_host` for heap allocation if needed.
+	\\    pub fn from_slice(slice: &[u8], roc_host: &RocHost) -> Self {
+	\\        core::str::from_utf8(slice).expect("RocStr::from_slice requires valid UTF-8");
+	\\        if slice.len() < ROC_STR_SIZE {
+	\\            let mut result = Self::empty();
+	\\            let ptr = &mut result as *mut Self as *mut u8;
+	\\            unsafe {
+	\\                core::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len());
+	\\                *ptr.add(ROC_STR_SIZE - 1) = (slice.len() as u8) | 0b1000_0000;
+	\\            }
+	\\            result
+	\\        } else {
+	\\            let ptr_width = core::mem::size_of::<usize>();
+	\\            let total = checked_add_usize(ptr_width, slice.len(), "RocStr allocation size overflow");
+	\\            let base = unsafe { roc_host.alloc(core::mem::align_of::<usize>(), total) };
+	\\            let data_ptr = unsafe { (base as *mut u8).add(ptr_width) };
+	\\            // Write refcount = 1
+	\\            unsafe {
+	\\                let rc = (data_ptr as *mut isize).sub(1);
+	\\                *rc = 1;
+	\\                core::ptr::copy_nonoverlapping(slice.as_ptr(), data_ptr, slice.len());
+	\\            }
+	\\            Self {
+	\\                bytes: data_ptr,
+	\\                capacity_or_alloc_ptr: shifted_capacity(slice.len()),
+	\\                length: slice.len(),
+	\\            }
+	\\        }
+	\\    }
+	\\
+	\\    /// Create a RocStr from a `&str`.
+	\\    pub fn from_str(s: &str, roc_host: &RocHost) -> Self {
+	\\        Self::from_slice(s.as_bytes(), roc_host)
+	\\    }
+	\\
+	\\    /// Decrement the reference count; frees the allocation when it reaches zero.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `self` must own one live Roc reference. Calling this more than once for the
+	\\    /// same ownership reference may double-free.
+	\\    pub unsafe fn decref(self, roc_host: &RocHost) {
+	\\        if self.is_small_str() {
+	\\            return;
+	\\        }
+	\\        let alloc_ptr = self.get_allocation_ptr();
+	\\        if alloc_ptr.is_null() {
+	\\            return;
+	\\        }
+	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
+	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\            return; // REFCOUNT_STATIC_DATA—bytes are in read-only memory
+	\\        }
+	\\        let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };
+	\\        if prev == 1 {
+	\\            fence(Ordering::Acquire);
+	\\            let ptr_width = core::mem::size_of::<usize>();
+	\\            let base = unsafe { alloc_ptr.sub(ptr_width) } as *mut c_void;
+	\\            unsafe {
+	\\                roc_host.dealloc(base, core::mem::align_of::<usize>());
+	\\            }
+	\\        }
+	\\    }
+	\\
+	\\    /// Increment the reference count by `amount`.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `self` must point at a live Roc allocation. The retained references must
+	\\    /// be balanced by later decrefs.
+	\\    pub unsafe fn incref(self, amount: isize) {
+	\\        if self.is_small_str() {
+	\\            return;
+	\\        }
+	\\        let alloc_ptr = self.get_allocation_ptr();
+	\\        if alloc_ptr.is_null() {
+	\\            return;
+	\\        }
+	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
+	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\            return; // REFCOUNT_STATIC_DATA
+	\\        }
+	\\        unsafe {
+	\\            (*rc).fetch_add(amount, Ordering::Relaxed);
+	\\        }
+	\\    }
+	\\
+	\\    /// Return true if this string has a reference count of exactly one.
+	\\    pub fn is_unique(&self) -> bool {
+	\\        if self.is_small_str() {
+	\\            return true;
+	\\        }
+	\\        let alloc_ptr = self.get_allocation_ptr();
+	\\        if alloc_ptr.is_null() {
+	\\            return true;
+	\\        }
+	\\        unsafe {
+	\\            let rc = (alloc_ptr as *const AtomicIsize).sub(1);
+	\\            let count = (*rc).load(Ordering::Acquire);
+	\\            count == 0 || count == 1
+	\\        }
+	\\    }
+	\\
+	\\    fn get_allocation_ptr(&self) -> *mut u8 {
+	\\        if self.is_seamless_slice() {
+	\\            (self.capacity_or_alloc_ptr & !ROC_SEAMLESS_SLICE_TAG) as *mut u8
+	\\        } else {
+	\\            self.bytes
+	\\        }
+	\\    }
+	\\}
+	\\
+	\\impl core::fmt::Debug for RocStr {
+	\\    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+	\\        f.debug_struct("RocStr")
+	\\            .field("len", &self.len())
+	\\            .field("is_small", &self.is_small_str())
+	\\            .finish()
+	\\    }
+	\\}
+	\\
+
+## Generate zero-sized, statically dispatched ownership policies for host values.
+## A policy is carried only in the Rust type system; RocOwned has the same runtime
+## size as its value, and release calls monomorphize without a vtable or descriptor.
+generate_rust_release_support : Str
+generate_rust_release_support =
+	\\/// Statically describes how to release one owned Roc ABI value of type `T`.
+	\\///
+	\\/// # Safety
+	\\/// Implementations must match Roc's exact allocation and nested ownership layout.
+	\\pub unsafe trait RocRelease<T> {
+	\\    /// Release one owned `value`.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `value` must be one live owned Roc value whose allocation and nested
+	\\    /// ownership layout are the ones this policy describes, and it must not be
+	\\    /// used or released again afterwards.
+	\\    unsafe fn release(value: T, roc_host: &RocHost);
+	\\}
+	\\
+	\\/// An owning host-language wrapper around a value returned by Roc.
+	\\///
+	\\/// The release policy is zero-sized, so this wrapper adds no runtime metadata.
+	\\/// Dropping it recursively releases the value through the host's direct Roc
+	\\/// runtime symbols. Use `into_raw` to transfer ownership elsewhere.
+	\\#[repr(transparent)]
+	\\pub struct RocOwned<T, P: RocRelease<T>> {
+	\\    value: core::mem::ManuallyDrop<T>,
+	\\    policy: core::marker::PhantomData<P>,
+	\\}
+	\\
+	\\impl<T, P: RocRelease<T>> RocOwned<T, P> {
+	\\    /// Take ownership of a raw value returned by a Roc-provided entrypoint.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `value` must be one live owned result whose concrete release plan is `P`.
+	\\    pub unsafe fn from_raw(value: T) -> Self {
+	\\        Self { value: core::mem::ManuallyDrop::new(value), policy: core::marker::PhantomData }
+	\\    }
+	\\
+	\\    /// Transfer ownership back to raw host code without releasing the value.
+	\\    pub fn into_raw(self) -> T {
+	\\        let mut this = core::mem::ManuallyDrop::new(self);
+	\\        unsafe { core::mem::ManuallyDrop::take(&mut this.value) }
+	\\    }
+	\\}
+	\\
+	\\impl<T, P: RocRelease<T>> core::ops::Deref for RocOwned<T, P> {
+	\\    type Target = T;
+	\\
+	\\    fn deref(&self) -> &T {
+	\\        &self.value
+	\\    }
+	\\}
+	\\
+	\\impl<T, P: RocRelease<T>> AsRef<T> for RocOwned<T, P> {
+	\\    fn as_ref(&self) -> &T {
+	\\        &self.value
+	\\    }
+	\\}
+	\\
+	\\impl<T, P: RocRelease<T>> Drop for RocOwned<T, P> {
+	\\    fn drop(&mut self) {
+	\\        let value = unsafe { core::mem::ManuallyDrop::take(&mut self.value) };
+	\\        let roc_host = direct_roc_host();
+	\\        unsafe { P::release(value, &roc_host); }
+	\\    }
+	\\}
+	\\
+	\\pub struct RocNoopRelease;
+	\\
+	\\unsafe impl<T> RocRelease<T> for RocNoopRelease {
+	\\    unsafe fn release(_value: T, _roc_host: &RocHost) {}
+	\\}
+	\\
+	\\pub struct RocStrRelease;
+	\\
+	\\unsafe impl RocRelease<RocStr> for RocStrRelease {
+	\\    unsafe fn release(value: RocStr, roc_host: &RocHost) {
+	\\        unsafe { value.decref(roc_host); }
+	\\    }
+	\\}
+	\\
+	\\pub struct RocListRelease<P>(core::marker::PhantomData<P>);
+	\\
+	\\unsafe impl<T, P> RocRelease<RocListWith<T, true>> for RocListRelease<P>
+	\\where
+	\\    P: RocRelease<T>,
+	\\{
+	\\    unsafe fn release(value: RocListWith<T, true>, roc_host: &RocHost) {
+	\\        unsafe { value.release_with::<P>(roc_host); }
+	\\    }
+	\\}
+	\\
+	\\pub struct RocListSpineRelease;
+	\\
+	\\unsafe impl<T> RocRelease<RocListWith<T, false>> for RocListSpineRelease {
+	\\    unsafe fn release(value: RocListWith<T, false>, roc_host: &RocHost) {
+	\\        unsafe { value.decref(roc_host); }
+	\\    }
+	\\}
+	\\
+	\\pub struct RocErasedCallableRelease;
+	\\
+	\\unsafe impl RocRelease<RocErasedCallable> for RocErasedCallableRelease {
+	\\    unsafe fn release(value: RocErasedCallable, roc_host: &RocHost) {
+	\\        unsafe { decref_erased_callable(value, roc_host); }
+	\\    }
+	\\}
+	\\
+	\\pub struct RocBoxRelease<T, P>(core::marker::PhantomData<(T, P)>);
+	\\
+	\\unsafe extern "C" fn release_box_payload<T, P>(data_ptr: *mut c_void, roc_host: *mut RocHost)
+	\\where
+	\\    P: RocRelease<T>,
+	\\{
+	\\    if data_ptr.is_null() || roc_host.is_null() {
+	\\        return;
+	\\    }
+	\\    let value = unsafe { core::ptr::read(data_ptr as *const T) };
+	\\    unsafe { P::release(value, &*roc_host); }
+	\\}
+	\\
+	\\unsafe impl<T, P> RocRelease<*mut T> for RocBoxRelease<T, P>
+	\\where
+	\\    P: RocRelease<T>,
+	\\{
+	\\    unsafe fn release(value: *mut T, roc_host: &RocHost) {
+	\\        unsafe {
+	\\            decref_box_with(
+	\\                value as RocBox,
+	\\                core::mem::align_of::<T>(),
+	\\                true,
+	\\                Some(release_box_payload::<T, P>),
+	\\                roc_host,
+	\\            );
+	\\        }
+	\\    }
+	\\}
+	\\
+	\\pub struct RocBoxSpineRelease<T>(core::marker::PhantomData<T>);
+	\\
+	\\unsafe impl<T> RocRelease<*mut T> for RocBoxSpineRelease<T> {
+	\\    unsafe fn release(value: *mut T, roc_host: &RocHost) {
+	\\        unsafe {
+	\\            decref_box_with(
+	\\                value as RocBox,
+	\\                core::mem::align_of::<T>(),
+	\\                false,
+	\\                None,
+	\\                roc_host,
+	\\            );
+	\\        }
+	\\    }
+	\\}
+	\\
+
+## Generate the list types for lists a host cannot release (static Rust code)
+generate_rust_roc_held_lists : Str
+generate_rust_roc_held_lists =
+	\\/// A Roc list whose items have a type only the application knows.
+	\\///
+	\\/// This host knows neither the size of an item nor whether items are
+	\\/// refcounted, so it cannot read an item, allocate such a list, or release
+	\\/// one. It can move the list, retain it, and pass it back to Roc. To release
+	\\/// it, pass it to a Roc function that takes ownership of it.
+	\\#[repr(C)]
+	\\#[derive(Clone, Copy)]
+	\\pub struct RocOpaqueList {
+	\\    pub elements: *mut c_void,
+	\\    pub length: usize,
+	\\    pub capacity_or_alloc_ptr: usize,
+	\\}
+	\\
+	\\impl RocOpaqueList {
+	\\    /// Return the number of items in the list.
+	\\    #[inline]
+	\\    pub fn len(&self) -> usize {
+	\\        self.length
+	\\    }
+	\\
+	\\    /// Return true if the list has zero items.
+	\\    #[inline]
+	\\    pub fn is_empty(&self) -> bool {
+	\\        self.length == 0
+	\\    }
+	\\
+	\\    /// Increment the reference count by `amount`.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `self` must point at a live Roc list allocation. The retained references
+	\\    /// must be handed back to Roc.
+	\\    pub unsafe fn incref(self, amount: isize) {
+	\\        unsafe { retain_list_allocation(self.elements as *mut u8, self.capacity_or_alloc_ptr, amount); }
+	\\    }
+	\\}
+	\\
+	\\/// A Roc list whose items hold opaque Roc values.
+	\\///
+	\\/// The items have a known layout, so the host can read them. Whether the
+	\\/// opaque values inside them are refcounted is known only to Roc, and the
+	\\/// list's allocation header depends on it, so the host cannot allocate such
+	\\/// a list or release one. It can move the list, retain it, and pass it back
+	\\/// to Roc. To release it, pass it to a Roc function that takes ownership of
+	\\/// it.
+	\\#[repr(C)]
+	\\pub struct RocHeldList<T> {
+	\\    pub elements: *mut T,
+	\\    pub length: usize,
+	\\    pub capacity_or_alloc_ptr: usize,
+	\\}
+	\\
+	\\impl<T> Clone for RocHeldList<T> {
+	\\    fn clone(&self) -> Self {
+	\\        *self
+	\\    }
+	\\}
+	\\
+	\\impl<T> Copy for RocHeldList<T> {}
+	\\
+	\\impl<T> RocHeldList<T> {
+	\\    /// Return the number of items in the list.
+	\\    #[inline]
+	\\    pub fn len(&self) -> usize {
+	\\        self.length
+	\\    }
+	\\
+	\\    /// Return true if the list has zero items.
+	\\    #[inline]
+	\\    pub fn is_empty(&self) -> bool {
+	\\        self.length == 0
+	\\    }
+	\\
+	\\    /// Return the list items as a slice.
+	\\    pub fn as_slice(&self) -> &[T] {
+	\\        if self.elements.is_null() {
+	\\            &[]
+	\\        } else {
+	\\            unsafe { core::slice::from_raw_parts(self.elements, self.length) }
+	\\        }
+	\\    }
+	\\
+	\\    /// Increment the reference count by `amount`.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `self` must point at a live Roc list allocation. The retained references
+	\\    /// must be handed back to Roc.
+	\\    pub unsafe fn incref(self, amount: isize) {
+	\\        unsafe { retain_list_allocation(self.elements as *mut u8, self.capacity_or_alloc_ptr, amount); }
+	\\    }
+	\\}
+	\\
+	\\/// Add `amount` references to a list's allocation. The refcount slot sits
+	\\/// directly before the allocation's first item whatever the item type is,
+	\\/// and a seamless slice names its allocation in `capacity_or_alloc_ptr`.
+	\\unsafe fn retain_list_allocation(elements: *mut u8, capacity_or_alloc_ptr: usize, amount: isize) {
+	\\    let alloc_ptr = if (capacity_or_alloc_ptr & 1) != 0 {
+	\\        (capacity_or_alloc_ptr & !1) as *mut u8
+	\\    } else {
+	\\        elements
+	\\    };
+	\\    if alloc_ptr.is_null() {
+	\\        return;
+	\\    }
+	\\    let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
+	\\    if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\        return; // REFCOUNT_STATIC_DATA
+	\\    }
+	\\    unsafe {
+	\\        (*rc).fetch_add(amount, Ordering::Relaxed);
+	\\    }
+	\\}
+	\\
+
+## Generate self-contained RocList<T> type (simplified, raw pointer approach)
+generate_rust_roc_list : Str
+generate_rust_roc_list =
+	\\/// A generic Roc list. Elements are reference-counted and heap-allocated.
+	\\///
+	\\/// When `ELEMENTS_REFCOUNTED` is true (the default via `RocList<T>`), an extra
+	\\/// `ptr_width` bytes are reserved in the allocation header for the element count,
+	\\/// matching the Roc runtime's `allocateWithRefcount` layout.
+	\\pub type RocList<T> = RocListWith<T, true>;
+	\\
+	\\/// Parameterized list constructor; use `RocList<T>` for refcounted elements.
+	\\#[repr(C)]
+	\\#[derive(Clone, Copy)]
+	\\pub struct RocListWith<T, const ELEMENTS_REFCOUNTED: bool> {
+	\\    pub elements: *mut T,
+	\\    pub length: usize,
+	\\    pub capacity_or_alloc_ptr: usize,
+	\\}
+	\\
+	\\const _: () = assert!(core::mem::size_of::<RocList<u8>>() == 3 * core::mem::size_of::<usize>(), "RocList size mismatch");
+	\\const _: () = assert!(core::mem::align_of::<RocList<u8>>() == core::mem::align_of::<usize>(), "RocList alignment mismatch");
+	\\const _: () = assert!(core::mem::offset_of!(RocList<u8>, elements) == 0, "RocList.elements offset mismatch");
+	\\const _: () = assert!(core::mem::offset_of!(RocList<u8>, length) == core::mem::size_of::<usize>(), "RocList.length offset mismatch");
+	\\const _: () = assert!(core::mem::offset_of!(RocList<u8>, capacity_or_alloc_ptr) == 2 * core::mem::size_of::<usize>(), "RocList.capacity_or_alloc_ptr offset mismatch");
+	\\
+	\\impl<T, const ELEMENTS_REFCOUNTED: bool> RocListWith<T, ELEMENTS_REFCOUNTED> {
+	\\    #[inline]
+	\\    fn header_bytes() -> usize {
+	\\        let ptr_width = core::mem::size_of::<usize>();
+	\\        let required_space = if ELEMENTS_REFCOUNTED { checked_mul_usize(2, ptr_width, "RocList header size overflow") } else { ptr_width };
+	\\        required_space.max(core::mem::align_of::<T>())
+	\\    }
+	\\
+	\\    /// Return an empty RocList.
+	\\    pub fn empty() -> Self {
+	\\        Self {
+	\\            elements: core::ptr::null_mut(),
+	\\            length: 0,
+	\\            capacity_or_alloc_ptr: 0,
+	\\        }
+	\\    }
+	\\
+	\\    /// Return the number of elements in the list.
+	\\    #[inline]
+	\\    pub fn len(&self) -> usize {
+	\\        self.length
+	\\    }
+	\\
+	\\    /// Return true if the list has zero elements.
+	\\    #[inline]
+	\\    pub fn is_empty(&self) -> bool {
+	\\        self.length == 0
+	\\    }
+	\\
+	\\    /// Return true if this list is a seamless slice into another allocation.
+	\\    /// Slices share the rc slot with their backing allocation; the alloc ptr is
+	\\    /// encoded in `capacity_or_alloc_ptr` with the low bit set.
+	\\    #[inline]
+	\\    pub fn is_seamless_slice(&self) -> bool {
+	\\        (self.capacity_or_alloc_ptr & 1) != 0
+	\\    }
+	\\
+	\\    /// Resolve `self` to the start of its backing allocation (the element block
+	\\    /// just after the rc slot). Returns `null` for empty lists. Handles both
+	\\    /// whole-backing and seamless-slice forms.
+	\\    fn get_allocation_ptr(&self) -> *mut u8 {
+	\\        if self.is_seamless_slice() {
+	\\            (self.capacity_or_alloc_ptr & !1) as *mut u8
+	\\        } else {
+	\\            self.elements as *mut u8
+	\\        }
+	\\    }
+	\\
+	\\    fn allocation_element_count(&self) -> usize {
+	\\        if self.is_seamless_slice() && ELEMENTS_REFCOUNTED {
+	\\            let alloc_ptr = self.get_allocation_ptr();
+	\\            if alloc_ptr.is_null() {
+	\\                return 0;
+	\\            }
+	\\            unsafe {
+	\\                let ptr = alloc_ptr as *const usize;
+	\\                *ptr.sub(2)
+	\\            }
+	\\        } else {
+	\\            self.length
+	\\        }
+	\\    }
+	\\
+	\\    /// Return the list elements as a slice.
+	\\    pub fn as_slice(&self) -> &[T] {
+	\\        if self.elements.is_null() {
+	\\            &[]
+	\\        } else {
+	\\            unsafe { core::slice::from_raw_parts(self.elements, self.length) }
+	\\        }
+	\\    }
+	\\
+	\\    /// Return all items in the backing allocation, not just this slice.
+	\\    pub fn allocation_items(&self) -> &[T] {
+	\\        if self.elements.is_null() {
+	\\            &[]
+	\\        } else {
+	\\            unsafe { core::slice::from_raw_parts(self.get_allocation_ptr() as *const T, self.allocation_element_count()) }
+	\\        }
+	\\    }
+	\\
+	\\    /// Allocate a new list with space for `length` elements.
+	\\    ///
+	\\    /// # Safety
+	\\    /// The returned element memory is uninitialized while `length` is already
+	\\    /// set. The caller must initialize every element before exposing the list
+	\\    /// to safe APIs, Roc code, or generated refcount helpers.
+	\\    pub unsafe fn allocate(length: usize, roc_host: &RocHost) -> Self {
+	\\        if length == 0 {
+	\\            return Self::empty();
+	\\        }
+	\\        let align = core::mem::align_of::<T>().max(core::mem::align_of::<usize>());
+	\\        let header_bytes = Self::header_bytes();
+	\\        let data_bytes = checked_mul_usize(length, core::mem::size_of::<T>(), "RocList allocation element bytes overflow");
+	\\        let total = checked_add_usize(data_bytes, header_bytes, "RocList allocation size overflow");
+	\\        let base = unsafe { roc_host.alloc(align, total) };
+	\\        let data_ptr = unsafe { (base as *mut u8).add(header_bytes) };
+	\\        unsafe {
+	\\            let rc = (data_ptr as *mut isize).sub(1);
+	\\            *rc = 1;
+	\\            if ELEMENTS_REFCOUNTED {
+	\\                let count = (data_ptr as *mut usize).sub(2);
+	\\                *count = length;
+	\\            }
+	\\        }
+	\\        Self {
+	\\            elements: data_ptr as *mut T,
+	\\            length,
+	\\            capacity_or_alloc_ptr: shifted_capacity(length),
+	\\        }
+	\\    }
+	\\
+	\\    /// Create a RocList from a slice, copying elements into a new allocation.
+	\\    ///
+	\\    /// # Safety
+	\\    /// This is a shallow copy. For element types that own Roc references, the
+	\\    /// caller must ensure each copied element is already retained for the new
+	\\    /// list or will not be decref'd through another owner.
+	\\    pub unsafe fn from_slice(slice: &[T], roc_host: &RocHost) -> Self where T: Copy {
+	\\        if slice.is_empty() {
+	\\            return Self::empty();
+	\\        }
+	\\        let list = unsafe { Self::allocate(slice.len(), roc_host) };
+	\\        unsafe {
+	\\            core::ptr::copy_nonoverlapping(
+	\\                slice.as_ptr(),
+	\\                list.elements,
+	\\                slice.len(),
+	\\            );
+	\\        }
+	\\        list
+	\\    }
+	\\
+	\\    /// Drop this reference to the list allocation, freeing it when this was the
+	\\    /// last one.
+	\\    ///
+	\\    /// Shallow: it never touches the elements. To release an owned list whose
+	\\    /// elements are refcounted, call that list's generated `decref_list_of_...`
+	\\    /// helper instead, which drops the elements when this reference is the last
+	\\    /// one and then calls this.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `self` must own one live Roc list reference. Calling this more than once
+	\\    /// for the same ownership reference may double-free.
+	\\    pub unsafe fn decref(self, roc_host: &RocHost) {
+	\\        if self.elements.is_null() {
+	\\            return;
+	\\        }
+	\\        let alloc_ptr = self.get_allocation_ptr();
+	\\        if alloc_ptr.is_null() {
+	\\            return;
+	\\        }
+	\\        let align = core::mem::align_of::<T>().max(core::mem::align_of::<usize>());
+	\\        let header_bytes = Self::header_bytes();
+	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
+	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\            return; // REFCOUNT_STATIC_DATA—elements are in read-only memory
+	\\        }
+	\\        let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };
+	\\        if prev == 1 {
+	\\            fence(Ordering::Acquire);
+	\\            let base = unsafe { alloc_ptr.sub(header_bytes) } as *mut c_void;
+	\\            unsafe {
+	\\                roc_host.dealloc(base, align);
+	\\            }
+	\\        }
+	\\    }
+	\\
+	\\    /// Recursively release this list and its elements.
+	\\    ///
+	\\    /// The reference-count decrement claims the final reference atomically
+	\\    /// before reading any elements, so concurrent releases cannot skip or
+	\\    /// duplicate element teardown.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `self` must own one live Roc list reference, and `P` must exactly
+	\\    /// describe how Roc releases one initialized `T` element.
+	\\    pub unsafe fn release_with<P>(self, roc_host: &RocHost)
+	\\    where
+	\\        P: RocRelease<T>,
+	\\    {
+	\\        if self.elements.is_null() {
+	\\            return;
+	\\        }
+	\\        let alloc_ptr = self.get_allocation_ptr();
+	\\        if alloc_ptr.is_null() {
+	\\            return;
+	\\        }
+	\\        let align = core::mem::align_of::<T>().max(core::mem::align_of::<usize>());
+	\\        let header_bytes = Self::header_bytes();
+	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
+	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\            return; // REFCOUNT_STATIC_DATA—elements are in read-only memory
+	\\        }
+	\\        let prev = unsafe { (*rc).fetch_sub(1, Ordering::Release) };
+	\\        if prev == 1 {
+	\\            fence(Ordering::Acquire);
+	\\            if ELEMENTS_REFCOUNTED {
+	\\                for item_ref in self.allocation_items() {
+	\\                    let item = unsafe { core::ptr::read(item_ref) };
+	\\                    unsafe { P::release(item, roc_host); }
+	\\                }
+	\\            }
+	\\            let base = unsafe { alloc_ptr.sub(header_bytes) } as *mut c_void;
+	\\            unsafe { roc_host.dealloc(base, align); }
+	\\        }
+	\\    }
+	\\
+	\\    /// Increment the reference count by `amount`.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `self` must point at a live Roc list allocation. The retained references
+	\\    /// must be balanced by later decrefs.
+	\\    pub unsafe fn incref(self, amount: isize) {
+	\\        if self.elements.is_null() {
+	\\            return;
+	\\        }
+	\\        let alloc_ptr = self.get_allocation_ptr();
+	\\        if alloc_ptr.is_null() {
+	\\            return;
+	\\        }
+	\\        let rc = unsafe { (alloc_ptr as *mut AtomicIsize).sub(1) };
+	\\        if unsafe { (*rc).load(Ordering::Relaxed) } == 0 {
+	\\            return; // REFCOUNT_STATIC_DATA
+	\\        }
+	\\        unsafe {
+	\\            (*rc).fetch_add(amount, Ordering::Relaxed);
+	\\        }
+	\\    }
+	\\
+	\\    /// Return true if this list has a reference count of exactly one.
+	\\    pub fn is_unique(&self) -> bool {
+	\\        let alloc_ptr = self.get_allocation_ptr();
+	\\        if alloc_ptr.is_null() {
+	\\            return true;
+	\\        }
+	\\        unsafe {
+	\\            let rc = (alloc_ptr as *const AtomicIsize).sub(1);
+	\\            let count = (*rc).load(Ordering::Acquire);
+	\\            count == 0 || count == 1
+	\\        }
+	\\    }
+	\\
+	\\    /// Return true if this list's allocation has exactly one counted ref.
+	\\    pub fn has_one_ref(&self) -> bool {
+	\\        let alloc_ptr = self.get_allocation_ptr();
+	\\        if alloc_ptr.is_null() {
+	\\            return false;
+	\\        }
+	\\        unsafe {
+	\\            let rc = (alloc_ptr as *const AtomicIsize).sub(1);
+	\\            (*rc).load(Ordering::Acquire) == 1
+	\\        }
+	\\    }
+	\\}
+	\\
+	\\impl<T: core::fmt::Debug, const ELEMENTS_REFCOUNTED: bool> core::fmt::Debug for RocListWith<T, ELEMENTS_REFCOUNTED> {
+	\\    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+	\\        f.debug_list().entries(self.as_slice().iter()).finish()
+	\\    }
+	\\}
+	\\
+
+## Generate index constants with SCREAMING_SNAKE_CASE
+generate_index_constants_rust : List(HostedFunctionInfo), U64 -> Str
+generate_index_constants_rust = |hosted_functions, count| {
+	var $constants = "/// Total number of hosted functions in this platform.\npub const HOSTED_FUNCTION_COUNT: u32 = ${U64.to_str(count)};\n\n"
+
+	for func in hosted_functions {
+		screaming = name_to_screaming_snake(func.name)
+		$constants = Str.concat(
+			$constants,
+			"/// Dispatch index for ${func.name}.\npub const HOSTED_IDX_${screaming}: u32 = ${U64.to_str(func.index)};\n",
+		)
+	}
+
+	$constants
+}
+
+## Generate #[repr(C)] structs for element types found in the type table.
+generate_element_type_structs_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_element_type_structs_rust = |type_table, duplicate_names, preferred_names| {
+	var $structs = ""
+	var $seen_names = []
+	var $type_id = 0
+
+	for type_info in type_table_entries(type_table) {
+		match type_info.repr {
+			RocRecord(rec) =>
+				if rec.name != "" and !type_table.is_zero_sized($type_id) {
+					struct_name = record_struct_name(type_table, duplicate_names, $type_id, rec)
+					if !(List.contains($seen_names, struct_name)) {
+						$seen_names = $seen_names.append(struct_name)
+						doc = "/// Element type for ${rec.name}\n"
+						$structs = Str.concat(
+							$structs,
+							generate_record_struct_decl_rust(doc, struct_name, type_table, duplicate_names, preferred_names, abi_record_fields(type_info.layout), rec.anonymous, type_info.layout),
+						)
+					}
+				}
+			_ => {}
+		}
+
+		$type_id = $type_id + 1
+	}
+
+	$structs
+}
+
+## Generate #[repr(C)] structs for tag union types found in the type table.
+generate_tag_union_structs_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_tag_union_structs_rust = |type_table, duplicate_names, preferred_names| {
+	var $structs = ""
+	var $seen_names = []
+	var $type_id = 0
+
+	for type_info in type_table_entries(type_table) {
+		match type_info.repr {
+			RocTagUnion(tu) =>
+				match type_table.single_variant_payload($type_id, tu) {
+					SinglePayloadStruct(tag_layout) => {
+						struct_name = tag_union_struct_name(type_table, preferred_names, duplicate_names, $type_id, tu)
+						if !(List.contains($seen_names, struct_name)) {
+							$seen_names = $seen_names.append(struct_name)
+							doc = "/// Payloads of the only variant of ${tu.name}, which stores no discriminant.\n"
+							$structs = Str.concat(
+								$structs,
+								generate_record_struct_decl_rust(doc, struct_name, type_table, duplicate_names, preferred_names, tag_layout.payload_fields, Bool.False, type_info.layout),
+							)
+						}
+					}
+					NotSingleVariant =>
+						if tu.name != "" {
+							struct_name = tag_union_struct_name(type_table, preferred_names, duplicate_names, $type_id, tu)
+							if !(List.contains($seen_names, struct_name)) {
+								$seen_names = $seen_names.append(struct_name)
+								$structs = Str.concat($structs, generate_single_tag_union_rust(type_table, duplicate_names, preferred_names, $type_id, tu, type_info.layout))
+							}
+						}
+					SinglePayload(_) => {}
+					SingleNoPayload => {}
+				}
+			_ => {}
+		}
+
+		$type_id = $type_id + 1
+	}
+
+	$structs
+}
+
+## Generate Rust code for a single multi-variant tag union.
+generate_single_tag_union_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64, TagUnionRepr, AbiLayout -> Str
+generate_single_tag_union_rust = |type_table, duplicate_names, preferred_names, type_id, tu, abi_layout| {
+	tag_names = List.map(tu.tags, |tag| tag.name)
+	tag_snakes = tag_snakes_rust(tu)
+	member_lint = member_lint_rust(tag_snakes)
+	# A variant is spelled as Roc spells its tag, and Roc accepts an underscore
+	# in a tag where Rust's naming lint does not.
+	variant_lint = if List.any(tag_names, |name| Str.contains(name, "_")) {
+		"#[allow(non_camel_case_types)]\n"
+	} else {
+		""
+	}
+	struct_name = tag_union_struct_name(type_table, preferred_names, duplicate_names, type_id, tu)
+	disc_type = disc_type_for_size(abi_discriminant_size(abi_layout))
+	abi_tags = abi_tag_layouts(abi_layout)
+
+	# Check if this is a pure enum (all variants have no payload)
+	is_pure_enum = !abi_layout.tag_union_has_payload()
+
+	if is_pure_enum {
+		# Pure enum: just emit the enum type
+		var $variants = ""
+		var $idx = 0
+		for tag in tu.tags {
+			$variants = Str.concat($variants, "    ${rust_variant_ident(tag.name)} = ${U64.to_str($idx)},\n")
+			$idx = $idx + 1
+		}
+
+		assertions = rust_layout_assertions(struct_name, abi_layout)
+		"/// Tag union: ${tu.name}\n${variant_lint}#[repr(${disc_type})]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum ${struct_name} {\n${$variants}}\n\n${assertions}"
+	} else {
+		# Generate tuple structs for any variant with >1 payload
+		var $tuple_structs = ""
+		var $tag_idx = 0
+		for tag in tu.tags {
+			tag_layout = abi_tag_at(abi_tags, $tag_idx)
+			if abi_tag_has_payload(tag_layout) and List.len(tag.payload) > 1 {
+				tuple_name = "${struct_name}${capitalize_first(tag.name)}Payload"
+				tuple_doc = "/// Payload struct for ${tag.name} variant.\n"
+				$tuple_structs = Str.concat($tuple_structs, generate_payload_struct_decl_rust(tuple_doc, tuple_name, type_table, duplicate_names, preferred_names, tag_layout.payload_fields, tag_layout))
+			}
+			$tag_idx = $tag_idx + 1
+		}
+
+		# Tag enum
+		var $enum_variants = ""
+		var $idx = 0
+		for enum_tag in tu.tags {
+			$enum_variants = Str.concat($enum_variants, "    ${rust_variant_ident(enum_tag.name)} = ${U64.to_str($idx)},\n")
+			$idx = $idx + 1
+		}
+
+		# Payload union - Rust requires ManuallyDrop for non-Copy fields in unions
+		var $union_fields = ""
+		var $payload_accessors = ""
+		var $union_tag_idx = 0
+		for union_tag in tu.tags {
+			tag_layout = abi_tag_at(abi_tags, $union_tag_idx)
+			snake = tag_snakes.at($union_tag_idx)
+			payload_field = rust_keyword_safe_ident(snake)
+			if !(abi_tag_has_payload(tag_layout)) {
+				# No-payload variant: use [u8; 0]
+				$union_fields = Str.concat($union_fields, "    pub ${payload_field}: [u8; 0],\n")
+			} else if List.len(union_tag.payload) == 1 {
+				rust_type = match List.first(union_tag.payload) {
+					Ok(pid) => type_id_to_rust(type_table, duplicate_names, preferred_names, pid)
+					Err(_) => {
+						crash "glue invariant violated: single-payload tag had no payload"
+					}
+				}
+				# Wrap in ManuallyDrop since union fields must be Copy or ManuallyDrop
+				$union_fields = Str.concat($union_fields, "    pub ${payload_field}: core::mem::ManuallyDrop<${rust_type}>,\n")
+				$payload_accessors = Str.concat(
+					$payload_accessors,
+					"    /// Borrow the `${union_tag.name}` payload without creating another owner.\n    ///\n    /// # Safety\n    /// `self.tag` must be `${struct_name}Tag::${rust_variant_ident(union_tag.name)}` and the payload must still be initialized.\n    #[cfg(target_pointer_width = \"32\")]\n    pub unsafe fn borrow_payload_${snake}_unchecked(&self) -> &${rust_type} {\n        unsafe { &*(&raw const self.payload).cast::<${rust_type}>() }\n    }\n\n    /// Borrow the `${union_tag.name}` payload without creating another owner.\n    ///\n    /// # Safety\n    /// `self.tag` must be `${struct_name}Tag::${rust_variant_ident(union_tag.name)}` and the payload must still be initialized.\n    #[cfg(not(target_pointer_width = \"32\"))]\n    pub unsafe fn borrow_payload_${snake}_unchecked(&self) -> &${rust_type} {\n        unsafe { &*(&self.payload.${payload_field} as *const core::mem::ManuallyDrop<${rust_type}> as *const ${rust_type}) }\n    }\n\n    /// Move the `${union_tag.name}` payload out of one owned tag-union shell.\n    ///\n    /// # Safety\n    /// `self.tag` must be `${struct_name}Tag::${rust_variant_ident(union_tag.name)}`. After this call, `self` is logically uninitialized and must not be read or destroyed.\n    #[cfg(target_pointer_width = \"32\")]\n    pub unsafe fn take_payload_${snake}_unchecked(&mut self) -> ${rust_type} {\n        unsafe { core::ptr::read((&raw const self.payload).cast::<${rust_type}>()) }\n    }\n\n    /// Move the `${union_tag.name}` payload out of one owned tag-union shell.\n    ///\n    /// # Safety\n    /// `self.tag` must be `${struct_name}Tag::${rust_variant_ident(union_tag.name)}`. After this call, `self` is logically uninitialized and must not be read or destroyed.\n    #[cfg(not(target_pointer_width = \"32\"))]\n    pub unsafe fn take_payload_${snake}_unchecked(&mut self) -> ${rust_type} {\n        unsafe { core::mem::ManuallyDrop::take(&mut self.payload.${payload_field}) }\n    }\n\n",
+				)
+			} else {
+				tuple_name = "${struct_name}${capitalize_first(union_tag.name)}Payload"
+				$union_fields = Str.concat($union_fields, "    pub ${payload_field}: core::mem::ManuallyDrop<${tuple_name}>,\n")
+				$payload_accessors = Str.concat(
+					$payload_accessors,
+					"    /// Borrow the `${union_tag.name}` payload without creating another owner.\n    ///\n    /// # Safety\n    /// `self.tag` must be `${struct_name}Tag::${rust_variant_ident(union_tag.name)}` and the payload must still be initialized.\n    #[cfg(target_pointer_width = \"32\")]\n    pub unsafe fn borrow_payload_${snake}_unchecked(&self) -> &${tuple_name} {\n        unsafe { &*(&raw const self.payload).cast::<${tuple_name}>() }\n    }\n\n    /// Borrow the `${union_tag.name}` payload without creating another owner.\n    ///\n    /// # Safety\n    /// `self.tag` must be `${struct_name}Tag::${rust_variant_ident(union_tag.name)}` and the payload must still be initialized.\n    #[cfg(not(target_pointer_width = \"32\"))]\n    pub unsafe fn borrow_payload_${snake}_unchecked(&self) -> &${tuple_name} {\n        unsafe { &*(&self.payload.${payload_field} as *const core::mem::ManuallyDrop<${tuple_name}> as *const ${tuple_name}) }\n    }\n\n    /// Move the `${union_tag.name}` payload out of one owned tag-union shell.\n    ///\n    /// # Safety\n    /// `self.tag` must be `${struct_name}Tag::${rust_variant_ident(union_tag.name)}`. After this call, `self` is logically uninitialized and must not be read or destroyed.\n    #[cfg(target_pointer_width = \"32\")]\n    pub unsafe fn take_payload_${snake}_unchecked(&mut self) -> ${tuple_name} {\n        unsafe { core::ptr::read((&raw const self.payload).cast::<${tuple_name}>()) }\n    }\n\n    /// Move the `${union_tag.name}` payload out of one owned tag-union shell.\n    ///\n    /// # Safety\n    /// `self.tag` must be `${struct_name}Tag::${rust_variant_ident(union_tag.name)}`. After this call, `self` is logically uninitialized and must not be read or destroyed.\n    #[cfg(not(target_pointer_width = \"32\"))]\n    pub unsafe fn take_payload_${snake}_unchecked(&mut self) -> ${tuple_name} {\n        unsafe { core::mem::ManuallyDrop::take(&mut self.payload.${payload_field}) }\n    }\n\n",
+				)
+			}
+			$union_tag_idx = $union_tag_idx + 1
+		}
+
+		# Size/alignment assertions
+		assertions = rust_tag_union_layout_assertions(struct_name, abi_layout)
+		alignment_marker = "${struct_name}PayloadAlignment"
+
+		decl =
+			\\/// Tag discriminant for ${tu.name}.
+			\\${variant_lint}#[repr(${disc_type})]
+			\\#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+			\\pub enum ${struct_name}Tag {
+			\\${$enum_variants}}
+			\\
+			\\${member_lint}#[repr(C)]
+			\\#[derive(Clone, Copy)]
+			\\pub union ${struct_name}Payload {
+			\\${$union_fields}}
+			\\
+			\\#[cfg(target_pointer_width = "32")]
+			\\#[repr(align(${U64.to_str(abi_layout.alignment32)}))]
+			\\#[derive(Clone, Copy)]
+			\\pub struct ${alignment_marker};
+			\\
+			\\/// Tag union: ${tu.name}
+			\\#[cfg(target_pointer_width = "32")]
+			\\#[repr(C)]
+			\\#[derive(Clone, Copy)]
+			\\pub struct ${struct_name} {
+			\\    pub _payload_alignment: [${alignment_marker}; 0],
+			\\    pub payload: [u8; ${U64.to_str(abi_discriminant_offset(abi_layout, Pointer32))}],
+			\\    pub tag: ${struct_name}Tag,
+			\\}
+			\\
+			\\/// Tag union: ${tu.name}
+			\\#[cfg(not(target_pointer_width = "32"))]
+			\\#[repr(C)]
+			\\#[derive(Clone, Copy)]
+			\\pub struct ${struct_name} {
+			\\    pub payload: ${struct_name}Payload,
+			\\    pub tag: ${struct_name}Tag,
+			\\}
+			\\
+			\\${member_lint}impl ${struct_name} {
+			\\${$payload_accessors}}
+		"${$tuple_structs}${decl}\n\n${assertions}"
+	}
+}
+
+## Generate #[repr(C)] structs for record return types using type table.
+generate_all_record_structs_rust : List(HostedFunctionInfo), TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_all_record_structs_rust = |hosted_functions, type_table, duplicate_names, preferred_names| {
+	var $structs = ""
+	arg_shape = ArgShape.from_table(type_table)
+	for func in hosted_functions {
+		match arg_shape.record_lookup(func.ret_type_id) {
+			ArgRecordFound(record) => {
+				struct_name = hosted_struct_name_rust(duplicate_names, func)
+				doc = "/// Return type record for ${func.name}\n/// Fields ordered by compiler-emitted ABI offsets.\n"
+				$structs = Str.concat(
+					$structs,
+					generate_record_struct_decl_rust(doc, "${struct_name}RetRecord", type_table, duplicate_names, preferred_names, record.fields, record.anonymous, record.layout),
+				)
+			}
+			ArgNotRecord => {}
+		}
+	}
+	$structs
+}
+
+## Generate all argument #[repr(C)] structs
+generate_all_args_structs_rust : List(HostedFunctionInfo), TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_all_args_structs_rust = |hosted_functions, type_table, duplicate_names, preferred_names| {
+	var $structs = ""
+	for func in hosted_functions {
+		$structs = Str.concat($structs, generate_args_struct_rust(func, type_table, duplicate_names, preferred_names))
+	}
+	$structs
+}
+
+## Generate a single argument struct (empty string if no args).
+generate_args_struct_rust : HostedFunctionInfo, TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_args_struct_rust = |func, type_table, duplicate_names, preferred_names| {
+	struct_name = hosted_struct_name_rust(duplicate_names, func)
+	arg_shape = ArgShape.from_table(type_table)
+
+	match arg_shape.hosted_args(func) {
+		NoMeaningfulArgs => ""
+		SingleRecordArg(record) => {
+			doc = "/// Arguments for ${func.name}\n/// Roc signature: ${func.type_str}\n/// Refcounted fields are owned by the hosted function.\n"
+			decl = generate_record_struct_decl_rust(doc, "${struct_name}Args", type_table, duplicate_names, preferred_names, record.fields, record.anonymous, record.layout)
+			# This struct is the hosted function's parameter type, so the host
+			# releases its owned refcounted fields through these methods.
+			Str.concat(decl, generate_abi_refcount_helpers_rust(type_table, duplicate_names, preferred_names, "${struct_name}Args", record.fields))
+		}
+		PositionalArgs(arg_type_ids) => {
+			var $positional_fields = ""
+			var $idx = 0
+			for arg_type_id in arg_type_ids {
+				rust_type = type_id_to_rust(type_table, duplicate_names, preferred_names, arg_type_id)
+				$positional_fields = Str.concat(
+					$positional_fields,
+					"    pub arg${U64.to_str($idx)}: ${rust_type},\n",
+				)
+				$idx = $idx + 1
+			}
+
+			doc = "/// Arguments for ${func.name}\n/// Roc signature: ${func.type_str}\n/// Refcounted fields are owned by the hosted function.\n"
+
+			"${doc}#[repr(C)]\n#[derive(Clone, Copy)]\npub struct ${struct_name}Args {\n${$positional_fields}}\n\n"
+		}
+	}
+}
+
+# =============================================================================
+# Generated Refcount Helpers
+# =============================================================================
+
+indent_lines : Str, Str -> Str
+indent_lines = |text, prefix| {
+	if text == "" {
+		return ""
+	}
+
+	lines = Str.split_on(text, "\n")
+	var $result = ""
+	for line in lines {
+		if line != "" {
+			$result = Str.concat($result, "${prefix}${line}\n")
+		}
+	}
+
+	$result
+}
+
+box_payload_decref_name_rust : U64 -> Str
+box_payload_decref_name_rust = |inner_id| "decref_box_payload_type${U64.to_str(inner_id)}"
+
+release_policy_for_type_id_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64 -> Str
+release_policy_for_type_id_rust = |type_table, duplicate_names, preferred_names, type_id| {
+	if is_roc_released(type_table, type_id) {
+		return ""
+	}
+
+	if !is_type_refcounted(type_table, type_id) {
+		return "RocNoopRelease"
+	}
+
+	match type_table.get(type_id) {
+		RocStr => "RocStrRelease"
+		RocList(elem_id) =>
+			if is_type_refcounted(type_table, elem_id) {
+				elem_policy = release_policy_for_type_id_rust(type_table, duplicate_names, preferred_names, elem_id)
+				if elem_policy == "" {
+					""
+				} else {
+					"RocListRelease<${elem_policy}>"
+				}
+			} else {
+				"RocListSpineRelease"
+			}
+		RocBox(inner_id) =>
+			match type_table.get(inner_id) {
+				RocUnknown(_) => ""
+				_ => {
+					inner_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, inner_id)
+					if inner_rust == "RocBox" or inner_rust == "*mut c_void" {
+						""
+					} else if is_type_refcounted(type_table, inner_id) {
+						inner_policy = release_policy_for_type_id_rust(type_table, duplicate_names, preferred_names, inner_id)
+						if inner_policy == "" {
+							""
+						} else {
+							"RocBoxRelease<${inner_rust}, ${inner_policy}>"
+						}
+					} else {
+						"RocBoxSpineRelease<${inner_rust}>"
+					}
+				}
+			}
+		RocRecord(rec) =>
+			if rec.name == "" {
+				""
+			} else {
+				"${record_struct_name(type_table, duplicate_names, type_id, rec)}Release"
+			}
+		RocTagUnion(tu) =>
+			match type_table.single_variant_payload(type_id, tu) {
+				SinglePayload(payload_id) => release_policy_for_type_id_rust(type_table, duplicate_names, preferred_names, payload_id)
+				SinglePayloadStruct(_) => "${tag_union_struct_name(type_table, preferred_names, duplicate_names, type_id, tu)}Release"
+				SingleNoPayload => "RocNoopRelease"
+				NotSingleVariant =>
+					if tu.name == "" {
+						""
+					} else {
+						"${tag_union_struct_name(type_table, preferred_names, duplicate_names, type_id, tu)}Release"
+					}
+				}
+		RocErasedCallable(_) => "RocErasedCallableRelease"
+		_ => ""
+	}
+}
+
+## Identifier fragment naming one type inside a generated helper name. It is
+## derived from the type's structure rather than its rendered Rust type, so it
+## is always a valid identifier and always the same fragment for the same type.
+type_ident_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64 -> Str
+type_ident_rust = |type_table, duplicate_names, preferred_names, type_id|
+	match type_table.get(type_id) {
+		RocStr => "str"
+		RocList(elem_id) => "list_of_${type_ident_rust(type_table, duplicate_names, preferred_names, elem_id)}"
+		RocBox(inner_id) =>
+			match type_table.get(inner_id) {
+				_ => "box_of_${type_ident_rust(type_table, duplicate_names, preferred_names, inner_id)}"
+			}
+		RocRecord(rec) =>
+			if rec.name == "" {
+				"type${U64.to_str(type_id)}"
+			} else {
+				to_lower_snake_case(record_struct_name(type_table, duplicate_names, type_id, rec))
+			}
+		RocTagUnion(tu) =>
+		# Mirrors `resolve_tag_union_type_rust`, except a single-variant
+		# union resolves through its payload's fragment: that function can
+		# return a rendered type such as `RocList<RocStr>`, which is not an
+		# identifier.
+			match type_table.single_variant_payload(type_id, tu) {
+				SinglePayload(payload_id) => type_ident_rust(type_table, duplicate_names, preferred_names, payload_id)
+				SinglePayloadStruct(_) => to_lower_snake_case(tag_union_struct_name(type_table, preferred_names, duplicate_names, type_id, tu))
+				SingleNoPayload => "type${U64.to_str(type_id)}"
+				NotSingleVariant =>
+					if tu.name != "" {
+						to_lower_snake_case(tag_union_struct_name(type_table, preferred_names, duplicate_names, type_id, tu))
+					} else {
+						"type${U64.to_str(type_id)}"
+					}
+				}
+		RocErasedCallable(_) => "erased_callable"
+		_ => "type${U64.to_str(type_id)}"
+	}
+
+## Name of the generated helper that releases one owned reference to a list
+## whose elements are refcounted.
+list_decref_helper_name_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64 -> Str
+list_decref_helper_name_rust = |type_table, duplicate_names, preferred_names, elem_id|
+	"decref_list_of_${type_ident_rust(type_table, duplicate_names, preferred_names, elem_id)}"
+
+decref_stmt_for_type_id_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64, Str -> Str
+decref_stmt_for_type_id_rust = |type_table, duplicate_names, preferred_names, type_id, expr| {
+	if type_table.is_zero_sized(type_id) {
+		return ""
+	}
+
+	if is_roc_released(type_table, type_id) {
+		# Every emitter leaves out the release of a value that holds an opaque
+		# Roc value, so reaching this is a generator bug. It must not compile.
+		return "    compile_error!(\"generated glue released type id ${U64.to_str(type_id)}, which only Roc can release\");\n"
+	}
+
+	type_repr = type_table.get(type_id)
+	decref_stmt_for_repr_rust(type_table, duplicate_names, preferred_names, type_id, type_repr, expr)
+}
+
+decref_stmt_for_repr_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64, TypeRepr, Str -> Str
+decref_stmt_for_repr_rust = |type_table, duplicate_names, preferred_names, type_id, type_repr, expr| {
+	match type_repr {
+		RocStr => "    unsafe { ${expr}.decref(roc_host); }\n"
+		RocList(elem_id) => {
+			if is_type_refcounted(type_table, elem_id) {
+				elem_policy = release_policy_for_type_id_rust(type_table, duplicate_names, preferred_names, elem_id)
+				if elem_policy == "" {
+					"    compile_error!(\"missing decref helper for refcounted list element type id ${U64.to_str(elem_id)}\");\n"
+				} else {
+					"    unsafe { ${list_decref_helper_name_rust(type_table, duplicate_names, preferred_names, elem_id)}(${expr}, roc_host); }\n"
+				}
+			} else {
+				"    unsafe { ${expr}.decref(roc_host); }\n"
+			}
+		}
+		RocBox(inner_id) =>
+			match type_table.get(inner_id) {
+				_ => {
+					inner_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, inner_id)
+					if inner_rust == "RocBox" or inner_rust == "*mut c_void" {
+						"    unsafe { decref_box(${expr} as RocBox, roc_host); }\n"
+					} else if is_type_refcounted(type_table, inner_id) {
+						"    unsafe { decref_box_with(${expr} as RocBox, core::mem::align_of::<${inner_rust}>(), true, Some(${box_payload_decref_name_rust(inner_id)}), roc_host); }\n"
+					} else {
+						"    unsafe { decref_box_with(${expr} as RocBox, core::mem::align_of::<${inner_rust}>(), false, None, roc_host); }\n"
+					}
+				}
+			}
+		RocRecord(rec) =>
+			if rec.name == "" {
+				""
+			} else {
+				"    unsafe { ${expr}.decref(roc_host); }\n"
+			}
+		RocTagUnion(tu) =>
+			match type_table.single_variant_payload(type_id, tu) {
+				SinglePayload(payload_id) => decref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, payload_id, expr)
+				SinglePayloadStruct(_) => "    unsafe { ${expr}.decref(roc_host); }\n"
+				SingleNoPayload => ""
+				NotSingleVariant =>
+					if tu.name != "" {
+						"    unsafe { ${expr}.decref(roc_host); }\n"
+					} else {
+						""
+					}
+				}
+		RocErasedCallable(_) => "    unsafe { decref_erased_callable(${expr}, roc_host); }\n"
+		_ => ""
+	}
+}
+
+incref_stmt_for_type_id_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64, Str -> Str
+incref_stmt_for_type_id_rust = |type_table, duplicate_names, preferred_names, type_id, expr| {
+	if type_table.is_zero_sized(type_id) {
+		return ""
+	}
+
+	type_repr = type_table.get(type_id)
+	incref_stmt_for_repr_rust(type_table, duplicate_names, preferred_names, type_id, type_repr, expr)
+}
+
+incref_stmt_for_repr_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64, TypeRepr, Str -> Str
+incref_stmt_for_repr_rust = |type_table, duplicate_names, preferred_names, type_id, type_repr, expr| {
+	match type_repr {
+		RocStr => "    unsafe { ${expr}.incref(amount); }\n"
+		RocList(_) => "    unsafe { ${expr}.incref(amount); }\n"
+		RocBox(inner_id) =>
+			match type_table.get(inner_id) {
+				_ => "    unsafe { incref_box(${expr} as RocBox, amount); }\n"
+			}
+		RocRecord(rec) =>
+			if rec.name == "" {
+				""
+			} else {
+				"    unsafe { ${expr}.incref(amount); }\n"
+			}
+		RocTagUnion(tu) =>
+			match type_table.single_variant_payload(type_id, tu) {
+				SinglePayload(payload_id) => incref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, payload_id, expr)
+				SinglePayloadStruct(_) => "    unsafe { ${expr}.incref(amount); }\n"
+				SingleNoPayload => ""
+				NotSingleVariant =>
+					if tu.name != "" {
+						"    unsafe { ${expr}.incref(amount); }\n"
+					} else {
+						""
+					}
+				}
+		RocErasedCallable(_) => "    unsafe { incref_erased_callable(${expr}, amount); }\n"
+		_ => ""
+	}
+}
+
+generate_record_refcount_helpers_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, Str, RecordRepr -> Str
+generate_record_refcount_helpers_rust = |type_table, duplicate_names, preferred_names, struct_name, rec| {
+	var $sibling_names = []
+	for field in rec.fields {
+		if !field.is_padding {
+			$sibling_names = $sibling_names.append(field.name)
+		}
+	}
+	field_idents = field_idents_rust($sibling_names)
+
+	var $fields = []
+	var $member_index = 0
+	for field in rec.fields {
+		# Padding fields are raw bytes with no Roc type, so they are never
+		# refcounted and contribute no incref/decref statements.
+		if !field.is_padding {
+			$fields = $fields.append({ ident: field_idents.at($member_index), type_id: field.type_id })
+			$member_index = $member_index + 1
+		}
+	}
+
+	generate_refcount_impl_rust(type_table, duplicate_names, preferred_names, struct_name, $fields)
+}
+
+## Same impl for a struct whose fields arrive as committed ABI layout entries,
+## which is how a hosted function's argument record is described.
+generate_abi_refcount_helpers_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, Str, List(AbiFieldLayout) -> Str
+generate_abi_refcount_helpers_rust = |type_table, duplicate_names, preferred_names, struct_name, abi_fields| {
+	field_idents = field_idents_rust(field_names_rust(abi_fields))
+	var $fields = []
+	var $member_index = 0
+	for field in abi_fields {
+		if !field.is_padding {
+			$fields = $fields.append({ ident: field_idents.at($member_index), type_id: field.type_id })
+			$member_index = $member_index + 1
+		}
+	}
+
+	generate_refcount_impl_rust(type_table, duplicate_names, preferred_names, struct_name, $fields)
+}
+
+generate_refcount_impl_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, Str, List({ ident : Str, type_id : U64 }) -> Str
+generate_refcount_impl_rust = |type_table, duplicate_names, preferred_names, struct_name, fields| {
+	var $decref_body = ""
+	var $incref_body = ""
+	roc_released = List.any(fields, |field| is_roc_released(type_table, field.type_id))
+
+	for field in fields {
+		field_expr = "value.${field.ident}"
+		if !roc_released {
+			$decref_body = Str.concat($decref_body, decref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, field.type_id, field_expr))
+		}
+		$incref_body = Str.concat($incref_body, incref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, field.type_id, field_expr))
+	}
+
+	if $decref_body == "" {
+		$decref_body = "        let _ = value;\n        let _ = roc_host;\n"
+	} else {
+		$decref_body = indent_lines($decref_body, "    ")
+	}
+	if $incref_body == "" {
+		$incref_body = "        let _ = value;\n        let _ = amount;\n"
+	} else {
+		$incref_body = indent_lines($incref_body, "    ")
+	}
+
+	incref_method = "    /// Increment Roc-owned fields.\n    ///\n    /// # Safety\n    /// `self` must point at live Roc allocations. The retained references must\n    /// be balanced by later decrefs.\n    pub unsafe fn incref(self, amount: isize) {\n        let value = self;\n${$incref_body}    }\n"
+
+	if roc_released {
+		"impl ${struct_name} {\n${roc_released_note("    ")}\n${incref_method}}\n\n"
+	} else {
+		"impl ${struct_name} {\n    /// Recursively decrement Roc-owned fields.\n    ///\n    /// # Safety\n    /// `self` must own one live Roc reference for each refcounted field.\n    pub unsafe fn decref(self, roc_host: &RocHost) {\n        let value = self;\n${$decref_body}    }\n\n${incref_method}}\n\npub struct ${struct_name}Release;\n\nunsafe impl RocRelease<${struct_name}> for ${struct_name}Release {\n    unsafe fn release(value: ${struct_name}, roc_host: &RocHost) {\n        unsafe { value.decref(roc_host); }\n    }\n}\n\n"
+	}
+}
+
+generate_tag_payload_refcount_branch_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, Str, Str, TagVariant, AbiTagLayout, Str -> Str
+generate_tag_payload_refcount_branch_rust = |type_table, duplicate_names, preferred_names, struct_name, snake, tag, abi_tag, mode| {
+	variant = rust_variant_ident(tag.name)
+	if !abi_tag_has_payload(abi_tag) {
+		return "        ${struct_name}Tag::${variant} => {},\n"
+	}
+
+	if List.len(tag.payload) == 1 {
+		body =
+			match List.first(tag.payload) {
+				Ok(payload_id) => {
+					payload_expr = "payload"
+					if mode == "decref" {
+						decref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, payload_id, payload_expr)
+					} else {
+						incref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, payload_id, payload_expr)
+					}
+				}
+				Err(_) => {
+					crash "glue invariant violated: single-payload tag had no payload"
+				}
+			}
+
+		if body == "" {
+			"        ${struct_name}Tag::${variant} => {},\n"
+		} else {
+			payload_binding = if mode == "decref" {
+				"            let payload = unsafe { value.take_payload_${snake}_unchecked() };\n"
+			} else {
+				"            let payload = unsafe { core::ptr::read(value.borrow_payload_${snake}_unchecked()) };\n"
+			}
+			"        ${struct_name}Tag::${variant} => {\n${payload_binding}${indent_lines(body, "        ")}        },\n"
+		}
+	} else {
+		var $statements = ""
+		var $idx = 0
+		for payload_id in tag.payload {
+			field_expr = "payload._${U64.to_str($idx)}"
+			stmt = if mode == "decref" {
+				decref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, payload_id, field_expr)
+			} else {
+				incref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, payload_id, field_expr)
+			}
+			$statements = Str.concat($statements, indent_lines(stmt, "        "))
+			$idx = $idx + 1
+		}
+
+		if $statements == "" {
+			"        ${struct_name}Tag::${variant} => {},\n"
+		} else {
+			payload_binding = if mode == "decref" {
+				"            let payload = unsafe { value.take_payload_${snake}_unchecked() };\n"
+			} else {
+				"            let payload = unsafe { core::ptr::read(value.borrow_payload_${snake}_unchecked()) };\n"
+			}
+			"        ${struct_name}Tag::${variant} => {\n${payload_binding}${$statements}        },\n"
+		}
+	}
+}
+
+generate_tag_union_refcount_helpers_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, U64, TagUnionRepr -> Str
+generate_tag_union_refcount_helpers_rust = |type_table, duplicate_names, preferred_names, type_id, tu| {
+	tag_snakes = tag_snakes_rust(tu)
+	struct_name = tag_union_struct_name(type_table, preferred_names, duplicate_names, type_id, tu)
+	if !(type_table.layout(type_id)).tag_union_has_payload() {
+		return "impl ${struct_name} {\n    /// Recursively decrement Roc-owned payloads.\n    ///\n    /// # Safety\n    /// `self` must own one live Roc reference for each refcounted payload.\n    pub unsafe fn decref(self, roc_host: &RocHost) {\n        let _ = self;\n        let _ = roc_host;\n    }\n\n    /// Increment Roc-owned payloads.\n    ///\n    /// # Safety\n    /// `self` must point at live Roc allocations. The retained references must\n    /// be balanced by later decrefs.\n    pub unsafe fn incref(self, amount: isize) {\n        let _ = self;\n        let _ = amount;\n    }\n}\n\npub struct ${struct_name}Release;\n\nunsafe impl RocRelease<${struct_name}> for ${struct_name}Release {\n    unsafe fn release(value: ${struct_name}, roc_host: &RocHost) {\n        unsafe { value.decref(roc_host); }\n    }\n}\n\n"
+	}
+
+	roc_released = is_roc_released(type_table, type_id)
+	var $decref_branches = ""
+	var $incref_branches = ""
+	var $decref_moves_payload = Bool.False
+	abi_tags = (type_table.layout(type_id)).tag_layouts()
+	var $tag_index = 0
+	for tag in tu.tags {
+		abi_tag = abi_tag_at(abi_tags, $tag_index)
+		$incref_branches = Str.concat($incref_branches, generate_tag_payload_refcount_branch_rust(type_table, duplicate_names, preferred_names, struct_name, tag_snakes.at($tag_index), tag, abi_tag, "incref"))
+		if !roc_released {
+			$decref_branches = Str.concat($decref_branches, generate_tag_payload_refcount_branch_rust(type_table, duplicate_names, preferred_names, struct_name, tag_snakes.at($tag_index), tag, abi_tag, "decref"))
+		}
+		if !roc_released and abi_tag_has_payload(abi_tag) {
+			$decref_moves_payload = $decref_moves_payload or List.any(
+				tag.payload,
+				|payload_id|
+					decref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, payload_id, "payload") != "",
+			)
+		}
+		$tag_index = $tag_index + 1
+	}
+
+	decref_value_binding = if $decref_moves_payload {
+		"        let mut value = self;\n"
+	} else {
+		"        let value = self;\n"
+	}
+
+	incref_method = "    /// Increment Roc-owned payloads.\n    ///\n    /// # Safety\n    /// `self` must point at live Roc allocations. The retained references must\n    /// be balanced by later decrefs.\n    pub unsafe fn incref(self, amount: isize) {\n        let value = self;\n        let _ = amount;\n        match value.tag {\n${indent_lines($incref_branches, "    ")}        }\n    }\n"
+
+	if roc_released {
+		return "impl ${struct_name} {\n${roc_released_note("    ")}\n${incref_method}}\n\n"
+	}
+
+	"impl ${struct_name} {\n    /// Recursively decrement Roc-owned payloads.\n    ///\n    /// # Safety\n    /// `self` must own one live Roc reference for each refcounted payload.\n    pub unsafe fn decref(self, roc_host: &RocHost) {\n${decref_value_binding}        let _ = roc_host;\n        match value.tag {\n${indent_lines($decref_branches, "    ")}        }\n    }\n\n${incref_method}}\n\npub struct ${struct_name}Release;\n\nunsafe impl RocRelease<${struct_name}> for ${struct_name}Release {\n    unsafe fn release(value: ${struct_name}, roc_host: &RocHost) {\n        unsafe { value.decref(roc_host); }\n    }\n}\n\n"
+}
+
+## Generate one release helper per list type whose elements are refcounted.
+##
+## `RocList::decref` is a shallow primitive: it drops the list's own reference
+## and frees the allocation, and knows nothing about the elements. Releasing an
+## owned list therefore needs the element teardown these helpers perform, gated
+## on the list's own count reaching zero. That gate is the whole point—dropping
+## the elements unconditionally double-frees them whenever another owner still
+## holds the list.
+generate_list_decref_helpers_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_list_decref_helpers_rust = |type_table, duplicate_names, preferred_names| {
+	var $helpers = ""
+	var $seen_names = []
+
+	for type_info in type_table_entries(type_table) {
+		match type_info.repr {
+			RocList(elem_id) =>
+				if is_type_refcounted(type_table, elem_id) {
+					helper_name = list_decref_helper_name_rust(type_table, duplicate_names, preferred_names, elem_id)
+					if !(List.contains($seen_names, helper_name)) {
+						elem_policy = release_policy_for_type_id_rust(type_table, duplicate_names, preferred_names, elem_id)
+						if elem_policy != "" {
+							$seen_names = $seen_names.append(helper_name)
+							elem_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, elem_id)
+							doc = "/// Release one owned reference to a `RocList<${elem_rust}>`.\n///\n/// The allocation's final reference is claimed atomically before any element\n/// is read, so concurrent owners cannot skip or duplicate element teardown.\n///\n/// # Safety\n/// `value` must own one live Roc list reference.\n"
+							$helpers = Str.concat(
+								$helpers,
+								"${doc}pub unsafe fn ${helper_name}(value: RocList<${elem_rust}>, roc_host: &RocHost) {\n    unsafe { value.release_with::<${elem_policy}>(roc_host); }\n}\n\n",
+							)
+						}
+					}
+				}
+			_ => {}
+		}
+	}
+
+	$helpers
+}
+
+generate_box_payload_decref_helpers_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_box_payload_decref_helpers_rust = |type_table, duplicate_names, preferred_names| {
+	var $helpers = ""
+	var $seen_inner_ids = []
+
+	for type_info in type_table_entries(type_table) {
+		match type_info.repr {
+			RocBox(inner_id) => {
+				if !(List.contains($seen_inner_ids, inner_id)) {
+					$seen_inner_ids = $seen_inner_ids.append(inner_id)
+					match type_table.get(inner_id) {
+						_ => {
+							inner_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, inner_id)
+							if inner_rust != "RocBox" and inner_rust != "*mut c_void" and is_type_refcounted(type_table, inner_id) and !is_roc_released(type_table, inner_id) {
+								stmt = decref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, inner_id, "payload")
+								$helpers = Str.concat(
+									$helpers,
+									"unsafe extern \"C\" fn ${box_payload_decref_name_rust(inner_id)}(data_ptr: *mut c_void, roc_host: *mut RocHost) {\n    if data_ptr.is_null() || roc_host.is_null() {\n        return;\n    }\n    let payload = unsafe { *(data_ptr as *const ${inner_rust}) };\n    let roc_host = unsafe { &*roc_host };\n${stmt}}\n\n",
+								)
+							}
+						}
+					}
+				}
+			}
+			_ => {}
+		}
+	}
+
+	$helpers
+}
+
+generate_refcount_helpers_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_refcount_helpers_rust = |type_table, duplicate_names, preferred_names| {
+	var $helpers = "// Generated Refcount Helpers\n\n"
+	var $seen_names = []
+	var $type_id = 0
+
+	for type_info in type_table_entries(type_table) {
+		match type_info.repr {
+			RocRecord(rec) =>
+				if rec.name != "" and !type_table.is_zero_sized($type_id) {
+					struct_name = record_struct_name(type_table, duplicate_names, $type_id, rec)
+					if !(List.contains($seen_names, struct_name)) {
+						$seen_names = $seen_names.append(struct_name)
+						$helpers = Str.concat($helpers, generate_record_refcount_helpers_rust(type_table, duplicate_names, preferred_names, struct_name, rec))
+					}
+				}
+			RocTagUnion(tu) =>
+				match type_table.single_variant_payload($type_id, tu) {
+					SinglePayloadStruct(tag_layout) => {
+						struct_name = tag_union_struct_name(type_table, preferred_names, duplicate_names, $type_id, tu)
+						if !(List.contains($seen_names, struct_name)) {
+							$seen_names = $seen_names.append(struct_name)
+							$helpers = Str.concat($helpers, generate_abi_refcount_helpers_rust(type_table, duplicate_names, preferred_names, struct_name, tag_layout.payload_fields))
+						}
+					}
+					NotSingleVariant =>
+						if tu.name != "" {
+							struct_name = tag_union_struct_name(type_table, preferred_names, duplicate_names, $type_id, tu)
+							if !(List.contains($seen_names, struct_name)) {
+								$seen_names = $seen_names.append(struct_name)
+								$helpers = Str.concat($helpers, generate_tag_union_refcount_helpers_rust(type_table, duplicate_names, preferred_names, $type_id, tu))
+							}
+						}
+					SinglePayload(_) => {}
+					SingleNoPayload => {}
+				}
+			_ => {}
+		}
+
+		$type_id = $type_id + 1
+	}
+
+	$helpers
+		.concat(generate_list_decref_helpers_rust(type_table, duplicate_names, preferred_names))
+		.concat(generate_box_payload_decref_helpers_rust(type_table, duplicate_names, preferred_names))
+}
+
+## Build a natural C ABI parameter list from Roc function argument type IDs.
+direct_param_list_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, List(U64) -> Str
+direct_param_list_rust = |type_table, duplicate_names, preferred_names, arg_type_ids| {
+	var $params = ""
+	var $idx = 0
+	arg_shape = ArgShape.from_table(type_table)
+
+	for arg_type_id in arg_shape.abi_visible_type_ids(arg_type_ids) {
+		arg_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, arg_type_id)
+		sep = if $params == "" {
+			""
+		} else {
+			", "
+		}
+		$params = "${$params}${sep}arg${U64.to_str($idx)}: ${arg_rust}"
+		$idx = $idx + 1
+	}
+
+	$params
+}
+
+direct_arg_name_list_rust : TypeTable, List(U64) -> Str
+direct_arg_name_list_rust = |type_table, arg_type_ids| {
+	var $args = ""
+	var $idx = 0
+	arg_shape = ArgShape.from_table(type_table)
+
+	for _arg_type_id in arg_shape.abi_visible_type_ids(arg_type_ids) {
+		sep = if $args == "" {
+			""
+		} else {
+			", "
+		}
+		$args = "${$args}${sep}arg${U64.to_str($idx)}"
+		$idx = $idx + 1
+	}
+
+	$args
+}
+
+## Build a hosted symbol parameter list, using the generated Args wrapper for
+## anonymous single-record arguments so direct-symbol glue stays readable.
+direct_hosted_param_list_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, HostedFunctionInfo -> Str
+direct_hosted_param_list_rust = |type_table, duplicate_names, preferred_names, func| {
+	arg_shape = ArgShape.from_table(type_table)
+	use_args_wrapper = arg_shape.single_arg_is_anonymous_record(func.arg_type_ids)
+
+	var $params = ""
+	var $idx = 0
+
+	for arg_type_id in arg_shape.abi_visible_type_ids(func.arg_type_ids) {
+		arg_rust = if use_args_wrapper {
+			"${hosted_struct_name_rust(duplicate_names, func)}Args"
+		} else {
+			type_id_to_rust(type_table, duplicate_names, preferred_names, arg_type_id)
+		}
+		sep = if $params == "" {
+			""
+		} else {
+			", "
+		}
+		$params = "${$params}${sep}arg${U64.to_str($idx)}: ${arg_rust}"
+		$idx = $idx + 1
+	}
+
+	$params
+}
+
+# =============================================================================
+# Direct ABI Declarations
+# =============================================================================
+
+## Generate direct extern declarations for the fixed runtime symbols every host defines.
+generate_runtime_symbol_externs_rust : Str
+generate_runtime_symbol_externs_rust =
+	\\// Runtime Symbols
+	\\//
+	\\// The host defines these linker symbols. Compiled Roc code calls them directly.
+	\\
+	\\#[allow(improper_ctypes)]
+	\\unsafe extern "C" {
+	\\    /// Returns `length` bytes aligned to `alignment`. Never returns null: Roc writes through
+	\\    /// the result without checking it, so a host that cannot allocate must stop the Roc
+	\\    /// program and not return, exactly as `roc_crashed` does.
+	\\    pub fn roc_alloc(length: usize, alignment: usize) -> NonNull<c_void>;
+	\\    pub fn roc_dealloc(ptr: *mut c_void, alignment: usize);
+	\\    /// Never returns null, under the same rule as `roc_alloc`.
+	\\    pub fn roc_realloc(ptr: *mut c_void, new_length: usize, alignment: usize) -> NonNull<c_void>;
+	\\    pub fn roc_dbg(bytes: *const u8, len: usize);
+	\\    pub fn roc_expect_failed(bytes: *const u8, len: usize);
+	\\    /// Must never return: end the process. Roc code traps right after this
+	\\    /// call, so returning terminates the process.
+	\\    pub fn roc_crashed(bytes: *const u8, len: usize);
+	\\}
+	\\
+	\\unsafe extern "C" fn direct_roc_alloc(_host: *mut RocHost, length: usize, alignment: usize) -> NonNull<c_void> {
+	\\    unsafe { roc_alloc(length, alignment) }
+	\\}
+	\\
+	\\unsafe extern "C" fn direct_roc_dealloc(_host: *mut RocHost, ptr: *mut c_void, alignment: usize) {
+	\\    unsafe { roc_dealloc(ptr, alignment); }
+	\\}
+	\\
+	\\unsafe extern "C" fn direct_roc_realloc(_host: *mut RocHost, ptr: *mut c_void, new_length: usize, alignment: usize) -> NonNull<c_void> {
+	\\    unsafe { roc_realloc(ptr, new_length, alignment) }
+	\\}
+	\\
+	\\unsafe extern "C" fn direct_roc_dbg(_host: *mut RocHost, bytes: *const u8, len: usize) {
+	\\    unsafe { roc_dbg(bytes, len); }
+	\\}
+	\\
+	\\unsafe extern "C" fn direct_roc_expect_failed(_host: *mut RocHost, bytes: *const u8, len: usize) {
+	\\    unsafe { roc_expect_failed(bytes, len); }
+	\\}
+	\\
+	\\unsafe extern "C" fn direct_roc_crashed(_host: *mut RocHost, bytes: *const u8, len: usize) {
+	\\    unsafe { roc_crashed(bytes, len); }
+	\\}
+	\\
+	\\fn direct_roc_host() -> RocHost {
+	\\    RocHost {
+	\\        env: core::ptr::null_mut(),
+	\\        roc_alloc: direct_roc_alloc,
+	\\        roc_dealloc: direct_roc_dealloc,
+	\\        roc_realloc: direct_roc_realloc,
+	\\        roc_dbg: direct_roc_dbg,
+	\\        roc_expect_failed: direct_roc_expect_failed,
+	\\        roc_crashed: direct_roc_crashed,
+	\\    }
+	\\}
+	\\
+
+## Generate direct extern declarations for hosted symbols.
+generate_hosted_symbol_externs_rust : List(HostedFunctionInfo), TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_hosted_symbol_externs_rust = |hosted_functions, type_table, duplicate_names, preferred_names| {
+	if List.is_empty(hosted_functions) {
+		return ""
+	}
+
+	var $result = "// Hosted Symbols\n//\n// The platform host must export these symbols with the exact direct C ABI signatures.\n// Refcounted arguments are owned by the hosted function.\n\n#[allow(improper_ctypes)]\nunsafe extern \"C\" {\n"
+
+	for func in hosted_functions {
+		params = direct_hosted_param_list_rust(type_table, duplicate_names, preferred_names, func)
+		ret_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, func.ret_type_id)
+		ret_suffix = if ret_rust == "()" {
+			""
+		} else {
+			" -> ${ret_rust}"
+		}
+
+		ownership = hosted_ownership_doc_rust(type_table, duplicate_names, preferred_names, func)
+
+		$result = Str.concat(
+			$result,
+			"    /// Hosted symbol for ${func.name}\n    /// Roc signature: ${func.type_str}\n${ownership}    pub fn ${func.ffi_symbol}(${params})${ret_suffix};\n\n",
+		)
+	}
+
+	Str.concat($result, "}\n")
+}
+
+## Document how the host must settle ownership of one hosted function's owned
+## arguments and result, naming the exact release call for each argument.
+##
+## A host author reads this at the signature, which is where the ownership rule
+## has to be legible: for a container the release is the generated helper, not
+## the container's own shallow `decref`.
+hosted_ownership_doc_rust : TypeTable, List(Str), TypeNamePlan.PreferredNames, HostedFunctionInfo -> Str
+hosted_ownership_doc_rust = |type_table, duplicate_names, preferred_names, func| {
+	arg_shape = ArgShape.from_table(type_table)
+	use_args_wrapper = arg_shape.single_arg_is_anonymous_record(func.arg_type_ids)
+
+	var $arg_lines = ""
+	var $idx = 0
+
+	for arg_type_id in arg_shape.abi_visible_type_ids(func.arg_type_ids) {
+		arg_name = "arg${U64.to_str($idx)}"
+		stmt = if is_roc_released(type_table, arg_type_id) {
+			"${arg_name} holds an opaque Roc value, which only Roc can release: pass it back to Roc."
+		} else if use_args_wrapper {
+			if is_type_refcounted(type_table, arg_type_id) {
+				"unsafe { ${arg_name}.decref(roc_host); }"
+			} else {
+				""
+			}
+		} else {
+			Str.trim(decref_stmt_for_type_id_rust(type_table, duplicate_names, preferred_names, arg_type_id, arg_name))
+		}
+
+		if stmt != "" {
+			$arg_lines = Str.concat($arg_lines, "    ///     ${stmt}\n")
+		}
+
+		$idx = $idx + 1
+	}
+
+	arg_doc = if $arg_lines == "" {
+		""
+	} else {
+		"    /// Owned arguments. Release each exactly once before returning, unless it is\n    /// moved into storage or into the result:\n${$arg_lines}"
+	}
+
+	ret_doc = if is_type_refcounted(type_table, func.ret_type_id) {
+		"    /// The result is owned by Roc: return exactly one owned reference.\n"
+	} else {
+		""
+	}
+
+	Str.concat(arg_doc, ret_doc)
+}
+
+generate_provided_decl_rust : ProvidesEntry, TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_provided_decl_rust = |entry, type_table, duplicate_names, preferred_names| {
+	match entry.exported {
+		ProvidedProcedure(func) => {
+			params = direct_param_list_rust(type_table, duplicate_names, preferred_names, func.args)
+			ret_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, func.ret)
+			ret_suffix = if ret_rust == "()" {
+				""
+			} else {
+				" -> ${ret_rust}"
+			}
+			"    /// Entrypoint: ${entry.name}\n    pub fn ${entry.ffi_symbol}(${params})${ret_suffix};\n\n"
+		}
+		ProvidedData(type_id) => {
+			value_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, type_id)
+			"    /// Static provided value: ${entry.name}\n    pub static ${entry.ffi_symbol}: ${value_rust};\n\n"
+		}
+	}
+}
+
+generate_provided_owned_wrapper_rust : ProvidesEntry, TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_provided_owned_wrapper_rust = |entry, type_table, duplicate_names, preferred_names| {
+	match entry.exported {
+		ProvidedProcedure(func) => {
+			if !is_type_refcounted(type_table, func.ret) {
+				return ""
+			}
+
+			policy = release_policy_for_type_id_rust(type_table, duplicate_names, preferred_names, func.ret)
+			if policy == "" {
+				return ""
+			}
+
+			params = direct_param_list_rust(type_table, duplicate_names, preferred_names, func.args)
+			args = direct_arg_name_list_rust(type_table, func.args)
+			ret_rust = type_id_to_rust(type_table, duplicate_names, preferred_names, func.ret)
+			"const _: () = assert!(core::mem::size_of::<RocOwned<${ret_rust}, ${policy}>>() == core::mem::size_of::<${ret_rust}>(), \"${entry.ffi_symbol} owned result size mismatch\");\nconst _: () = assert!(core::mem::align_of::<RocOwned<${ret_rust}, ${policy}>>() == core::mem::align_of::<${ret_rust}>(), \"${entry.ffi_symbol} owned result alignment mismatch\");\n\n/// Owning wrapper for `${entry.ffi_symbol}`. The returned value is recursively\n/// released on Drop with no runtime descriptor or extra storage.\n///\n/// # Safety\n/// The raw entrypoint and its arguments must satisfy the generated host ABI.\npub unsafe fn ${entry.ffi_symbol}_owned(${params}) -> RocOwned<${ret_rust}, ${policy}> {\n    let value = unsafe { ${entry.ffi_symbol}(${args}) };\n    unsafe { RocOwned::from_raw(value) }\n}\n\n"
+		}
+		ProvidedData(_) => ""
+	}
+}
+
+## Generate extern declarations for entrypoints from the provides clause.
+generate_entrypoint_externs_rust : List(ProvidesEntry), TypeTable, List(Str), TypeNamePlan.PreferredNames -> Str
+generate_entrypoint_externs_rust = |provides_list, type_table, duplicate_names, preferred_names| {
+	if List.is_empty(provides_list) {
+		return ""
+	}
+
+	var $result = "// Provided Symbols\n//\n// Roc exports these symbols from the app with their natural C ABI signatures.\n\n#[allow(improper_ctypes)]\nunsafe extern \"C\" {\n"
+	var $wrappers = ""
+
+	for entry in provides_list {
+		$result = Str.concat($result, generate_provided_decl_rust(entry, type_table, duplicate_names, preferred_names))
+		$wrappers = Str.concat($wrappers, generate_provided_owned_wrapper_rust(entry, type_table, duplicate_names, preferred_names))
+	}
+
+	Str.concat(Str.concat($result, "}\n\n"), $wrappers)
+}
+
+# =============================================================================
+# Host Helper Utilities
+# =============================================================================
+
+## Generate DefaultAllocators, DefaultHandlers, and make_roc_host helpers.
+generate_host_helpers_rust : Str
+generate_host_helpers_rust =
+	generate_default_allocators_direct_rust
+		.concat("\n")
+		.concat(generate_default_handlers_direct_rust)
+		.concat("\n")
+		.concat(generate_make_roc_host_rust)
+
+generate_default_allocators_direct_rust : Str
+generate_default_allocators_direct_rust =
+	\\/// Default memory management functions for Roc platform helpers.
+	\\///
+	\\/// Memory layout: each allocation prepends size metadata so that dealloc/realloc
+	\\/// can recover the original allocation size because `roc_dealloc` receives no length.
+	\\#[cfg(not(no_roc_std_helpers))]
+	\\pub struct DefaultAllocators;
+	\\
+	\\#[cfg(not(no_roc_std_helpers))]
+	\\impl DefaultAllocators {
+	\\    /// Allocate memory using the Rust global allocator.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `alignment` must be a power of two, and `length` plus the allocation's size
+	\\    /// header must form a valid `Layout` at that alignment.
+	\\    pub unsafe extern "C" fn roc_alloc(_roc_host: *mut RocHost, length: usize, alignment: usize) -> NonNull<c_void> {
+	\\        unsafe {
+	\\            let min_alignment = alignment.max(core::mem::align_of::<usize>());
+	\\            let size_storage_bytes = min_alignment;
+	\\            let total_size = checked_add_usize(length, size_storage_bytes, "roc_alloc allocation size overflow");
+	\\
+	\\            debug_assert!(min_alignment.is_power_of_two(), "alignment must be a power of two");
+	\\            let layout = Layout::from_size_align_unchecked(total_size, min_alignment);
+	\\            let base_ptr = std::alloc::alloc(layout);
+	\\            if base_ptr.is_null() {
+	\\                eprintln!("roc_alloc: out of memory");
+	\\                std::process::exit(1);
+	\\            }
+	\\
+	\\            let size_ptr = base_ptr.add(size_storage_bytes).sub(core::mem::size_of::<usize>()) as *mut usize;
+	\\            *size_ptr = total_size;
+	\\
+	\\            NonNull::new_unchecked(base_ptr.add(size_storage_bytes) as *mut c_void)
+	\\        }
+	\\    }
+	\\
+	\\    /// Free memory previously allocated by `roc_alloc`.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `ptr` must have been returned by `roc_alloc` or `roc_realloc` with the same
+	\\    /// `alignment`, and must not be used after this call.
+	\\    pub unsafe extern "C" fn roc_dealloc(_roc_host: *mut RocHost, ptr: *mut c_void, alignment: usize) {
+	\\        unsafe {
+	\\            let min_alignment = alignment.max(core::mem::align_of::<usize>());
+	\\            let size_storage_bytes = min_alignment;
+	\\
+	\\            let size_ptr = (ptr as *const u8).sub(core::mem::size_of::<usize>()) as *const usize;
+	\\            let total_size = *size_ptr;
+	\\
+	\\            let base_ptr = (ptr as *mut u8).sub(size_storage_bytes);
+	\\            debug_assert!(min_alignment.is_power_of_two(), "alignment must be a power of two");
+	\\            let layout = Layout::from_size_align_unchecked(total_size, min_alignment);
+	\\            std::alloc::dealloc(base_ptr, layout);
+	\\        }
+	\\    }
+	\\
+	\\    /// Reallocate memory, preserving existing user data.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `ptr` must have been returned by `roc_alloc` or `roc_realloc` with the same
+	\\    /// `alignment`, and must not be used after this call. `new_length` plus the
+	\\    /// allocation's size header must form a valid `Layout` at that alignment.
+	\\    pub unsafe extern "C" fn roc_realloc(_roc_host: *mut RocHost, ptr: *mut c_void, new_length: usize, alignment: usize) -> NonNull<c_void> {
+	\\        unsafe {
+	\\            let min_alignment = alignment.max(core::mem::align_of::<usize>());
+	\\            let size_storage_bytes = min_alignment;
+	\\
+	\\            let old_size_ptr = (ptr as *const u8).sub(core::mem::size_of::<usize>()) as *const usize;
+	\\            let old_total_size = *old_size_ptr;
+	\\            let old_base_ptr = (ptr as *mut u8).sub(size_storage_bytes);
+	\\
+	\\            let new_total_size = checked_add_usize(new_length, size_storage_bytes, "roc_realloc allocation size overflow");
+	\\            debug_assert!(min_alignment.is_power_of_two(), "alignment must be a power of two");
+	\\            let old_layout = Layout::from_size_align_unchecked(old_total_size, min_alignment);
+	\\            let new_base_ptr = std::alloc::realloc(old_base_ptr, old_layout, new_total_size);
+	\\            if new_base_ptr.is_null() {
+	\\                eprintln!("roc_realloc: out of memory");
+	\\                std::process::exit(1);
+	\\            }
+	\\
+	\\            let new_user_ptr = new_base_ptr.add(size_storage_bytes);
+	\\            let new_size_ptr = new_user_ptr.sub(core::mem::size_of::<usize>()) as *mut usize;
+	\\            *new_size_ptr = new_total_size;
+	\\            NonNull::new_unchecked(new_user_ptr as *mut c_void)
+	\\        }
+	\\    }
+	\\}
+	\\
+
+generate_default_handlers_direct_rust : Str
+generate_default_handlers_direct_rust =
+	\\/// Default handlers for dbg, expect-failed, and crash.
+	\\#[cfg(not(no_roc_std_helpers))]
+	\\pub struct DefaultHandlers;
+	\\
+	\\#[cfg(not(no_roc_std_helpers))]
+	\\impl DefaultHandlers {
+	\\    /// Print a `dbg` expression to stderr.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `bytes` must point to `len` readable bytes of valid UTF-8.
+	\\    pub unsafe extern "C" fn roc_dbg(_roc_host: *mut RocHost, bytes: *const u8, len: usize) {
+	\\        unsafe {
+	\\            let msg = core::slice::from_raw_parts(bytes, len);
+	\\            let msg = core::str::from_utf8_unchecked(msg);
+	\\            eprintln!("[ROC DBG] {}", msg);
+	\\        }
+	\\    }
+	\\
+	\\    /// Print a failed `expect` to stderr.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `bytes` must point to `len` readable bytes of valid UTF-8.
+	\\    pub unsafe extern "C" fn roc_expect_failed(_roc_host: *mut RocHost, bytes: *const u8, len: usize) {
+	\\        unsafe {
+	\\            let msg = core::slice::from_raw_parts(bytes, len);
+	\\            let msg = core::str::from_utf8_unchecked(msg);
+	\\            eprintln!("[ROC EXPECT] {}", msg);
+	\\        }
+	\\    }
+	\\
+	\\    /// Print a `crash` message to stderr and exit.
+	\\    ///
+	\\    /// # Safety
+	\\    /// `bytes` must point to `len` readable bytes of valid UTF-8.
+	\\    pub unsafe extern "C" fn roc_crashed(_roc_host: *mut RocHost, bytes: *const u8, len: usize) {
+	\\        unsafe {
+	\\            let msg = core::slice::from_raw_parts(bytes, len);
+	\\            let msg = core::str::from_utf8_unchecked(msg);
+	\\            eprintln!("[ROC CRASHED] {}", msg);
+	\\            std::process::exit(1);
+	\\        }
+	\\    }
+	\\}
+	\\
+
+generate_make_roc_host_rust : Str
+generate_make_roc_host_rust =
+	\\/// Create a host-internal helper context with default memory management and handlers.
+	\\///
+	\\/// This is only for helper functions in this generated file. It is not passed to
+	\\/// compiled Roc code, which uses the direct symbol ABI declared above.
+	\\#[cfg(not(no_roc_std_helpers))]
+	\\pub fn make_roc_host(env: *mut c_void) -> RocHost {
+	\\    RocHost {
+	\\        env,
+	\\        roc_alloc: DefaultAllocators::roc_alloc,
+	\\        roc_dealloc: DefaultAllocators::roc_dealloc,
+	\\        roc_realloc: DefaultAllocators::roc_realloc,
+	\\        roc_dbg: DefaultHandlers::roc_dbg,
+	\\        roc_expect_failed: DefaultHandlers::roc_expect_failed,
+	\\        roc_crashed: DefaultHandlers::roc_crashed,
+	\\    }
+	\\}
+	\\

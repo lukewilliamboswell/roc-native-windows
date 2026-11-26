@@ -7,15 +7,7 @@
 		(size 90200976)
 		(system "aarch64-darwin")
 		(urls ("https://github.com/roc-lang/nightlies/releases/download/nightly-2026-11-26-890d6c8/roc_nightly-macos_apple_silicon-2026-11-26-890d6c8.tar.gz"))
-		(witness "https://api.github.com/repos/roc-lang/nightlies/releases/tags/nightly-2026-11-26-890d6c8")) (
-		(name "roc-rust-glue")
-		(obtained Computed)
-		(served ("raw.githubusercontent.com"))
-		(sha256 "ee2d047aded74d661009a37c20f52b3506d87522401597b3e8457cd4dec340f9")
-		(size 158765)
-		(system "aarch64-darwin")
-		(urls ("https://raw.githubusercontent.com/roc-lang/roc/890d6c82229fc6aadbdcb886ee3e09946e9cbbca/src/glue/src/RustGlue.roc"))
-		(witness ""))))
+		(witness "https://api.github.com/repos/roc-lang/nightlies/releases/tags/nightly-2026-11-26-890d6c8"))))
 	(format (
 		(major 2)
 		(minor 0)))
