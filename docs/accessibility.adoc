@@ -97,3 +97,26 @@ Repeat with a Windows contrast theme, larger Text size, and mixed
 monitor DPI when available. Run the core Reading List check on a fresh
 app from the standalone initializer. Keep native Windows evidence
 distinct from cross-build and Wine results.
+
+[#windows-baseline]
+== Windows x64 verification record
+
+The `9e43618` host was tested with Roc `nightly-2026-11-26-890d6c8`
+on Windows 11 25H2 build `26200.9974`. The x64 suite passed 128 Roc
+expects and 30 Win32 scenarios. The Rust host suite passed 108 tests,
+with one interactive shell test skipped.
+
+* The out-of-process probes passed focused checks for Counter, Reading
+  List, Todos, Files, HTTP, and Workers. The determinate progress fixture
+  exposed a read-only quarter-complete value. HTTP also passed with
+  Windows client animations disabled and the original setting was restored.
+* The checkout initializer generated a Reading List that passed its UI
+  Automation probe. The native Reading List and calendar keyboard probes
+  passed on the desktop.
+* Axe.Windows 2.4.2 reported zero errors in the startup tree of each
+  shipped example. The Workers `Product` heading cleared the three
+  findings from its previous `Item` heading.
+
+Track the standalone release initializer, native ARM64 evidence, and
+the full Narrator and display-settings walkthrough in
+https://github.com/lukewilliamboswell/roc-native-windows/issues/2[the desktop baseline issue].
