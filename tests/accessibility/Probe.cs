@@ -351,6 +351,24 @@ public static class RocWindowsAccessibility
         var table = Pattern<TableItemPattern>(cell, TableItemPattern.Pattern);
         Require(ColumnHeaders(table).Any(item => item.Current.Name == "Counted"),
                 "Counted cell has no Counted header.");
+        var labelsCell = GridItem(data, 1, 2);
+        var labelsItem = Pattern<GridItemPattern>(labelsCell, GridItemPattern.Pattern);
+        var labelsRow = TreeWalker.RawViewWalker.GetParent(labelsCell);
+        Require(labelsItem.Current.Row == 1, "The Labels cell did not expose its initial row index.");
+        Require(labelsRow != null && labelsRow.Current.Name == "Labels",
+                "The parent of the Labels cell should be the Labels row.");
+        int[] labelsCellId = labelsCell.GetRuntimeId();
+        int[] labelsRowId = labelsRow.GetRuntimeId();
+
+        var selection = Pattern<SelectionPattern>(grid, SelectionPattern.Pattern);
+        var paperSelection = Pattern<SelectionItemPattern>(cell, SelectionItemPattern.Pattern);
+        var labelsSelection = Pattern<SelectionItemPattern>(labelsCell, SelectionItemPattern.Pattern);
+        paperSelection.Select();
+        WaitFor("Paper Counted cell is selected", () =>
+            SelectionMatches(selection, cell) ? grid : null, () =>
+                "Paper selected: " + paperSelection.Current.IsSelected +
+                ". Selection count: " + selection.Current.GetSelection().Length);
+
         int[] identity = cell.GetRuntimeId();
         SetValue(cell, "7");
         WaitFor("Counted committed from UI Automation", () => Value(GridItem(data, 0, 2)) == "7" ? grid : null);
@@ -369,25 +387,58 @@ public static class RocWindowsAccessibility
             return focused != null && focused.Current.ControlType == ControlType.Edit &&
                    focused.Current.ProcessId == root.Current.ProcessId &&
                    focused.Current.Name == "Counted" ? focused : null;
+        }, () =>
+        {
+            var focus = AutomationElement.FocusedElement;
+            var edit = root.FindFirst(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+            var focused = focus == null ? "none" : String.Format("'{0}' ({1}, has focus {2})",
+                focus.Current.Name, focus.Current.ControlType.ProgrammaticName, focus.Current.HasKeyboardFocus);
+            var editorState = edit == null ? "none" : String.Format("'{0}' (has focus {1}, HWND {2})",
+                edit.Current.Name, edit.Current.HasKeyboardFocus, edit.Current.NativeWindowHandle);
+            return "Focused element: " + focused + ". Native editor: " + editorState;
         });
         var parent = TreeWalker.RawViewWalker.GetParent(editor);
         Require(parent != null && Automation.Compare(parent, sameCell),
                 "The focused EDIT is missing from the Counted cell's fragment.");
         Require(Value(editor) == "7" && editor.Current.HelpText.Contains("whole number"),
                 "The EDIT did not expose its draft and the cell's validation.");
-        Pattern<TextPattern>(editor, TextPattern.Pattern);
+        var editorText = Pattern<TextPattern>(editor, TextPattern.Pattern);
+        Require(editorText.DocumentRange.GetText(-1) == "7", "The editor's TextPattern did not return the draft.");
         SetValue(editor, "9");
         Require(Value(editor) == "9" && Value(sameCell) == "7",
                 "The EDIT and the committed cell must expose their own values.");
         PostKey(editor, 0x1b); // Escape cancels the draft and refocuses the cell.
         WaitFor("Counted cell regains focus", () => CurrentFocus(sameCell));
         Require(Value(sameCell) == "7", "Escape committed the editor draft.");
+        labelsSelection.AddToSelection();
+        WaitFor("Paper and Labels Counted cells are selected", () =>
+            SelectionMatches(selection, cell, labelsCell) ? grid : null, () =>
+                String.Format("Paper selected: {0}. Labels selected: {1}. Selection count: {2}.",
+                    paperSelection.Current.IsSelected, labelsSelection.Current.IsSelected,
+                    selection.Current.GetSelection().Length));
         Invoke(Find(root, "Reverse order", ControlType.Button));
-        WaitFor("old cell retired after sort and paging", () =>
+        WaitFor("Labels moved to row 3 after reversal", () =>
+            Value(GridItem(data, 2, 0)) == "Labels" ? grid : null);
+        var movedCell = GridItem(data, 2, 2);
+        var movedRow = TreeWalker.RawViewWalker.GetParent(movedCell);
+        Require(labelsItem.Current.Row == 2 && labelsCellId.SequenceEqual(movedCell.GetRuntimeId()),
+                "Sorting changed the identity of a surviving cell or left its row index stale.");
+        Require(movedRow != null && movedRow.Current.Name == "Labels" &&
+                labelsRowId.SequenceEqual(movedRow.GetRuntimeId()),
+                "Sorting changed the identity of a surviving row.");
+        WaitFor("Paper cell retired after leaving the mounted page", () =>
         {
             try { cell.GetCurrentPropertyValue(AutomationElement.NameProperty); return null; }
             catch (ElementNotAvailableException) { return grid; }
         });
+    }
+
+    private static bool SelectionMatches(SelectionPattern selection, params AutomationElement[] expected)
+    {
+        var selected = selection.Current.GetSelection();
+        return selected != null && selected.Length == expected.Length &&
+            expected.All(item => selected.Any(actual => Automation.Compare(item, actual)));
     }
 
     private static AutomationElement GridItem(GridPattern grid, int row, int column)

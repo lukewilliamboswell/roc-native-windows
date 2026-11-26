@@ -82,7 +82,7 @@ struct Grid {
     report: ListView,
     cells: BTreeMap<Key, Metadata>,
     active: Option<Key>,
-    anchor: Option<Key>,
+    selection: Option<(Key, Key)>,
     paste: Option<(u32, Listener)>,
     revision: u64,
     editing: Option<Editing>,
@@ -107,9 +107,9 @@ impl Grid {
     }
 
     fn range(&self) -> Option<automation::Range> {
-        let active = self.active?;
-        let (row, column) = self.cells[&active].position;
-        let (anchor_row, anchor_column) = self.cells[&self.anchor.unwrap_or(active)].position;
+        let (anchor, end) = self.selection?;
+        let (row, column) = self.cells[&end].position;
+        let (anchor_row, anchor_column) = self.cells[&anchor].position;
         Some((
             row.min(anchor_row),
             column.min(anchor_column),
@@ -316,11 +316,14 @@ impl MountedGrid for Grid {
         }
         self.cells = cells;
         self.paste = paste;
-        let surviving_active = self.active.filter(|key| self.cells.contains_key(key));
-        self.anchor = self
-            .anchor
-            .filter(|key| surviving_active.is_some() && self.cells.contains_key(key));
-        self.active = surviving_active.or_else(|| desired.rows.first()?.mounted.first().copied());
+        self.active = self
+            .active
+            .filter(|key| self.cells.contains_key(key))
+            .or_else(|| desired.rows.first()?.mounted.first().copied());
+        self.selection = self
+            .selection
+            .filter(|(anchor, end)| self.cells.contains_key(anchor) && self.cells.contains_key(end))
+            .or_else(|| self.active.map(|active| (active, active)));
         let selected = self
             .active
             .and_then(|key| self.cells.get(&key))
@@ -440,8 +443,7 @@ impl MountedGrid for Grid {
     }
 
     fn activate(&mut self, hwnd: HWND, row: usize, column: usize) -> Result<()> {
-        self.anchor = None;
-        self.move_to(hwnd, row, column)
+        self.select_range(hwnd, (row, column), (row, column))
     }
 
     fn select_range(
@@ -450,8 +452,10 @@ impl MountedGrid for Grid {
         start: (usize, usize),
         end: (usize, usize),
     ) -> Result<()> {
-        self.anchor = Some(self.report.projection().rows[start.0].mounted[start.1]);
-        self.move_to(hwnd, end.0, end.1)
+        let anchor = self.report.projection().rows[start.0].mounted[start.1];
+        self.move_to(hwnd, end.0, end.1)?;
+        self.selection = self.active.map(|end| (anchor, end));
+        Ok(())
     }
 
     fn mount_automation(&mut self, hwnd: HWND, name: &str) -> Result<()> {
@@ -507,8 +511,13 @@ impl MountedGrid for Grid {
                 }
             }
             Operation::Reveal => reveal_cell(hwnd, row, column),
-            Operation::Focus => {
-                self.activate(hwnd, row, column)?;
+            Operation::Focus(editor) => {
+                // A focus request queued before F2 must not dismiss the new editor.
+                if self.editing.as_ref().map(|edit| edit.generation) != editor {
+                    return Ok(None);
+                }
+                // UIA can focus an item before requesting a selection change.
+                self.move_to(hwnd, row, column)?;
                 // SAFETY: The grid is live, enabled, and on this UI thread.
                 unsafe { SetFocus(hwnd) };
             }
@@ -647,12 +656,13 @@ impl MountedGrid for Grid {
             VK_DOWN => ((row + 1).min(report.rows.len() - 1), column),
             _ => return Ok(()),
         };
-        self.anchor = if extend {
-            self.anchor.or(self.active)
+        let start = if extend {
+            self.selection
+                .map_or(meta.position, |(anchor, _)| self.cells[&anchor].position)
         } else {
-            None
+            (row, column)
         };
-        self.move_to(hwnd, row, column)
+        self.select_range(hwnd, start, (row, column))
     }
 
     fn click(&mut self, hwnd: HWND, point: POINT) -> Result<bool> {
