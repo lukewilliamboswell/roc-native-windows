@@ -41,6 +41,29 @@ the MSI on a clean machine. Cross-builds and Wine compatibility checks
 provide separate evidence from native Windows runs. Hosted CI is currently
 disabled.
 
+[#record-example-gallery]
+== Refresh the README recordings
+
+From an example's directory, record its gallery scenario on a Windows desktop.
+
+[source,powershell]
+----
+roc ../../cli/windows.roc -- record tests/specs/demo.scm --format gif
+----
+
+The command prints its output directory under `build/specs/`. Copy the
+resulting `demo.gif` to `docs/images/<example>.gif` at the repository root.
+Keep the example's scenario under `tests/specs/` so the recording can be
+repeated.
+
+The HTTP demo uses a local response. Run this from `examples/http` in a
+separate terminal while recording that example.
+
+[source,powershell]
+----
+python -m http.server 48393 --bind 127.0.0.1 --directory tests/fixtures
+----
+
 [#build-the-platform]
 == Cross-build the platform from source
 

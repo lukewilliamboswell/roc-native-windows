@@ -1,4 +1,5 @@
 (demo "A reading list"
+  (setup (window-size 480 272))
   (steps
     (screenshot "empty")
     (wait 400)
