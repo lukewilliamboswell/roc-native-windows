@@ -53,41 +53,9 @@ import Worker
 ## by the host and passed back into the next call for reuse).
 Step : { cmds : List(U8), state : Handle, work : List(U8) }
 
-## Copied from roc-signals `platform/main.roc`: the host owns one opaque box
-## containing the store as plain Roc data and the site tree beside it.
-## The nested boxed Iter is the narrow #12953 workaround for sites containing
-## functions: https://github.com/roc-lang/roc/issues/12953.
-Handle : Box({ store : Store, sites : Box(Iter(EngineHost.Sites(Store))) })
-
-## The handle over the state the host keeps until its next call.
-hold : EngineHost.App(Store) -> Handle
-hold = |engine| {
-	(store, sites) = EngineHost.split(engine)
-	Box.box({
-		store,
-		sites: Box.box(
-			Iter.custom(
-				Some(sites),
-				Ok(1),
-				|seed|
-					match seed {
-						Some(state) => Ok((state, None))
-						None => Err(NoMore)
-					},
-			),
-		),
-	})
-}
-
-## The state a handle holds; the host passes each handle back once.
-release : Handle -> EngineHost.App(Store)
-release = |handle| {
-	{ store, sites } = Box.unbox(handle)
-	match Box.unbox(sites).next() {
-		One({ item, rest: _ }) => EngineHost.join(store, item)
-		_ => crash "internal: the host passed an engine handle whose state was already taken"
-	}
-}
+## The host keeps the boxed engine state between calls. It passes the box
+## back to Roc without reading its contents.
+Handle : Box(EngineHost.App(Store))
 
 ## The wire protocol version the engine speaks (design.md, Appendix B).
 version_for_host : () -> U32
@@ -106,15 +74,15 @@ keys_for_host = || (EngineHost.driver(main).keys)()
 init_for_host : List(U8) -> Step
 init_for_host = |boot| {
 	(state, cmds, work) = (EngineHost.driver(main).init)(boot)
-	{ cmds, state: hold(state), work }
+	{ cmds, state: Box.box(state), work }
 }
 
 ## Route an event (node id, handler number, payload bytes) through one
 ## turn, reusing the previous call's command and work buffers.
 event_for_host : Handle, List(U8), List(U8), U32, U32, List(U8) -> Step
 event_for_host = |boxed, buf, wbuf, node, handler, payload| {
-	(next, cmds, work) = (EngineHost.driver(main).event)(release(boxed), buf, wbuf, node, handler, payload)
-	{ cmds, state: hold(next), work }
+	(next, cmds, work) = (EngineHost.driver(main).event)(Box.unbox(boxed), buf, wbuf, node, handler, payload)
+	{ cmds, state: Box.box(next), work }
 }
 
 ## Copied from roc-signals `platform/main.roc`: a files-kind event, the file
@@ -122,8 +90,8 @@ event_for_host = |boxed, buf, wbuf, node, handler, payload| {
 ## engine with the call.
 files_for_host : Handle, List(U8), List(U8), U32, U32, List(U8), List(Box(U64)) -> Step
 files_for_host = |boxed, buf, wbuf, node, handler, record, blobs| {
-	(next, cmds, work) = (EngineHost.driver(main).files)(release(boxed), buf, wbuf, node, handler, record, blobs)
-	{ cmds, state: hold(next), work }
+	(next, cmds, work) = (EngineHost.driver(main).files)(Box.unbox(boxed), buf, wbuf, node, handler, record, blobs)
+	{ cmds, state: Box.box(next), work }
 }
 
 ## Copied from roc-signals `platform/main.roc`: a worker instance's job
