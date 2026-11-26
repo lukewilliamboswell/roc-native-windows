@@ -72,7 +72,7 @@ bundle! = |roc| {
 }
 
 check! = |roc| {
-	step!(roc, ["fmt", "--check", "platform", "examples", "scripts", "windows.roc"])?
+	step!(roc, ["fmt", "--check", "platform", "examples", "scripts", "cli/windows.roc"])?
 	for file in ["scripts/build.roc", "scripts/check_glue.roc", "scripts/release.roc"] {
 		step!(roc, ["test", file])?
 	}
@@ -86,7 +86,7 @@ check! = |roc| {
 	for target in windows_targets {
 		step!("cargo", ["clippy", "--manifest-path", "host/Cargo.toml", "--locked", "--target", target.rust, "--", "-D", "warnings"])?
 	}
-	for file in ["platform/main.roc", "windows.roc"].concat(examples.map(|name| "examples/${name}/src/main.roc")) {
+	for file in ["platform/main.roc", "cli/windows.roc"].concat(examples.map(|name| "examples/${name}/src/main.roc")) {
 		step!(roc, ["check", file])?
 		step!(roc, ["test", file])?
 	}
@@ -103,7 +103,7 @@ build! = |roc| {
 	for target in windows_targets {
 		for example in examples {
 			dir = "examples/${example}"
-			cmd = command(roc, ["run", "../../windows.roc", "--", "build", "--target", target.roc]).cwd(Path.utf8(dir)).env("ROC_WINDOWS_ROC", OsStr.from_str(roc))
+			cmd = command(roc, ["run", "../../cli/windows.roc", "--", "build", "--target", target.roc]).cwd(Path.utf8(dir)).env("ROC_WINDOWS_ROC", OsStr.from_str(roc))
 			run!(cmd, "build ${example} for ${target.roc}")?
 		}
 	}

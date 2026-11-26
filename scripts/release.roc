@@ -69,7 +69,7 @@ assemble! = |staging, base, archive, archive_name, out| {
 	}
 	copy!("LICENSE", "${assets}/LICENSE")?
 	copy!("THIRD_PARTY_LICENSES.md", "${assets}/THIRD_PARTY_LICENSES.md")?
-	source = Path.read_utf8!(Path.utf8("windows.roc")) ? |error| "Could not read windows.roc: ${Str.inspect(error)}"
+	source = Path.read_utf8!(Path.utf8("cli/windows.roc")) ? |error| "Could not read cli/windows.roc: ${Str.inspect(error)}"
 	platform_url = "${base}/${archive_name}"
 	launcher_url = "${base}/windows.roc"
 	lines = source.split_on("\n").map(

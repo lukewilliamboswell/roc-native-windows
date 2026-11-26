@@ -524,7 +524,9 @@ init! = |dir, requested| {
 	main_path = "${dir}/src/main.roc"
 	ignore_path = "${dir}/.gitignore"
 	tool_path = "${dir}/windows.roc"
-	local_tool = Path.is_file!(Path.utf8("windows.roc"))?
+	standalone = Path.utf8("windows.roc")
+	local_path = if (Path.is_file!(standalone)?) standalone else Path.utf8("cli/windows.roc")
+	local_tool = Path.is_file!(local_path)?
 	copy_tool = (dir != "." and local_tool) or (!local_tool and !release_launcher_sha256.is_empty())
 	for destination in [main_path, ignore_path].concat(if (copy_tool) [tool_path] else []) {
 		if Path.exists!(Path.utf8(destination))? {
@@ -545,7 +547,7 @@ init! = |dir, requested| {
 	Path.write_utf8!(Path.utf8(ignore_path), "/build/\n/dist/\n")?
 	if copy_tool {
 		if local_tool {
-			Path.copy!(Path.utf8("windows.roc"), Path.utf8(tool_path))?
+			Path.copy!(local_path, Path.utf8(tool_path))?
 		} else {
 			Path.write_bytes!(Path.utf8(tool_path), launcher)?
 		}
