@@ -1,0 +1,65 @@
+app [main] { pf: platform "../../../platform/main.roc" }
+
+import pf.Engine exposing [Elem, Signal]
+import pf.Ui
+
+main : Engine.Program(_)
+main = Engine.program_store({}, |_boot| store, |_boot| view())
+
+Request : { url : Str, serial : U64, active : Bool }
+
+store = Engine.store(
+	HttpDemo,
+	{
+		url: Engine.cell("https://example.com"),
+		request: Engine.cell({ url: "", serial: 0, active: Bool.False }),
+		status: Engine.cell("Enter a URL and press Fetch."),
+		body: Engine.cell(""),
+	}.Engine.Cells,
+)
+
+cells = store.cells()
+
+view : () -> Elem(Engine.StoreRoot(_))
+view = || {
+	request = cells.request.signal()
+	url = cells.url.signal()
+	start = { url, previous: request }.Signal.map(|{ url: typed, previous }| { url: typed.trim(), serial: previous.serial + 1, active: Bool.True })
+	Ui.vstack(
+		{ padding: 16, spacing: 12 },
+		[
+			Ui.text("HTTP"),
+			Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
+			Ui.hstack(
+				{},
+				[
+					Ui.button("Fetch", { enabled: start.map(|r| !r.url.is_empty()), on_press: Engine.handle_by(start, |r, _| [cells.request.set(r), cells.status.set("Fetching…"), cells.body.set("")]) }),
+					Ui.button("Cancel", { enabled: request.map(|r| r.active), on_press: Engine.handle(|_| [cells.request.update(|r| { ..r, active: Bool.False }), cells.status.set("Cancelled.")]) }),
+				],
+			),
+			Ui.text(cells.status.signal()),
+			Ui.text(cells.body.signal()),
+			Engine.watch_latest(
+				request,
+				|r| if (r.active) [Engine.http({ url: r.url, timeout: Ms(15_000), cache: NoStore })] else [],
+				Engine.react(answered),
+			),
+		],
+	)
+}
+
+answered : Request, Try(Engine.Response, Engine.HttpFailure) -> List(Engine.Write(_))
+answered = |request, result| {
+	update = match result {
+		Ok(response) => [cells.status.set("HTTP ${response.status.to_str()} · ${response.body.count_utf8_bytes().to_str()} bytes"), cells.body.set(preview(response.body))]
+		Err(Network(message)) => [cells.status.set("Network error: ${message}")]
+		Err(Timeout) => [cells.status.set("The request timed out.")]
+		Err(Refused) => [cells.status.set("The request was refused.")]
+	}
+	update.append(cells.request.set({ ..request, active: Bool.False }))
+}
+
+preview : Str -> Str
+preview = |body| Str.join_with(Str.from_utf8_lossy(body.to_utf8().take_first(200)).split_on("\n").map(|line| line.trim()), " ")
+
+expect preview("a\n  b") == "a b"
