@@ -1,5 +1,6 @@
 app [main!] {
 	cli: platform "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst",
+	weaver: "https://github.com/lukewilliamboswell/weaver/releases/download/0.10.0/7CdYzjBAJmprmnK45oTpmH6BXt76ZASN2Ck5uZQEoWsK.tar.zst",
 	zip: "https://github.com/lukewilliamboswell/roc-zip/releases/download/0.3.0-rc4/7KtXa6LGYfVGZK5kDMtkHeumUJywvSR15YdQoRvfzxg1.tar.zst",
 }
 
@@ -10,38 +11,26 @@ import cli.Path
 import cli.Stderr
 import cli.Stdout
 import cli.System
+import weaver.Cli
+import weaver.Opt
+import weaver.Param
+import weaver.SubCmd
 import zip.Zip
 
 Command : [Help, Init(Str, Str), Build(Str), Run(Str), Test, Package(Str)]
 
-usage =
-	\\windows.roc creates, builds, runs, tests and packages Roc Win32 apps.
-	\\
-	\\  init [DIR] [--platform PATH_OR_URL]   Create a starter app.
-	\\  build [--target x64mingw|arm64mingw]  Build an EXE and copy assets/.
-	\\  run [--target x64mingw|arm64mingw]    Build and launch the app on Windows.
-	\\  test                                 Check source and run Roc expects.
-	\\  package [--target x64mingw|arm64mingw] Build and create a ZIP in dist/.
-	\\
-	\\Run build, run, test and package from the app directory. The entry point
-	\\is src/main.roc, or main.roc for an existing single-file application.
-	\\Build output goes in build/<target>/. Build, test and package work on
-	\\macOS as well as on Windows. The default is the Windows Roc process architecture,
-	\\or x64mingw on other systems. Set ROC_WINDOWS_ROC to use a particular Roc
-	\\compiler instead of roc on PATH.
-	\\
-	\\For init, --platform accepts a platform's main.roc path relative to the
-	\\current directory or the HTTPS URL of a published platform bundle.
-	\\Its default is ROC_WINDOWS_PLATFORM, or platform/main.roc in a checkout.
-
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |raw_args| {
-	args = raw_args.map(OsStr.display)
-	command = match parse(args) {
+	# Also accept invocation through Roc's argument separator.
+	args = if (raw_args.first() == Ok(OsStr.from_str("--"))) raw_args.drop_first(1) else raw_args
+	command = match Cli.parse_or_display_message(parser, args, OsStr.to_raw) {
 		Ok(found) => found
-		Err(problem) => {
-			Stderr.line!("windows.roc: ${problem}") ?? {}
-			Stderr.line!("Use windows.roc --help for usage.") ?? {}
+		Err(Help(message)) | Err(Version(message)) => {
+			Stdout.line!(message) ?? {}
+			return Ok({})
+		}
+		Err(InvalidUsage(message)) => {
+			Stderr.line!(message) ?? {}
 			return Err(Exit(2))
 		}
 	}
@@ -54,44 +43,91 @@ main! = |raw_args| {
 	}
 }
 
-parse : List(Str) -> Try(Command, Str)
-parse = |args|
-	match args {
-		["--", .. as rest] => parse(rest)
-		[] | ["help"] | ["--help"] | ["-h"] => Ok(Help)
-		[command, "--help"] | [command, "-h"] if ["init", "build", "run", "test", "package"].contains(command) => Ok(Help)
-		["init", .. as rest] => parse_init(rest)
-		["build", .. as rest] => parse_target(rest).map_ok(|target| Build(target))
-		["run", .. as rest] => parse_target(rest).map_ok(|target| Run(target))
-		["package", .. as rest] => parse_target(rest).map_ok(|target| Package(target))
-		["test"] => Ok(Test)
-		[command, ..] => Err("Unknown command or arguments for ${command}.")
-	}
+parser : Cli.CliParser(Command)
+parser =
+	Cli.assert_valid(
+		Cli.finish(
+			Cli.map(
+				SubCmd.optional([
+					init_command,
+					target_command("build", "Build an EXE and copy assets/.", |target| Build(target)),
+					target_command("run", "Build and launch the app on Windows.", |target| Run(target)),
+					SubCmd.empty({ name: "test", description: "Check source and run Roc expects.", value: Test }),
+					target_command("package", "Build and create a ZIP in dist/.", |target| Package(target)),
+					SubCmd.empty({ name: "help", description: "Show this help.", value: Help }),
+				]),
+				|command| command ?? Help,
+			),
+			{
+				name: "windows",
+				description: description,
+				version: "development",
+				authors: [],
+				text_style: Plain,
+			},
+		),
+	)
 
-parse_init : List(Str) -> Try(Command, Str)
-parse_init = |args|
-	match args {
-		[] => Ok(Init(".", ""))
-		[dir] if !dir.starts_with("-") => Ok(Init(dir, ""))
-		["--platform", source] if !source.starts_with("-") => Ok(Init(".", source))
-		[dir, "--platform", source] | ["--platform", source, dir] if !dir.starts_with("-") and !source.starts_with("-") =>
-			Ok(Init(dir, source))
-		_ => Err("Expected init [DIR] [--platform PATH_OR_URL].")
-	}
+description =
+	\\Create, build, run, test and package Roc Win32 apps with roc windows.roc.
+	\\
+	\\Run build, run, test and package from the app directory. The entry point
+	\\is src/main.roc, or main.roc for an existing single-file application.
+	\\Build output goes in build/<target>/. Build, test and package work on
+	\\macOS as well as on Windows. Set ROC_WINDOWS_ROC to use a particular
+	\\Roc compiler instead of roc on PATH.
 
-parse_target : List(Str) -> Try(Str, Str)
-parse_target = |args|
-	match args {
-		[] => Ok("")
-		["--target", "x64mingw"] => Ok("x64mingw")
-		["--target", "arm64mingw"] => Ok("arm64mingw")
-		_ => Err("Expected --target x64mingw or --target arm64mingw.")
+init_command : SubCmd.SubcommandParserConfig(Command)
+init_command =
+	SubCmd.finish(
+		{
+			source: Opt.str({
+				short: "",
+				long: "platform",
+				help: "Path to platform/main.roc from the working directory, or an HTTPS bundle URL. Defaults to ROC_WINDOWS_PLATFORM or platform/main.roc.",
+				default: Value(""),
+			}),
+			dir: Param.str({
+				name: "dir",
+				help: "App directory, defaulting to the current directory.",
+				default: Value("."),
+			}),
+		}.Cli,
+		{ name: "init", description: "Create a starter app.", mapper: |{ dir, source }| Init(dir, source) },
+	)
+
+target_command : Str, Str, (Str -> Command) -> SubCmd.SubcommandParserConfig(Command)
+target_command = |name, summary, mapper|
+	SubCmd.finish(
+		Opt.single({
+			short: "",
+			long: "target",
+			type: "target",
+			help: "x64mingw or arm64mingw. Defaults to the Windows Roc process architecture, or x64mingw on other systems.",
+			parser: |arg|
+				match arg.to_str() {
+					Ok("x64mingw") => Ok("x64mingw")
+					Ok("arm64mingw") => Ok("arm64mingw")
+					Ok(_) => Err(InvalidValue("expected x64mingw or arm64mingw"))
+					Err(_) => Err(InvalidUtf8)
+				},
+			default: Value(""),
+		}),
+		{ name, description: summary, mapper },
+	)
+
+parse_text = |args| Cli.parse_or_display_message(parser, args, |arg| Utf8(arg))
+
+help_text =
+	match parse_text(["--help"]) {
+		Err(Help(message)) => message
+		_ => crash "Weaver did not produce help for windows.roc."
 	}
 
 execute! : Command => Try({}, _)
 execute! = |command|
 	match command {
-		Help => Stdout.line!(usage)
+		Help => Stdout.line!(help_text)
 		Init(dir, source) => init!(dir, source)
 		Build(target) => build!(target).map_ok(|_| {})
 		Run(target) => run!(target)
@@ -513,9 +549,25 @@ explain = |problem|
 		other => Str.inspect(other)
 	}
 
-expect parse(["build", "--target", "arm64mingw"]) == Ok(Build("arm64mingw"))
-expect parse(["package", "--target", "x64mac"]) == Err("Expected --target x64mingw or --target arm64mingw.")
-expect parse(["init", "--platform", "platform/main.roc", "starter"]) == Ok(Init("starter", "platform/main.roc"))
+expect parse_text(["build", "--target", "arm64mingw"]) == Ok(Build("arm64mingw"))
+expect parse_text(["run", "--target=x64mingw"]) == Ok(Run("x64mingw"))
+expect parse_text(["test"]) == Ok(Test)
+expect parse_text(["help"]) == Ok(Help)
+expect parse_text([]) == Ok(Help)
+expect {
+	match parse_text(["package", "--target", "x64mac"]) {
+		Err(InvalidUsage(message)) => message.contains("--target") and message.contains("x64mingw") and message.contains("arm64mingw")
+		_ => Bool.False
+	}
+}
+expect {
+	match parse_text(["package", "--help"]) {
+		Err(Help(message)) => message.contains("Build and create a ZIP") and message.contains("--target")
+		_ => Bool.False
+	}
+}
+expect parse_text(["init", "--platform", "platform/main.roc", "starter"]) == Ok(Init("starter", "platform/main.roc"))
+expect parse_text(["init", "starter", "--platform", "platform/main.roc"]) == Ok(Init("starter", "platform/main.roc"))
 expect relative_to("/dev/demo/src", "/dev/platform/main.roc") == Ok("../../platform/main.roc")
 expect relative_to("C:\\dev\\demo\\src", "D:\\platform\\main.roc") == Err(DifferentDrive)
 expect relative_to("C:\\dev\\demo\\src", "C:\\dev\\platform\\main.roc") == Ok("../../platform/main.roc")
