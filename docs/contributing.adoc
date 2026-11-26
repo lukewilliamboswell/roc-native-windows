@@ -50,7 +50,9 @@ source checks and docs build on macOS, cross-builds on Linux, and checks
 the Win32 behavior scenarios on Windows x64. Run the interactive desktop
 checks below for Narrator, input focus, and display settings.
 The workflow's manual options run the external UI Automation probe and
-native ARM64 scenarios when those runners are available.
+native ARM64 scenarios when those runners are available. The `standalone`
+option stages a local release preview on macOS and verifies a Reading List
+project generated from that preview on Windows x64 with a fresh Roc cache.
 
 Run xref:accessibility.adoc#verify-uia[the accessibility probe and desktop
 walkthroughs] before recording accessibility verification for a release.
