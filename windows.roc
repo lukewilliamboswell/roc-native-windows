@@ -1,23 +1,40 @@
 app [main!] {
 	cli: platform "https://github.com/roc-lang/basic-cli/releases/download/0.28.1/7brgwR8YUqfeGrkdfF1V4GPPN7DnP7ftqub9KcrTEZtr.tar.zst",
+	http: "https://github.com/roc-lang/http/releases/download/1.0.0/6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst",
 	weaver: "https://github.com/lukewilliamboswell/weaver/releases/download/0.10.0/7CdYzjBAJmprmnK45oTpmH6BXt76ZASN2Ck5uZQEoWsK.tar.zst",
 	zip: "https://github.com/lukewilliamboswell/roc-zip/releases/download/0.3.0-rc4/7KtXa6LGYfVGZK5kDMtkHeumUJywvSR15YdQoRvfzxg1.tar.zst",
 }
 
 import cli.Cmd
 import cli.Env
+import cli.Http
 import cli.OsStr
 import cli.Path
 import cli.Stderr
 import cli.Stdout
 import cli.System
+import http.Request
 import weaver.Cli
 import weaver.Opt
 import weaver.Param
 import weaver.SubCmd
 import zip.Zip
 
-Command : [Help, Init(Str, Str), Build(Str), Run(Str), Test, Package(Str)]
+PackageFormat : [Msi, Zip]
+
+PackageOptions : { target : Str, format : PackageFormat, id : Str, version : Str, publisher : Str }
+
+Command : [Help, Init(Str, Str), Build(Str), Run(Str), Test, Package(PackageOptions)]
+
+# scripts/release.roc replaces these defaults with the release's exact assets.
+release_platform = ""
+
+release_launcher = ""
+
+release_launcher_sha256 = ""
+
+release_packagers : List({ system : Str, url : Str, sha256 : Str })
+release_packagers = []
 
 main! : List(OsStr.OsStr) => Try({}, [Exit(I32)])
 main! = |raw_args| {
@@ -53,7 +70,7 @@ parser =
 					target_command("build", "Build an EXE and copy assets/.", |target| Build(target)),
 					target_command("run", "Build and launch the app on Windows.", |target| Run(target)),
 					SubCmd.empty({ name: "test", description: "Check source and run Roc expects.", value: Test }),
-					target_command("package", "Build and create a ZIP in dist/.", |target| Package(target)),
+					package_command,
 					SubCmd.empty({ name: "help", description: "Show this help.", value: Help }),
 				]),
 				|command| command ?? Help,
@@ -98,22 +115,47 @@ init_command =
 
 target_command : Str, Str, (Str -> Command) -> SubCmd.SubcommandParserConfig(Command)
 target_command = |name, summary, mapper|
+	SubCmd.finish(target_option, { name, description: summary, mapper })
+
+target_option =
+	Opt.single({
+		short: "",
+		long: "target",
+		type: "target",
+		help: "x64mingw or arm64mingw. Defaults to the Windows Roc process architecture, or x64mingw on other systems.",
+		parser: |arg|
+			match arg.to_str() {
+				Ok("x64mingw") => Ok("x64mingw")
+				Ok("arm64mingw") => Ok("arm64mingw")
+				Ok(_) => Err(InvalidValue("expected x64mingw or arm64mingw"))
+				Err(_) => Err(InvalidUtf8)
+			},
+		default: Value(""),
+	})
+
+package_command : SubCmd.SubcommandParserConfig(Command)
+package_command =
 	SubCmd.finish(
-		Opt.single({
-			short: "",
-			long: "target",
-			type: "target",
-			help: "x64mingw or arm64mingw. Defaults to the Windows Roc process architecture, or x64mingw on other systems.",
-			parser: |arg|
-				match arg.to_str() {
-					Ok("x64mingw") => Ok("x64mingw")
-					Ok("arm64mingw") => Ok("arm64mingw")
-					Ok(_) => Err(InvalidValue("expected x64mingw or arm64mingw"))
+		{
+			target: target_option,
+			format: Opt.single({
+				short: "",
+				long: "format",
+				type: "format",
+				help: "msi (default) or zip for portable distribution.",
+				parser: |arg| match arg.to_str() {
+					Ok("msi") => Ok(Msi)
+					Ok("zip") => Ok(Zip)
+					Ok(_) => Err(InvalidValue("expected msi or zip"))
 					Err(_) => Err(InvalidUtf8)
 				},
-			default: Value(""),
-		}),
-		{ name, description: summary, mapper },
+				default: Value(Msi),
+			}),
+			id: Opt.str({ short: "", long: "id", help: "Stable reverse-DNS upgrade identity for MSI releases.", default: Value("") }),
+			version: Opt.str({ short: "", long: "app-version", help: "MSI product version (MAJOR.MINOR.PATCH).", default: Value("0.1.0") }),
+			publisher: Opt.str({ short: "", long: "publisher", help: "Publisher shown by Windows for the MSI.", default: Value("Local development") }),
+		}.Cli,
+		{ name: "package", description: "Build and create an MSI installer or portable ZIP in dist/.", mapper: |options| Package(options) },
 	)
 
 parse_text = |args| Cli.parse_or_display_message(parser, args, |arg| Utf8(arg))
@@ -132,7 +174,7 @@ execute! = |command|
 		Build(target) => build!(target).map_ok(|_| {})
 		Run(target) => run!(target)
 		Test => test!()
-		Package(target) => package!(target)
+		Package(options) => package!(options)
 	}
 
 windows_target! : () => Str
@@ -223,6 +265,13 @@ stage_build! = |entry, name, target, stage, dir| {
 	Path.write_bytes!(image, gui_executable(Path.read_bytes!(image)?, target)?)?
 	if Path.exists!(Path.utf8("assets"))? {
 		copy_assets!("assets", fresh)?
+	}
+	for notice in ["LICENSE", "THIRD_PARTY_LICENSES.md"] {
+		path = Path.utf8(notice)
+		if Path.exists!(path)? {
+			if (!Path.is_file!(path)?) return Err(InvalidAsset(notice))
+			Path.copy!(path, Path.utf8("${fresh}/${notice}"))?
+		}
 	}
 	if Path.exists!(Path.utf8(dir))? {
 		if !Path.is_dir!(Path.utf8(dir))? {
@@ -357,15 +406,96 @@ reserved_name = |name| {
 	["aux", "con", "nul", "prn", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "com¹", "com²", "com³", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "lpt¹", "lpt²", "lpt³"].contains(lower)
 }
 
-package! : Str => Try({}, _)
-package! = |target| {
-	built = build!(target)?
+package! : PackageOptions => Try({}, _)
+package! = |options| {
+	built = build!(options.target)?
+	extension = if (options.format == Msi) "msi" else "zip"
+	ensure_dir!("dist")?
+	output = "dist/${built.name}-${built.target}.${extension}"
+	path = Path.utf8(output)
+	if Path.exists!(path)? and !Path.is_file!(path)? {
+		return Err(InvalidOutput(output))
+	}
+	stage = Env.create_temp_dir_in!(Path.utf8("dist"), ".windows-")?
+	file = stage.join("candidate.${extension}")
+	saved = match write_package!(built, options, stage, file) {
+		Ok({}) => Path.rename!(file, path)
+		Err(problem) => Err(problem)
+	}
+	Path.delete_all!(stage) ?? {}
+	saved?
+	Stdout.line!("Packaged ${output}")
+}
+
+msi_helper! = |stage| {
+	override = env!("ROC_WINDOWS_MSI")
+	if !override.is_empty() {
+		return if (Cmd.check_available!(override)) Ok(override) else Err(PackagerMissing(override))
+	}
+	system = System.target!()
+	id = match (system.os(), system.arch()) {
+		(MacOS(_), Arm64) => "macos-arm64"
+		(MacOS(_), X64) => "macos-x64"
+		(Windows(_), Arm64) => "windows-arm64"
+		(Windows(_), X64) => "windows-x64"
+		(Linux(_), Arm64) => "linux-arm64"
+		(Linux(_), X64) => "linux-x64"
+	}
+	match release_packagers.find_first(|asset| asset.system == id) {
+		Ok(asset) => {
+			bytes = download!(asset.url, 32 * 1024 * 1024)?
+			if Crypto.SHA256.hash(bytes).to_hex() != asset.sha256 {
+				return Err(DownloadDigest(asset.url))
+			}
+			windows = id.starts_with("windows-")
+			destination = stage.join(if (windows) "roc-windows-msi.exe" else "roc-windows-msi")
+			Path.write_bytes!(destination, bytes)?
+			program = Path.absolute!(destination)?.display()
+			if !windows {
+				made = Cmd.new("/bin/chmod").args(["700", OsStr.from_str(program)]).inherit_stdio().run!()?
+				check_exit(made.status, "prepare the MSI packager")?
+			}
+			Ok(program)
+		}
+		Err(_) => if (Cmd.check_available!("roc-windows-msi")) Ok("roc-windows-msi") else Err(PackagerMissing("roc-windows-msi"))
+	}
+}
+
+download! = |url, limit| {
+	request = Request.from_method(GET).with_uri(url).with_timeout(TimeoutMilliseconds(60_000))
+	response = Http.send_streaming!(request, { max_redirects: 5 }) ? |problem| DownloadFailed(url, Str.inspect(problem))
+	if response.status() != 200 {
+		return Err(DownloadFailed(url, "HTTP ${response.status().to_str()}"))
+	}
+	response.read_to_end!(MaxBytes(limit)).map_err(|problem| DownloadFailed(url, Str.inspect(problem)))
+}
+
+write_package! = |built, options, stage, file| {
+	if options.format == Msi {
+		helper = msi_helper!(stage)?
+		id = if (options.id.is_empty()) "org.roc-lang.local.${built.name}" else options.id
+		args = [built.target, built.name, id, options.version, options.publisher, built.dir, file.display()]
+		outcome = Cmd.new(OsStr.from_str(helper)).args(args.map(OsStr.from_str)).inherit_stdio().run!()?
+		check_exit(outcome.status, "MSI packaging")
+	} else {
+		Path.write_bytes!(file, zip_bytes!(built)?)
+	}
+}
+
+zip_bytes! = |built| {
 	name = "${built.name}.exe"
 	binary = { path: name, source: Path.utf8("${built.dir}/${name}"), directory: Bool.False }
 	asset_dir = Path.utf8("${built.dir}/assets")
 	files = if (Path.is_dir!(asset_dir)?) assets!(asset_dir, "assets")? else []
 	stamp = Zip.dos_time(315532800)
-	sorted = files.append(binary).sort_with(|a, b| compare_name(a.path.to_utf8(), b.path.to_utf8()))
+	var $payload = files.append(binary)
+	for notice in ["LICENSE", "THIRD_PARTY_LICENSES.md"] {
+		source = Path.utf8("${built.dir}/${notice}")
+		if Path.is_file!(source)? {
+			$payload = $payload.append({ path: notice, source, directory: Bool.False })
+		}
+	}
+	sorted = $payload.sort_with(|a, b| compare_name(a.path.to_utf8(), b.path.to_utf8()))
 	var $items = []
 	for item in sorted {
 		entry = if item.directory {
@@ -375,22 +505,7 @@ package! = |target| {
 		}
 		$items = $items.append(entry)
 	}
-	data = Zip.create_items($items, Balanced).map_err(|err| ArchiveFailed(Str.inspect(err)))?
-	ensure_dir!("dist")?
-	output = "dist/${built.name}-${built.target}.zip"
-	path = Path.utf8(output)
-	if Path.exists!(path)? and !Path.is_file!(path)? {
-		return Err(InvalidOutput(output))
-	}
-	stage = Env.create_temp_dir_in!(Path.utf8("dist"), ".windows-")?
-	file = stage.join("candidate.zip")
-	saved = match Path.write_bytes!(file, data) {
-		Ok({}) => Path.rename!(file, path)
-		Err(problem) => Err(problem)
-	}
-	Path.delete_all!(stage) ?? {}
-	saved?
-	Stdout.line!("Packaged ${output}")
+	Zip.create_items($items, Balanced).map_err(|err| ArchiveFailed(Str.inspect(err)))
 }
 
 compare_name : List(U8), List(U8) -> [Before, Same, After]
@@ -405,30 +520,42 @@ compare_name = |a, b|
 init! : Str, Str => Try({}, _)
 init! = |dir, requested| {
 	configured = env!("ROC_WINDOWS_PLATFORM")
-	source = if (!requested.is_empty()) requested else if (!configured.is_empty()) configured else "platform/main.roc"
+	source = [requested, configured, release_platform].find_first(|candidate| !candidate.is_empty()) ?? "platform/main.roc"
 	main_path = "${dir}/src/main.roc"
 	ignore_path = "${dir}/.gitignore"
 	tool_path = "${dir}/windows.roc"
-	copy_tool = dir != "." and Path.is_file!(Path.utf8("windows.roc"))?
+	local_tool = Path.is_file!(Path.utf8("windows.roc"))?
+	copy_tool = (dir != "." and local_tool) or (!local_tool and !release_launcher_sha256.is_empty())
 	for destination in [main_path, ignore_path].concat(if (copy_tool) [tool_path] else []) {
 		if Path.exists!(Path.utf8(destination))? {
 			return Err(InitConflict(destination))
 		}
 	}
 	source_ref = platform_source!(source, "${dir}/src")?
+	launcher = if copy_tool and !local_tool {
+		bytes = download!(release_launcher, 1024 * 1024)?
+		if Crypto.SHA256.hash(bytes).to_hex() != release_launcher_sha256 {
+			return Err(DownloadDigest(release_launcher))
+		}
+		bytes
+	} else []
 	ensure_dir!(dir)?
 	ensure_dir!("${dir}/src")?
 	Path.write_utf8!(Path.utf8(main_path), starter(source_ref))?
 	Path.write_utf8!(Path.utf8(ignore_path), "/build/\n/dist/\n")?
 	if copy_tool {
-		Path.copy!(Path.utf8("windows.roc"), Path.utf8(tool_path))?
+		if local_tool {
+			Path.copy!(Path.utf8("windows.roc"), Path.utf8(tool_path))?
+		} else {
+			Path.write_bytes!(Path.utf8(tool_path), launcher)?
+		}
 	}
 	Stdout.line!("Created ${main_path}. Run roc windows.roc build from ${dir}.")
 }
 
 platform_source! : Str, Str => Try(Str, _)
 platform_source! = |source, from| {
-	qualified = if source.starts_with("https://") {
+	qualified = if source.starts_with("https://") or source.starts_with("http://127.0.0.1:") or source.starts_with("http://localhost:") {
 		source
 	} else {
 		path = Path.utf8(source)
@@ -535,6 +662,9 @@ explain = |problem|
 		MissingEntry => "Expected src/main.roc or main.roc in the current directory."
 		RunRequiresWindows => "Run requires a Windows x64 or ARM64 machine. You can use build here."
 		CompilerMissing(compiler) => "Could not find ${compiler}. Put Roc on PATH or set ROC_WINDOWS_ROC."
+		PackagerMissing(helper) => "Could not find ${helper}. Put roc-windows-msi on PATH or set ROC_WINDOWS_MSI to its path. From a platform checkout, build it with blueprint run packager."
+		DownloadFailed(url, reason) => "Could not download ${url} (${reason})."
+		DownloadDigest(url) => "The download from ${url} did not match the release checksum."
 		ChildFailed(step, status) => "The ${step} command failed (${status})."
 		ExpectedDirectory(path) => "Expected a directory at ${path}."
 		InvalidAsset(path) => "Expected a regular file or directory with a Windows-safe name at ${path}."
@@ -562,7 +692,15 @@ expect {
 }
 expect {
 	match parse_text(["package", "--help"]) {
-		Err(Help(message)) => message.contains("Build and create a ZIP") and message.contains("--target")
+		Err(Help(message)) => message.contains("MSI installer") and message.contains("--target") and message.contains("--format")
+		_ => Bool.False
+	}
+}
+expect parse_text(["package"]) == Ok(Package({ target: "", format: Msi, id: "", version: "0.1.0", publisher: "Local development" }))
+expect parse_text(["package", "--format", "zip", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", format: Zip, id: "", version: "0.1.0", publisher: "Local development" }))
+expect {
+	match parse_text(["package", "--format", "exe"]) {
+		Err(InvalidUsage(message)) => message.contains("--format") and message.contains("msi or zip")
 		_ => Bool.False
 	}
 }

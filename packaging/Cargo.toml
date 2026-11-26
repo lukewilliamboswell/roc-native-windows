@@ -1,0 +1,14 @@
+[package]
+name = "roc-windows-msi"
+version = "0.1.0"
+edition = "2024"
+license = "UPL-1.0"
+publish = false
+
+[dependencies]
+embala-msi = "=0.15.0"
+msi = "0.10"
+sha2 = "0.10"
+
+[dev-dependencies]
+cab = "0.6"

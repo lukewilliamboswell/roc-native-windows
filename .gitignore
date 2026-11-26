@@ -2,6 +2,7 @@
 /build/
 /dist/
 /host/target/
+/packaging/target/
 /platform/targets/
 /examples/*/build/
 /examples/*/dist/

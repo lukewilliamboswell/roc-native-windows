@@ -73,13 +73,16 @@ bundle! = |roc| {
 
 check! = |roc| {
 	step!(roc, ["fmt", "--check", "platform", "examples", "scripts", "windows.roc"])?
-	for file in ["scripts/build.roc", "scripts/check_glue.roc"] {
+	for file in ["scripts/build.roc", "scripts/check_glue.roc", "scripts/release.roc"] {
 		step!(roc, ["test", file])?
 	}
 	check_glue!(roc)?
 	step!("cargo", ["fmt", "--manifest-path", "host/Cargo.toml", "--check"])?
 	step!("cargo", ["clippy", "--manifest-path", "host/Cargo.toml", "--locked", "--all-targets", "--", "-D", "warnings"])?
 	step!("cargo", ["test", "--manifest-path", "host/Cargo.toml", "--locked"])?
+	step!("cargo", ["fmt", "--manifest-path", "packaging/Cargo.toml", "--check"])?
+	step!("cargo", ["clippy", "--manifest-path", "packaging/Cargo.toml", "--locked", "--all-targets", "--", "-D", "warnings"])?
+	step!("cargo", ["test", "--manifest-path", "packaging/Cargo.toml", "--locked"])?
 	for target in windows_targets {
 		step!("cargo", ["clippy", "--manifest-path", "host/Cargo.toml", "--locked", "--target", target.rust, "--", "-D", "warnings"])?
 	}

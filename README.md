@@ -21,15 +21,30 @@ The host links against Win32 DLLs already supplied by Windows. Zig provides the 
 
 ## Apps and examples
 
+Release assets include a content-addressed CLI bundle that Roc can run directly from a URL. Use the CLI bundle URL from the release to bootstrap a project.
+
+```sh
+roc run "$WINDOWS_TOOL_URL" -- init my-app
+cd my-app
+roc run windows.roc -- package
+roc run windows.roc -- package --format zip
+```
+
+The scaffold points at that release's platform bundle. MSI packaging downloads the matching packager for the build machine and checks its SHA-256 before running it. Roc is the only toolchain app authors install. GitHub release URLs use HTTPS. The release task also accepts HTTP on loopback for testing.
+
 Use `windows.roc` from an app directory. For example, from this checkout on macOS:
 
 ```sh
+blueprint run packager
+export ROC_WINDOWS_MSI="$PWD/packaging/target/release/roc-windows-msi"
 cd examples/counter
-roc ../../windows.roc -- test
-roc ../../windows.roc -- package --target x64mingw
+roc run ../../windows.roc -- test
+roc run ../../windows.roc -- package --target x64mingw
 ```
 
-This creates `dist/counter-x64mingw.zip` with the Windows executable and its `assets/` directory. Use `--target arm64mingw` for ARM64. On Windows, `run` defaults to the current architecture. Pass `--help` for all commands. Use `init --platform <platform/main.roc or bundle URL> <app-directory>` for a new app. Every example renders a bundled BMP using `Ui.asset_image`.
+This creates `dist/counter-x64mingw.msi`. The MSI installs into Program Files and adds a Start menu shortcut. Set `--id` to your stable reverse-DNS app ID and provide `--app-version` and `--publisher` for release builds. The defaults are for local development. MSI metadata and asset filenames currently use ASCII. Both formats carry the executable, `assets/`, and any top-level `LICENSE` or `THIRD_PARTY_LICENSES.md` included by the app author.
+
+Use `--target arm64mingw` for ARM64. On Windows, `run` defaults to the current architecture. Pass `--help` for all commands. Use `init --platform <platform/main.roc or bundle URL> <app-directory>` for a custom platform. Every example renders a bundled BMP using `Ui.asset_image`.
 
 | Example | Behavior |
 | --- | --- |
@@ -40,6 +55,18 @@ This creates `dist/counter-x64mingw.zip` with the Windows executable and its `as
 | HTTP | Fetch and display a bounded response preview with WinHTTP |
 
 Cancelling a running worker discards its result. A pure Roc computation can still finish in the background, and a Roc crash in a worker exits the process.
+
+## Prepare a release
+
+On Apple Silicon macOS, add the Intel macOS and Linux musl Rust targets alongside the Windows targets in `rust-toolchain.toml`. Build the platform bundle, then pass its generated filename and the proposed release asset base URL to the release task.
+
+```sh
+rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+blueprint run bundle
+blueprint run release -- dist/platform/HASH.tar.zst "$RELEASE_BASE_URL" dist/release
+```
+
+The output includes the platform bundle, standalone `windows.roc`, a second `.tar.zst` for direct `roc run URL` bootstrap, and packagers for x64 and ARM64 on macOS, Windows, and Linux. Upload those assets together at the stamped URL after release verification.
 
 ## Verification
 
