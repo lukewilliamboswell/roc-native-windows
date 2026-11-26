@@ -172,7 +172,8 @@ jobs:
       # compiler setup stalled under x64 emulation before the tasks began.
       - name: Run native Windows scenarios
         if: matrix.suite == 'scenarios'
-        run: roc scripts/build.roc -- test-native --target arm64mingw
+        # Roc expects run on x64 and macOS. The emulated interpreter stalled here.
+        run: roc scripts/build.roc -- test-native --target arm64mingw --skip-expects
       - name: Probe Windows UI Automation
         if: matrix.suite == 'accessibility'
         run: roc scripts/build.roc -- test-accessibility -Target arm64mingw -FreshStarter -BuildProfile size

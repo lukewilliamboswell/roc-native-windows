@@ -44,7 +44,7 @@ asset_manifest = "assets.json"
 
 AssetCatalog : Dict(Str, Str)
 
-TestOptions : { check : Bool, failure_screenshot : Bool, target : Str }
+TestOptions : { check : Bool, failure_screenshot : Bool, skip_expects : Bool, target : Str }
 
 RecordFormat : [Gif, Png]
 
@@ -168,6 +168,7 @@ test_command =
 		{
 			check: Opt.flag({ short: "", long: "check", help: "Check source, expects and spec syntax without launching the app." }),
 			failure_screenshot: Opt.flag({ short: "", long: "screenshot-on-failure", help: "Capture the failed step's window under build/specs/ on Windows." }),
+			skip_expects: Opt.flag({ short: "", long: "skip-expects", help: "Skip Roc expects while still checking source and Win32 specs." }),
 			target: target_option,
 		}.Cli,
 		{ name: "test", description: "Run Roc expects and the app's Win32 behaviour specs.", mapper: |options| Test(options) },
@@ -391,7 +392,9 @@ test! = |options| {
 	}
 	entry = entry!()?
 	roc!(["check", entry], "check")?
-	roc!(["test", entry], "test")?
+	if !options.skip_expects {
+		roc!(["test", entry], "test")?
+	}
 	spec_dir = Path.utf8("tests/specs")
 	if (!Path.is_dir!(spec_dir)?) return Ok({})
 	paths = Path.list!(spec_dir)?.map(Path.display).keep_if(|path| path.ends_with(".scm")).sort_with(compare_name_text)
@@ -2130,10 +2133,11 @@ expect parse_text(["run", "--target=x64mingw"]) == Ok(Run({ target: "x64mingw", 
 expect parse_text(["dev"]) == Ok(Dev(""))
 expect parse_text(["dev", "--target=arm64mingw"]) == Ok(Dev("arm64mingw"))
 expect parse_text(["build", "--profile=dev"]).is_err()
-expect parse_text(["test"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, target: "" }))
-expect parse_text(["test", "--check"]) == Ok(Test({ check: Bool.True, failure_screenshot: Bool.False, target: "" }))
+expect parse_text(["test"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, skip_expects: Bool.False, target: "" }))
+expect parse_text(["test", "--check"]) == Ok(Test({ check: Bool.True, failure_screenshot: Bool.False, skip_expects: Bool.False, target: "" }))
+expect parse_text(["test", "--target", "arm64mingw", "--skip-expects"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, skip_expects: Bool.True, target: "arm64mingw" }))
 expect parse_text(["record", "tests/specs/demo.scm", "--format", "png"]) == Ok(Record("tests/specs/demo.scm", Png, ""))
-expect parse_text(["test", "--target", "arm64mingw", "--screenshot-on-failure"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.True, target: "arm64mingw" }))
+expect parse_text(["test", "--target", "arm64mingw", "--screenshot-on-failure"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.True, skip_expects: Bool.False, target: "arm64mingw" }))
 expect parse_text(["record", "--target", "arm64mingw", "tests/specs/demo.scm"]) == Ok(Record("tests/specs/demo.scm", Gif, "arm64mingw"))
 expect parse_text(["help"]) == Ok(Help)
 expect parse_text([]) == Ok(Help)

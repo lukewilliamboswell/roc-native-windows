@@ -41,14 +41,16 @@ main! = |args| {
 dispatch! = |args, roc| match args {
 	["check"] => check!(roc)
 	["build"] => build!(roc)
-	["test-native"] => test_native!(roc, [])
-	["test-native", "--target", target] if ["x64mingw", "arm64mingw"].contains(target) => test_native!(roc, ["--target", target])
+	["test-native", .. as options] => match options.drop_if(|arg| arg == "--skip-expects") {
+		[] | ["--target", "x64mingw"] | ["--target", "arm64mingw"] => test_native!(roc, options)
+		_ => Err("Usage: scripts/build.roc -- test-native [--target TARGET] [--skip-expects]")
+	}
 	["test-accessibility", .. as options] => test_accessibility!(roc, options)
 	["bundle"] => {
 		hosts!()?
 		bundle!(roc)
 	}
-	_ => Err("Usage: scripts/build.roc -- check | build | bundle | test-native [--target TARGET] | test-accessibility")
+	_ => Err("Usage: scripts/build.roc -- check | build | bundle | test-native [--target TARGET] [--skip-expects] | test-accessibility")
 }
 
 bundle! = |roc| {
