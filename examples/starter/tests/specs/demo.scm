@@ -6,6 +6,6 @@
     (fill (text-field "Title") "Roc guide")
     (click (button "Add"))
     (wait 700)
-    (toggle (checkbox "Roc guide"))
+    (click (button "Mark read"))
     (screenshot "finished")
     (wait 900)))

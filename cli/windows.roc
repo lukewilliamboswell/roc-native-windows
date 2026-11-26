@@ -620,8 +620,22 @@ spec_step = |expr| {
 	fields = match (op, args) {
 		("click", [locator]) | ("toggle", [locator]) | ("press-enter", [locator]) | ("expect-visible", [locator]) | ("expect-absent", [locator]) =>
 			spec_locator(locator)
-		("fill", [locator, Quoted(value, _)]) | ("expect-text", [locator, Quoted(value, _)]) | ("select", [locator, Quoted(value, _)]) | ("expect-selection", [locator, Quoted(value, _)]) =>
+		("fill", [locator, Quoted(value, _)])
+		| ("expect-text", [locator, Quoted(value, _)])
+		| ("select", [locator, Quoted(value, _)])
+		| ("expect-selection", [locator, Quoted(value, _)])
+		|
+			("select-row", [locator, Quoted(value, _)])
+		| ("activate-row", [locator, Quoted(value, _)])
+		|
+			("press-column", [locator, Quoted(value, _)])
+		| ("expect-row-selected", [locator, Quoted(value, _)]) =>
 			spec_locator(locator).map_ok(|parts| parts.append(value))
+		("expect-list-rows", [locator, .. as keys]) => {
+			parts = spec_locator(locator)?
+			rows = spec_texts(keys, "Expected nonempty row keys in quotes")?
+			Ok(parts.concat(rows))
+		}
 		("expect-checked", [locator, value]) | ("expect-disabled", [locator, value]) => {
 			parts = spec_locator(locator)?
 			word = match value {
@@ -700,7 +714,7 @@ spec_locator = |expr| {
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?

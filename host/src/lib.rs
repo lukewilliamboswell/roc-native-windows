@@ -11,6 +11,8 @@ mod choice;
 mod clipboard;
 #[cfg(windows)]
 mod effects;
+#[cfg(any(test, windows))]
+mod list_view;
 #[cfg(windows)]
 #[allow(clippy::all)]
 mod roc_platform_abi;

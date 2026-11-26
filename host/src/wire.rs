@@ -754,6 +754,58 @@ mod tests {
     }
 
     #[test]
+    fn report_reads_cells_in_column_order_and_validates_schema() {
+        fn element(bytes: &mut Vec<u8>, id: u32, parent: u32, tag: &str, key: &str) {
+            bytes.push(8);
+            ints(bytes, &[id, parent, 0]);
+            name(bytes, tag);
+            bytes.push(1);
+            bytes.push(9);
+            ints(bytes, &[id]);
+            name(bytes, "list-key");
+            bytes.push(1);
+            put_str(bytes, key);
+        }
+
+        fn caption(bytes: &mut Vec<u8>, id: u32, parent: u32, text: &str) {
+            bytes.push(10);
+            ints(bytes, &[id, parent, 0]);
+            put_str(bytes, text);
+        }
+
+        let mut tree = Tree::new();
+        let mut bytes = Vec::new();
+        element(&mut bytes, 1, 0, "ui-list-view", "");
+        element(&mut bytes, 2, 1, "ui-list-column", "title");
+        caption(&mut bytes, 3, 2, "Title");
+        element(&mut bytes, 4, 1, "ui-list-column", "status");
+        element(&mut bytes, 5, 1, "ui-list-row", "a");
+        element(&mut bytes, 6, 5, "ui-list-cell", "status");
+        caption(&mut bytes, 7, 6, "Unread");
+        apply(&mut tree, &bytes);
+        let root = tree.get(1).unwrap();
+        let read = crate::list_view::Report::read;
+        assert!(read(&tree, root).unwrap_err().contains("missing column"));
+
+        bytes.clear();
+        element(&mut bytes, 8, 5, "ui-list-cell", "title");
+        caption(&mut bytes, 9, 8, "Café");
+        apply(&mut tree, &bytes);
+        let report = read(&tree, root).unwrap();
+        assert_eq!(report.rows[0].cells, ["Café", "Unread"]);
+        assert_eq!(report.columns[0].heading, "Title");
+
+        bytes.clear();
+        element(&mut bytes, 10, 1, "ui-list-row", "a");
+        apply(&mut tree, &bytes);
+        assert!(
+            read(&tree, root)
+                .unwrap_err()
+                .contains("duplicate report row")
+        );
+    }
+
+    #[test]
     fn malformed_wire_data_is_an_error() {
         let mut reader = Reader::new(&[255, 255, 255, 255, 0]);
         assert_eq!(reader.str().unwrap_err(), "truncated wire data");

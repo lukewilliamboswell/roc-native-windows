@@ -14,8 +14,8 @@ label. This scenario adds and checks one item in the Starter app.
   (steps
     (fill (text-field "Title") "Roc guide")
     (click (button "Add"))
-    (toggle (checkbox "Roc guide"))
-    (expect-checked (checkbox "Roc guide") true)
+    (expect-row-selected (list-view "Titles") "Roc guide")
+    (click (button "Mark read"))
     (expect-visible (text "0 unread"))))
 ----
 
@@ -27,7 +27,7 @@ the runner protocol in the platform bundle. On Windows on Arm, an x64 Roc
 process can test an ARM64 build with `test --target arm64mingw`.
 
 Selectors look up `button`, `checkbox`, `text-field`, `text-area`, `text`,
-`file-button`, `folder-button`, `image`, `combo-box`, `list-box`, and `radio-group`.
+`file-button`, `folder-button`, `image`, `combo-box`, `list-box`, `radio-group`, and `list-view`.
 Use `(within OUTER INNER)` to narrow a
 selector to a row or container. An action needs a unique match. Use
 `expect-text`, `expect-visible`, `expect-absent`, `expect-disabled` and
@@ -41,6 +41,12 @@ Use `(select (combo-box "Status filter") "unread")` to propose a choice and
 `(expect-selection (combo-box "Status filter") "unread")` to assert the current
 selection. Both forms use the choice key. An empty string represents
 no selection for a drop-down or list box.
+
+For a report list, pass the locator and stable key to `select-row`,
+`activate-row`, `press-column` or `expect-row-selected`. Pass an empty
+string to `select-row` or `expect-row-selected` to clear or verify an empty
+selection. Use `expect-list-rows` with the row keys in display order,
+or with just the locator for an empty report.
 
 == Simulate and run effects
 

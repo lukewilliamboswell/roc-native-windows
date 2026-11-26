@@ -1,5 +1,6 @@
 use crate::Result;
 use crate::choice::Choices;
+use crate::list_view::{ListView, Report};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
 use std::cell::RefCell;
@@ -16,7 +17,7 @@ use windows_sys::Win32::System::SystemServices::{
 };
 use windows_sys::Win32::UI::Controls::{
     BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL,
-    SetScrollInfo,
+    LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL, SetScrollInfo,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -40,6 +41,7 @@ pub(crate) enum Control {
     ComboBox,
     ListBox,
     RadioGroup,
+    ListView,
 }
 
 impl Control {
@@ -58,6 +60,7 @@ impl Control {
             "ui-combo-box" => Self::ComboBox,
             "ui-list-box" => Self::ListBox,
             "ui-radio-group" => Self::RadioGroup,
+            "ui-list-view" => Self::ListView,
             _ => return Err(format!("unsupported native control {tag}")),
         };
         Ok(Some(control))
@@ -107,6 +110,11 @@ impl Control {
                 WS_TABSTOP | WS_VSCROLL | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32,
             ),
             Self::RadioGroup => (WS_EX_CONTROLPARENT, w!("BUTTON"), BS_GROUPBOX as u32),
+            Self::ListView => (
+                WS_EX_CLIENTEDGE,
+                w!("SysListView32"),
+                WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            ),
         }
     }
 }
@@ -121,6 +129,7 @@ struct View {
     rendered_image: Option<(String, i32, i32)>,
     choices: Choices,
     combo_position: Option<(HWND, i32, i32, i32, i32)>,
+    list_view: Option<ListView>,
 }
 
 #[derive(Default)]
@@ -154,6 +163,12 @@ impl View {
                 return Err("could not track input method composition".into());
             }
         }
+        let list_view = if kind == Control::ListView {
+            ListView::initialize(handle);
+            Some(ListView::default())
+        } else {
+            None
+        };
         Ok(Self {
             handle,
             label: null_mut(),
@@ -167,6 +182,7 @@ impl View {
             rendered_image: None,
             choices: Choices::default(),
             combo_position: None,
+            list_view,
         })
     }
 
@@ -195,7 +211,11 @@ impl View {
                 set_text(self.handle, &desired.caption);
             }
         }
-        if (self.kind.is_edit() || matches!(self.kind, Control::ListBox | Control::ComboBox))
+        if (self.kind.is_edit()
+            || matches!(
+                self.kind,
+                Control::ListBox | Control::ComboBox | Control::ListView
+            ))
             && self.props.label != desired.label
         {
             if self.label.is_null() && !desired.label.is_empty() {
@@ -498,7 +518,7 @@ impl Surface {
         if matches!(view.kind, Control::ListBox | Control::ComboBox) {
             return Some(view.props.label.clone());
         }
-        if kind == "image" {
+        if kind == "image" || kind == "list-view" {
             return Some(view.props.label.clone());
         }
         Some(window_text(view.handle))
@@ -549,6 +569,11 @@ impl Surface {
             unsafe { SendMessageW(view.handle, BM_SETCHECK, usize::from(!checked), 0) };
         }
         Ok(view.handle)
+    }
+
+    pub(crate) fn report(&self, key: Key) -> Option<(HWND, &ListView)> {
+        let view = self.views.get(&key)?;
+        Some((view.handle, view.list_view.as_ref()?))
     }
 
     pub(crate) fn restore_controlled_value(&self, key: Key) {
@@ -618,8 +643,11 @@ impl Surface {
         // SAFETY: WM_DPICHANGED names our live root HWND.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let font = make_font(dpi)?;
-        for view in self.views.values() {
+        for view in self.views.values_mut() {
             view.font(font);
+            if let Some(report) = &mut view.list_view {
+                report.measure(view.handle, font, dpi)?;
+            }
         }
         // SAFETY: All windows have selected the new font.
         unsafe { DeleteObject(self.font) };
@@ -671,7 +699,8 @@ impl Surface {
                     Control::Image => node.attr("label").unwrap_or("").into(),
                     _ => tree.caption(key),
                 };
-                self.views.get_mut(&key).unwrap().update(
+                let view = self.views.get_mut(&key).unwrap();
+                view.update(
                     self.window,
                     self.font,
                     Props {
@@ -697,6 +726,16 @@ impl Surface {
                     let view = self.views.get_mut(&key).unwrap();
                     view.choices.sync(view.handle, self.font, kind, tree, key)?;
                     return Ok(());
+                }
+                let view = self.views.get_mut(&key).unwrap();
+                if let Some(report) = &mut view.list_view {
+                    return report.sync(
+                        view.handle,
+                        self.font,
+                        self.dpi,
+                        Report::read(tree, key)?,
+                        node.attr("selected"),
+                    );
                 }
             }
             for &child in &node.children {
@@ -954,7 +993,7 @@ struct Placement {
     height: i32,
 }
 
-fn scale(dpi: u32, value: i32) -> i32 {
+pub(crate) fn scale(dpi: u32, value: i32) -> i32 {
     ((i64::from(value) * i64::from(dpi) + 48) / 96) as i32
 }
 
@@ -1008,6 +1047,18 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             max_width,
             line_height(dc) * number(node, "rows", 5).clamp(1, 100)
                 + dip(if view.props.label.is_empty() { 8 } else { 29 }),
+        ),
+        Control::ListView => (
+            max_width,
+            view.list_view.as_ref().unwrap().height(
+                view.handle,
+                number(node, "visible-rows", 8),
+                dpi,
+            ) + if view.props.label.is_empty() {
+                0
+            } else {
+                dip(21)
+            },
         ),
         Control::Image => (
             dip(number(node, "width", 128)).max(1),
@@ -1167,7 +1218,7 @@ fn window_text(hwnd: HWND) -> String {
     }
 }
 
-fn text_width(dc: HDC, text: &str) -> i32 {
+pub(crate) fn text_width(dc: HDC, text: &str) -> i32 {
     let text = wide(text);
     let mut size = SIZE::default();
     // SAFETY: Text length excludes only the terminator, and size is writable.

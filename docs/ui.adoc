@@ -22,6 +22,7 @@ for state, stores, and worker tasks.
 | `Ui.list_box` | Single-selection list | `label`, `choices`, `selected`, `on_select`, optional `enabled` and `visible_rows` (default 6)
 | `Ui.radio_group` | Labeled radio buttons | `label`, static `choices`, `selected` key, `on_select`, optional `enabled`
 | `Ui.file_button` | System file picker | Title, `on_files` handler, and optional `selection` (`SingleFile` or `MultipleFiles`)
+| `Ui.list_view` | Single-selection report | Label, columns, rows, selected key and handlers
 | `Ui.asset_image` | Bitmap image | Asset path, accessible `label`, `width` and `height`
 |===
 
@@ -53,6 +54,31 @@ UTF-16 filename and report a partial listing when the scan or result
 limit is reached or an entry is skipped. Enumeration skips subdirectories
 and reports reparse points as skipped entries. The returned files support
 reading, hashing, and saving a copy. The host keeps their paths private.
+
+[#list-view]
+== Report lists
+
+Use `Ui.list_view(props, rows)` to display records with native headers and
+single-row selection. Define `columns` with unique nonempty `key` values
+and a `heading` for each. The default width, `Auto`, measures the heading
+and mounted cells and clamps the result to 48–360 device-independent pixels.
+Use `Fixed(width)` for a positive width in device-independent pixels.
+The list scrolls independently. Set `visible_rows` to budget space for
+1–64 rows. The default is eight.
+
+Build rows with `Ui.list_row({ key }, cells)` and
+`Ui.list_cell(value, { column })`. Give each row a stable, unique, nonempty
+key and one cell per column. The column key determines where the cell appears.
+For dynamic rows, pass the element produced by `Engine.each` or
+`Engine.table_view` in the list's child array.
+
+Supply a `selected` signal of type `Ui.Selection` and write its new value
+from `on_select`. The selection is `NoSelection` or `Selected(key)`.
+When the key is outside the mounted rows, the highlight clears.
+Use `on_activate: Handle(handler)` to respond to Enter or a double-click
+on a row, even if it is already selected. Use
+`on_column_press: Handle(handler)` to receive a column key and update the
+row order in Roc.
 
 For a complete example, see the Starter app and its specs described in
 xref:apps.adoc#examples[Choose an example].

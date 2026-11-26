@@ -220,6 +220,57 @@ Ui := [].{
 	folder_button : Signal(ctx, Str), FolderButtonProps(ctx) -> Elem(ctx)
 	folder_button = Files.folder_button
 
+	## A report column. Fixed widths are in device-independent pixels.
+	Column := { key : Str, heading : Str, width : [Auto, Fixed(U32)] ?? Auto }
+
+	## A single-select report with optional row activation and header actions.
+	ListViewProps(ctx) := {
+		label : Str,
+		columns : List(Column),
+		selected : Signal(ctx, Selection),
+		on_select : HandlerOf(ctx, Selection),
+		on_activate : [Ignore, Handle(HandlerOf(ctx, Str))] ?? Ignore,
+		on_column_press : [Ignore, Handle(HandlerOf(ctx, Str))] ?? Ignore,
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+		visible_rows : U32 ?? 8,
+	}
+
+	## Display rows in their engine order. Row and column keys are unique and nonempty.
+	list_view : ListViewProps(ctx), List(Elem(ctx)) -> Elem(ctx)
+	list_view = |props, rows| {
+		activate = match props.on_activate {
+			Ignore => []
+			Handle(handler) => [Engine.on("activate", handler)]
+		}
+		press = match props.on_column_press {
+			Ignore => []
+			Handle(handler) => [Engine.on("column-press", handler)]
+		}
+		Engine.element(
+			"ui-list-view",
+			[
+				Engine.attr("label", props.label),
+				Engine.attr_s("selected", props.selected.map(selection_key)),
+				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.attr("visible-rows", props.visible_rows.to_str()),
+				Engine.on("change", props.on_select.from_payload_by(Engine.const({}), |_, key| selection_from_key(key))),
+			].concat(activate).concat(press),
+			props.columns.map(list_column).concat(rows),
+		)
+	}
+
+	ListRowProps(ctx) := { key : Signal(ctx, Str) }
+
+	## A report row whose key remains stable when its cells change.
+	list_row : ListRowProps(ctx), List(Elem(ctx)) -> Elem(ctx)
+	list_row = |props, cells| Engine.element("ui-list-row", [Engine.attr_s("list-key", props.key)], cells)
+
+	ListCellProps := { column : Str }
+
+	## A report cell. Its column names its position regardless of declaration order.
+	list_cell : Signal(ctx, Str), ListCellProps -> Elem(ctx)
+	list_cell = |value, props| Engine.element("ui-list-cell", [Engine.attr("list-key", props.column)], [Engine.text_s(value)])
+
 	## An image's accessible label and dimensions in device-independent pixels.
 	AssetImageProps := { label : Str, width : U32, height : U32 }
 
@@ -290,3 +341,12 @@ choice_control = |tag, label, choices, selected, on_select, enabled, rows|
 			),
 		],
 	)
+
+list_column : Ui.Column -> Elem(ctx)
+list_column = |column| {
+	width = match column.width {
+		Auto => "auto"
+		Fixed(dip) => dip.to_str()
+	}
+	Engine.element("ui-list-column", [Engine.attr("list-key", column.key), Engine.attr("list-width", width)], [Engine.text_s(Engine.const(column.heading))])
+}

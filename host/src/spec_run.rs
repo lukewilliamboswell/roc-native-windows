@@ -377,6 +377,14 @@ impl App {
                 | "expect-selection",
                 _,
             ) => self.control_step(step),
+            (
+                "select-row"
+                | "activate-row"
+                | "press-column"
+                | "expect-row-selected"
+                | "expect-list-rows",
+                _,
+            ) => self.control_step(step),
             _ => Err("unknown step or invalid arguments".into()),
         }
     }
@@ -489,7 +497,47 @@ impl App {
                 };
                 self.command(handle, notification as u16)
             }
+            (
+                "select-row"
+                | "activate-row"
+                | "press-column"
+                | "expect-row-selected"
+                | "expect-list-rows",
+                _,
+            ) => self.report_step(key, step.command, args),
             _ => Err("invalid control arguments".into()),
+        }
+    }
+
+    fn report_step(&mut self, key: Key, command: &str, args: &[&str]) -> Result<()> {
+        let (hwnd, report) = self
+            .surface
+            .report(key)
+            .ok_or("step requires a list view")?;
+        match (command, args) {
+            ("expect-row-selected", [expected]) => {
+                return expect(report.selection(hwnd).unwrap_or(""), *expected);
+            }
+            ("expect-list-rows", rows) => return expect(report.row_keys(hwnd)?.as_slice(), rows),
+            _ => {}
+        }
+        if self.surface.spec_disabled(key)? {
+            return Err("control is disabled".into());
+        }
+        match (command, args) {
+            ("select-row", [row]) => {
+                report.select(hwnd, (!row.is_empty()).then_some(*row))?;
+                self.report_selected(key)
+            }
+            ("activate-row", [row]) if report.has_row(row) => {
+                self.report_event(key, "activate", (*row).into())
+            }
+            ("press-column", [column]) if report.has_column(column) => {
+                self.report_event(key, "column-press", (*column).into())
+            }
+            ("activate-row", [row]) => Err(format!("unknown report row {row:?}")),
+            ("press-column", [column]) => Err(format!("unknown report column {column:?}")),
+            _ => Err("invalid report arguments".into()),
         }
     }
 

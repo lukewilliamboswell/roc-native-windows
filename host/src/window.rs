@@ -1,10 +1,10 @@
 use crate::abi::Engine;
 use crate::effects::{Effects, SpecOptions};
 use crate::view::{Surface, wide};
-use crate::wire::{Declarations, EFFECT_NODE, Reader, Tree};
+use crate::wire::{Declarations, EFFECT_NODE, Key, Reader, Tree};
 use crate::{Event, Result};
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -23,7 +23,9 @@ use windows_sys::Win32::System::Time::{
     GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
 };
 use windows_sys::Win32::UI::Controls::{
-    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+    ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+    LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, NMHDR,
+    NMITEMACTIVATE, NMLISTVIEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, VK_CONTROL, VK_MENU, VK_RETURN, VK_SHIFT,
@@ -36,6 +38,7 @@ use windows_sys::core::w;
 mod spec_run;
 
 const PUMP: usize = 1;
+const REPORT_EVENTS: u32 = WM_APP + 1;
 
 thread_local! {
     // User32 is allowed to send synchronous child notifications during a
@@ -52,6 +55,8 @@ struct App {
     incoming: Receiver<Event>,
     private: VecDeque<Event>,
     opportunity: Option<u64>,
+    report_selection: BTreeSet<Key>,
+    report_actions: VecDeque<(Key, &'static str, String)>,
     driven: bool,
 }
 
@@ -68,6 +73,8 @@ impl App {
             incoming,
             private: VecDeque::new(),
             opportunity: None,
+            report_selection: BTreeSet::new(),
+            report_actions: VecDeque::new(),
             driven: options.is_some(),
         };
         if let Some(options) = options {
@@ -268,6 +275,102 @@ impl App {
         Ok(true)
     }
 
+    /// Win32 sends native notifications synchronously. Read report selection
+    /// after the input message finishes, when the selected-state pair settles.
+    unsafe fn report_notify(&mut self, window: HWND, address: LPARAM) -> Result<()> {
+        // SAFETY: A nonzero WM_NOTIFY lParam points to its originating NMHDR.
+        let header = unsafe { &*(address as *const NMHDR) };
+        let Some(key) = self.surface.key(header.hwndFrom) else {
+            return Ok(());
+        };
+        let Some((_, report)) = self.surface.report(key) else {
+            return Ok(());
+        };
+        if !matches!(
+            header.code,
+            LVN_ITEMCHANGED | LVN_ITEMACTIVATE | LVN_COLUMNCLICK
+        ) {
+            return Ok(());
+        }
+        let was_idle = self.report_selection.is_empty() && self.report_actions.is_empty();
+        match header.code {
+            LVN_ITEMCHANGED => {
+                // SAFETY: This ListView notification provides NMLISTVIEW.
+                let details = unsafe { &*(address as *const NMLISTVIEW) };
+                if details.uChanged & LVIF_STATE != 0
+                    && (details.uNewState ^ details.uOldState) & LVIS_SELECTED != 0
+                {
+                    self.report_selection.insert(key);
+                }
+            }
+            LVN_ITEMACTIVATE => {
+                // SAFETY: This ListView notification provides NMITEMACTIVATE.
+                let details = unsafe { &*(address as *const NMITEMACTIVATE) };
+                if let Some(row) = report.row_at(details.iItem) {
+                    self.report_actions.push_back((key, "activate", row.into()));
+                }
+            }
+            LVN_COLUMNCLICK => {
+                // SAFETY: This ListView notification provides NMLISTVIEW.
+                let details = unsafe { &*(address as *const NMLISTVIEW) };
+                if let Some(column) = report.column_at(details.iSubItem) {
+                    self.report_actions
+                        .push_back((key, "column-press", column.into()));
+                }
+            }
+            _ => {}
+        }
+        if was_idle && !(self.report_selection.is_empty() && self.report_actions.is_empty()) {
+            // SAFETY: The registered root HWND lives on this thread.
+            if unsafe { PostMessageW(window, REPORT_EVENTS, 0, 0) } == 0 {
+                return Err(last_error("queue report input"));
+            }
+        }
+        Ok(())
+    }
+
+    fn drain_reports(&mut self) -> Result<()> {
+        for key in std::mem::take(&mut self.report_selection) {
+            self.report_selected(key)?;
+        }
+        while let Some((key, event, value)) = self.report_actions.pop_front() {
+            self.report_event(key, event, value)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn report_selected(&mut self, key: Key) -> Result<()> {
+        let Some((hwnd, report)) = self.surface.report(key) else {
+            return Ok(());
+        };
+        if report.selection_changed(hwnd) {
+            let value = report.selection(hwnd).unwrap_or("").to_owned();
+            self.report_event(key, "change", value)?;
+            if let Some((hwnd, report)) = self.surface.report(key) {
+                report.restore(hwnd)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn report_event(&mut self, key: Key, name: &str, value: String) -> Result<()> {
+        if self.surface.report(key).is_none() {
+            return Ok(());
+        }
+        if let Some((node, listener)) = self.tree.event(key, name) {
+            if listener.kind != 1 {
+                return Err(format!("report event {name} requires a text listener"));
+            }
+            self.deliver(Event::Turn {
+                node,
+                handler: listener.handler,
+                payload: value.into_bytes(),
+            })?;
+            self.drain_private()?;
+        }
+        Ok(())
+    }
+
     fn dropped(&mut self, paths: Vec<PathBuf>) -> Result<()> {
         if let Some((node, listener)) = self.tree.event(crate::wire::ROOT, "drop") {
             self.effects.deliver_paths(node, listener.handler, paths)?;
@@ -276,7 +379,7 @@ impl App {
     }
 }
 
-pub(crate) const APPLY_PENDING_EDIT: u32 = WM_APP + 1;
+pub(crate) const APPLY_PENDING_EDIT: u32 = WM_APP + 3;
 
 fn read_reference(op: u8, reader: &mut Reader<'_>) -> Result<()> {
     match op {
@@ -416,7 +519,7 @@ fn run() -> Result<()> {
         let instance = GetModuleHandleW(null());
         let controls = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES,
         };
         if InitCommonControlsEx(&controls) == 0 {
             return Err(last_error("initialize Windows common controls"));
@@ -544,8 +647,8 @@ unsafe extern "system" fn window_proc(
     // WPARAM/LPARAM payloads. Nested callbacks skip app state if busy.
     unsafe {
         match message {
-            WM_COMMAND | WM_SIZE | WM_TIMER | WM_DPICHANGED | WM_VSCROLL | WM_MOUSEWHEEL
-            | WM_DROPFILES | APPLY_PENDING_EDIT => {
+            WM_COMMAND | WM_NOTIFY | REPORT_EVENTS | WM_SIZE | WM_TIMER | WM_DPICHANGED
+            | WM_VSCROLL | WM_MOUSEWHEEL | WM_DROPFILES | APPLY_PENDING_EDIT => {
                 let paths = (message == WM_DROPFILES).then(|| paths_from_drop(wparam as HDROP));
                 let handled = APP.with(|state| {
                     let Ok(mut state) = state.try_borrow_mut() else {
@@ -559,6 +662,10 @@ unsafe extern "system" fn window_proc(
                             app.command(lparam as HWND, (wparam >> 16) as u16)?
                         }
                         APPLY_PENDING_EDIT => app.surface.settle_edit(lparam as HWND),
+                        WM_NOTIFY if lparam != 0 && !app.driven => {
+                            app.report_notify(hwnd, lparam)?
+                        }
+                        REPORT_EVENTS => app.drain_reports()?,
                         WM_SIZE => app.surface.arrange(&app.tree)?,
                         WM_DPICHANGED => {
                             let rect = &*(lparam as *const RECT);
