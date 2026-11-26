@@ -71,6 +71,15 @@ runs the declared cases once.
 See xref:spec-runner.adoc#write-a-spec[Write behaviour specs] for native
 control actions, effect simulation, and recording.
 
+[#copy-text]
+== Copy text from an app action
+
+Import `pf.Clipboard` and issue `Clipboard.text(value)` through
+`Engine.on_post` after a user action. Its result reports success,
+`NotAllowed`, `Unavailable`, or `Refused`. An outbox preserves each
+action even when two consecutive copies have the same text. Native edit
+controls also support their usual Windows clipboard shortcuts.
+
 [#ship-a-windows-app]
 == Package an app for distribution
 

@@ -5,6 +5,8 @@
 mod abi;
 #[cfg(any(test, windows))]
 mod capture;
+#[cfg(any(test, windows))]
+mod clipboard;
 #[cfg(windows)]
 mod effects;
 #[cfg(windows)]

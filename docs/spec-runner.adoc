@@ -63,6 +63,11 @@ real-time bound. Use `(setup (live-effects http))` to exercise the real
 HTTP adapter or `(setup (live-effects time))` for real timers. Use a
 loopback HTTP fixture for an integration test that can run independently.
 
+Clipboard requests in a scenario use a private test clipboard.
+`(expect-clipboard N "value")` checks the successful write count and last
+text. `(clipboard-busy)` makes the next plain-text copy return
+`Unavailable`.
+
 == Capture a screenshot or record a demo
 
 Use a Windows desktop session for capture. A

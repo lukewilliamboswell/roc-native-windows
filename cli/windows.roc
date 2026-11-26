@@ -632,7 +632,9 @@ spec_step = |expr| {
 			Ok(parts.append(word))
 		}
 		("files", _) => spec_texts(args, "Expected a fixture path in quotes")
-		("await-work", []) => Ok([])
+		("await-work", []) | ("clipboard-busy", []) => Ok([])
+		("expect-clipboard", [count, Quoted(value, _)]) =>
+			spec_number(count, "clipboard writes", 0, 4294967295).map_ok(|number| [number, value])
 		("screenshot", [Quoted(name, pos)]) =>
 			if (valid_asset_name(name)) Ok([name]) else Err(spec_error(pos, "Expected a Windows-safe screenshot name"))
 		("wait", [value]) => spec_number(value, "wait in milliseconds", 0, 30000).map_ok(|number| [number])

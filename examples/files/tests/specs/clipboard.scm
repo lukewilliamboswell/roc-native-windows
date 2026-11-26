@@ -1,0 +1,16 @@
+(test "copy the digest twice and report a busy clipboard"
+  (steps
+    (expect-disabled (button "Copy SHA-256") true)
+    (files "tests/fixtures/hello.txt")
+    (await-work)
+    (click (button "Copy SHA-256"))
+    (expect-visible (text "SHA-256 copied."))
+    (expect-clipboard 1 "64fa48697ba62a5afa31a7000d648de9a0dd395484cb88bfff1fa3628ab6bc83")
+    (click (button "Copy SHA-256"))
+    (expect-clipboard 2 "64fa48697ba62a5afa31a7000d648de9a0dd395484cb88bfff1fa3628ab6bc83")
+    (clipboard-busy)
+    (click (button "Copy SHA-256"))
+    (expect-visible (text "Could not copy SHA-256."))
+    (expect-clipboard 2 "64fa48697ba62a5afa31a7000d648de9a0dd395484cb88bfff1fa3628ab6bc83")
+    (click (button "Clear"))
+    (expect-disabled (button "Copy SHA-256") true)))

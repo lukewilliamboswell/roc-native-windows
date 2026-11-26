@@ -299,6 +299,14 @@ impl App {
     fn spec_step(&mut self, step: &Step<'_>) -> Result<()> {
         match (step.command, step.args.as_slice()) {
             ("files", _) => self.spec_files(&step.args),
+            ("clipboard-busy", []) => {
+                self.effects.clipboard_busy = true;
+                Ok(())
+            }
+            ("expect-clipboard", [count, text]) => {
+                expect(self.effects.clipboard_writes, number(count)?)?;
+                expect(self.effects.clipboard_text.as_str(), *text)
+            }
             ("stub-http", [url, status, body, count, headers @ ..]) => {
                 let count: usize = number(count)?;
                 if count.checked_mul(2) != Some(headers.len()) {

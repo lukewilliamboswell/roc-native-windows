@@ -12,6 +12,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::HWND;
 
+use crate::clipboard::{self, Format};
 use crate::spec_effects::{self, Simulated};
 use crate::spec_plan::valid_file_name;
 use crate::wire::Reader;
@@ -84,6 +85,9 @@ pub(crate) struct Effects {
     queued: VecDeque<Queued>,
     spec: Option<SpecOptions>,
     pub(crate) simulated: Simulated,
+    pub(crate) clipboard_writes: usize,
+    pub(crate) clipboard_text: String,
+    pub(crate) clipboard_busy: bool,
 }
 
 impl Effects {
@@ -111,6 +115,9 @@ impl Effects {
             queued: VecDeque::new(),
             spec: None,
             simulated: Simulated::default(),
+            clipboard_writes: 0,
+            clipboard_text: String::new(),
+            clipboard_busy: false,
         }
     }
 
@@ -437,6 +444,24 @@ impl Effects {
                 }
             }
             5..=7 | 20 | 22 => {}
+            19 => {
+                let (text, format) = clipboard::request(reader)?;
+                let copied = if format == Format::Rich || text.contains('\0') {
+                    false
+                } else if self.spec.is_some() {
+                    if std::mem::take(&mut self.clipboard_busy) {
+                        false
+                    } else {
+                        self.clipboard_writes += 1;
+                        self.clipboard_text.clear();
+                        self.clipboard_text.push_str(text);
+                        true
+                    }
+                } else {
+                    clipboard::write(self.window, text).is_some()
+                };
+                self.answer(id, if copied { vec![23] } else { vec![24, 2] });
+            }
             8 => {
                 let order = workers::Order::read(reader)?;
                 self.spawn(
