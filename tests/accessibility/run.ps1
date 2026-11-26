@@ -56,7 +56,7 @@ function Invoke-ExampleProbe($name, $directory, $tool, $label) {
             $probe = Start-Process -FilePath "powershell.exe" -ArgumentList @(
                 "-NoProfile", "-Mta", "-File", ('"' + $PSCommandPath + '"'),
                 "-AppPid", $app.Id, "-Check", $name
-            ) -NoNewWindow -PassThru
+            ) -WorkingDirectory $directory -NoNewWindow -PassThru
             [void] $probe.Handle
             if (-not $probe.WaitForExit(45000)) { throw "$label UI Automation client exceeded 45 seconds." }
             if ($probe.ExitCode -ne 0) { throw "$label UI Automation client exited with code $($probe.ExitCode)." }

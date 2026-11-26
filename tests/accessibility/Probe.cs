@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -28,7 +29,7 @@ public static class RocWindowsAccessibility
         {
             case "counter": Counter(window); break;
             case "starter": Starter(window); break;
-            case "todos": Todos(window, process.Id); break;
+            case "todos": Todos(window); break;
             case "files": Files(window); break;
             case "http": Http(window); break;
             case "progress": Progress(window); break;
@@ -90,11 +91,14 @@ public static class RocWindowsAccessibility
             ". Status: " + Describe(root, ControlType.StatusBar);
         var unmark = Find(root, "Mark unread", commands, describe);
         Require(unmark.Current.IsEnabled, "Mark unread is disabled for the selected title.");
+        Require(selection.Current.IsSelected, "Marking the title lost the report selection.");
         Invoke(unmark);
-        Find(root, "Mark read", commands, describe);
+        mark = Find(root, "Mark read", commands, describe);
+        Require(mark.Current.IsEnabled, "Mark read did not remain enabled after unmarking the title.");
+        Require(selection.Current.IsSelected, "Unmarking the title lost the report selection.");
     }
 
-    private static void Todos(AutomationElement root, int pid)
+    private static void Todos(AutomationElement root)
     {
         var date = Find(root, "New due date", ControlType.Edit);
         var time = Find(root, "New due time", ControlType.Edit);
@@ -106,26 +110,71 @@ public static class RocWindowsAccessibility
             Require(field.Current.HelpText.Contains("Example"),
                     field.Current.Name + " has no format hint.");
         }
+        var dateHint = date.Current.HelpText;
+        var timeHint = time.Current.HelpText;
+        CheckCivilValidation(date, "1900-02-29", "Enter a valid date.", dateHint);
+        SetValue(date, "2000-02-29");
+        PostKey(date, 0x0d);
+        WaitFor("valid date enables the time field", () => time.Current.IsEnabled ? time : null);
+        CheckCivilValidation(time, "24:01", "Enter a valid time.", timeHint);
+        SetValue(time, "23:15");
+        PostKey(time, 0x0d);
+        WaitFor("valid time is committed", () => time.Current.HelpText == timeHint && Value(time) != ""
+            ? time : null);
         date.SetFocus();
-        SetValue(date, "invalid");
-        PostKey(date, 0x0d); // Enter validates the draft in the app's message loop.
-        WaitFor("date validation is exposed on the edit", () =>
-            date.Current.HelpText.Contains("Enter a valid date") ? date : null);
-        PostKey(date, 0x1b); // Escape restores the committed value and hint.
-        WaitFor("date validation clears on Escape", () =>
-            !date.Current.HelpText.Contains("Enter a valid date") ? date : null);
-        SetValue(Find(root, "New to-do", ControlType.Edit), "Accessibility task");
-        Invoke(Find(root, "Add", ControlType.Button));
+        SetValue(date, "");
+        PostKey(date, 0x0d);
+        WaitFor("clearing the date clears the time and restores both hints", () =>
+            date.Current.HelpText == dateHint && time.Current.HelpText == timeHint &&
+            Value(date) == "" && Value(time) == "" && !time.Current.IsEnabled ? date : null);
+        var chooser = Find(root, "Choose date", ControlType.Button);
+        chooser.SetFocus();
+        WaitFor("date chooser takes focus", () => chooser.Current.HasKeyboardFocus ? chooser : null);
+        PostKey(chooser, 0x0d);
+        var calendar = WaitFor("owned date chooser", () => ActivePopup(root, "Choose date for New due date"));
+        Find(calendar, "Cancel", ControlType.Button);
+        PostKey(calendar, 0x1b);
+        WaitFor("Escape closes the date chooser", () => ActivePopup(root) == null ? root : null);
+        WaitFor("focus returns from the date chooser", () =>
+            chooser.Current.HasKeyboardFocus ? chooser : null);
+
+        var draft = Find(root, "New to-do", ControlType.Edit);
+        var add = Find(root, "Add", ControlType.Button);
+        foreach (var name in new[] { "Accessibility task", "Second task" })
+        {
+            SetValue(draft, name);
+            WaitFor("Add enables for " + name, () => add.Current.IsEnabled ? add : null);
+            Invoke(add);
+            Find(root, name, ControlType.CheckBox);
+        }
+        var task = Find(root, "Accessibility task", ControlType.CheckBox);
+        Pattern<TogglePattern>(task, TogglePattern.Pattern).Toggle();
+        var all = Find(root, "Complete all visible tasks", ControlType.CheckBox);
+        var aggregate = Pattern<TogglePattern>(all, TogglePattern.Pattern);
+        WaitFor("aggregate checkbox reports a mixed state", () =>
+            aggregate.Current.ToggleState == ToggleState.Indeterminate ? all : null);
         var opener = Find(root, "Notes for Accessibility task", ControlType.Button);
         opener.SetFocus();
         Invoke(opener);
-        var dialog = WaitFor("owned Notes window", () => TopLevel(pid, "Notes for Accessibility task"));
+        var dialog = WaitFor("owned Notes window", () => ActivePopup(root, "Notes for Accessibility task"));
         var notes = Find(dialog, "Notes", ControlType.Document, ControlType.Edit);
         Pattern<TextPattern>(notes, TextPattern.Pattern);
         Invoke(Find(dialog, "Cancel", ControlType.Button));
         WaitFor("focus restored to the Notes opener", () =>
-            TopLevel(pid, "Notes for Accessibility task") == null && opener.Current.HasKeyboardFocus
+            ActivePopup(root) == null && opener.Current.HasKeyboardFocus
             ? opener : null);
+    }
+
+    private static void CheckCivilValidation(AutomationElement field, string invalid, string error, string hint)
+    {
+        field.SetFocus();
+        SetValue(field, invalid);
+        PostKey(field, 0x0d);
+        WaitFor(error + " is exposed on the edit", () =>
+            field.Current.HelpText == error + " " + hint ? field : null);
+        PostKey(field, 0x1b);
+        WaitFor("Escape restores the hint on " + field.Current.Name, () =>
+            field.Current.HelpText == hint && Value(field) == "" ? field : null);
     }
 
     private static void Files(AutomationElement root)
@@ -133,13 +182,88 @@ public static class RocWindowsAccessibility
         Find(root, "Picked files", ControlType.List);
         var tabs = Find(root, "File details", ControlType.Tab);
         var fingerprint = Find(tabs, "Fingerprint", ControlType.TabItem);
-        Pattern<SelectionItemPattern>(fingerprint, SelectionItemPattern.Pattern).Select();
+        SelectTab(fingerprint);
         var copy = Find(root, "Copy SHA-256", ControlType.Button);
         Require(!copy.Current.IsEnabled, "Copy SHA-256 should be disabled without a file.");
         var image = Find(root, "A document in a folder", ControlType.Image);
         Require(image.Current.IsControlElement && image.Current.IsContentElement &&
                 !image.Current.IsKeyboardFocusable, "The informative image has incorrect view membership or focusability.");
+
+        var fixture = Path.GetFullPath(Path.Combine("tests", "fixtures", "hello.txt"));
+        Require(File.Exists(fixture), "The Files probe could not find " + fixture + ".");
+        Invoke(Find(root, "Choose Files\u2026", ControlType.Button));
+        var dialog = WaitFor("native file picker", () => ActivePopup(root));
+        var fileName = FindById(dialog, "1148", "file picker name field");
+        if (fileName.Current.ControlType != ControlType.Edit)
+            fileName = fileName.FindFirst(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+        Require(fileName != null, "The file picker did not expose an editable file name.");
+        SetValue(fileName, fixture);
+        Require(Value(fileName) == fixture, "The file picker did not retain the fixture path.");
+        // IDOK is the common item dialog's standard confirmation command.
+        var popupHandle = new IntPtr(dialog.Current.NativeWindowHandle);
+        Require(PostMessage(popupHandle, 0x0111, new UIntPtr(1), IntPtr.Zero),
+                "Could not confirm the file picker.");
+        WaitFor("confirmed file picker closes", () => ActivePopup(root) == null ? root : null);
+        WaitFor("fingerprint enables Copy SHA-256", () => copy.Current.IsEnabled ? copy : null,
+            () => "Text: " + Describe(root, ControlType.Text) + ". Buttons: " + Describe(root, ControlType.Button));
+
+        SelectTab(Find(tabs, "Preview", ControlType.TabItem));
+        var contents = Find(root, "Contents", ControlType.Document, ControlType.Edit);
+        var preview = Pattern<TextPattern>(contents, TextPattern.Pattern);
+        WaitFor("read-only preview contains fixture text", () =>
+            preview.DocumentRange.GetText(-1).Contains("from a fixture") ? contents : null);
+        var readOnly = preview.DocumentRange.GetAttributeValue(TextPattern.IsReadOnlyAttribute);
+        Require(Equals(readOnly, true), "The fixture preview is editable.");
+
+        var groupByType = Find(root, "Group by file type", ControlType.CheckBox);
+        Pattern<TogglePattern>(groupByType, TogglePattern.Pattern).Toggle();
+        var tree = Find(root, "Picked files", ControlType.Tree);
+        var group = Find(tree, ".txt (1)", ControlType.TreeItem);
+        var expansion = Pattern<ExpandCollapsePattern>(group, ExpandCollapsePattern.Pattern);
+        WaitFor("selected file's group starts expanded", () =>
+            expansion.Current.ExpandCollapseState == ExpandCollapseState.Expanded ? group : null);
+        expansion.Collapse();
+        WaitFor("file group is collapsed", () =>
+            expansion.Current.ExpandCollapseState == ExpandCollapseState.Collapsed ? group : null);
+        expansion.Expand();
+        WaitFor("file group is expanded again", () =>
+            expansion.Current.ExpandCollapseState == ExpandCollapseState.Expanded ? group : null);
+        Find(group, "hello.txt", ControlType.TreeItem);
+
+        SelectTab(fingerprint);
+        var restoredCopy = Find(root, "Copy SHA-256", ControlType.Button);
+        WaitFor("Copy SHA-256 stays enabled after returning to the fingerprint tab", () =>
+            restoredCopy.Current.IsEnabled ? restoredCopy : null);
+        Pattern<InvokePattern>(restoredCopy, InvokePattern.Pattern);
     }
+
+    private static void SelectTab(AutomationElement tab)
+    {
+        var selection = Pattern<SelectionItemPattern>(tab, SelectionItemPattern.Pattern);
+        selection.Select();
+        WaitFor(tab.Current.Name + " tab is selected", () => selection.Current.IsSelected ? tab : null);
+    }
+
+    private static AutomationElement FindById(AutomationElement parent, string id, string checkpoint)
+    {
+        var condition = new PropertyCondition(AutomationElement.AutomationIdProperty, id);
+        return WaitFor(checkpoint, () => parent.FindFirst(TreeScope.Descendants, condition));
+    }
+
+    private static AutomationElement ActivePopup(AutomationElement root, string caption = null)
+    {
+        // Windows can place owned dialogs under their owner in the UI Automation tree.
+        var owner = new IntPtr(root.Current.NativeWindowHandle);
+        var popup = GetLastActivePopup(owner);
+        if (popup == owner || popup == IntPtr.Zero) return null;
+        var element = AutomationElement.FromHandle(popup);
+        return element.Current.ProcessId == root.Current.ProcessId && !element.Current.IsOffscreen &&
+            (caption == null || element.Current.Name == caption) ? element : null;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetLastActivePopup(IntPtr window);
 
     private static void Http(AutomationElement root)
     {
@@ -294,21 +418,14 @@ public static class RocWindowsAccessibility
     private static void PostKey(AutomationElement target, int key)
     {
         var hwnd = new IntPtr(target.Current.NativeWindowHandle);
+        var name = target.Current.Name;
         Require(hwnd != IntPtr.Zero && PostMessage(hwnd, 0x100, new UIntPtr((uint)key), new IntPtr(1)),
-                "Could not post a native key to " + target.Current.Name + ".");
+                "Could not post a native key to " + name + ".");
     }
 
     [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool PostMessage(IntPtr window, uint message, UIntPtr key, IntPtr flags);
-
-    private static AutomationElement TopLevel(int process, string caption)
-    {
-        var condition = new AndCondition(
-            new PropertyCondition(AutomationElement.ProcessIdProperty, process),
-            new PropertyCondition(AutomationElement.NameProperty, caption));
-        return AutomationElement.RootElement.FindFirst(TreeScope.Children, condition);
-    }
 
     private static AutomationElement Find(AutomationElement parent, string name, params ControlType[] types)
     {
