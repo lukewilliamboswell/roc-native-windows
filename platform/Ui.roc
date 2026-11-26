@@ -105,6 +105,61 @@ Ui := [].{
 			[],
 		)
 
+	## A stable native option key and its display label.
+	Choice := { key : Str, label : Str }
+
+	## The selected option, if any.
+	Selection := [NoSelection, Selected(Str)]
+
+	ComboBoxProps(ctx) := {
+		label : Str,
+		choices : Signal(ctx, List(Choice)),
+		selected : Signal(ctx, Selection),
+		on_select : HandlerOf(ctx, Selection),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+	}
+
+	## Select one of a short list of options with a native dropdown.
+	combo_box : ComboBoxProps(ctx) -> Elem(ctx)
+	combo_box = |props|
+		choice_control("ui-combo-box", props.label, props.choices, props.selected, props.on_select, props.enabled, 1)
+
+	ListBoxProps(ctx) := {
+		label : Str,
+		choices : Signal(ctx, List(Choice)),
+		selected : Signal(ctx, Selection),
+		on_select : HandlerOf(ctx, Selection),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+		visible_rows : U32 ?? 6,
+	}
+
+	## Select one option from a visible scrollable list.
+	list_box : ListBoxProps(ctx) -> Elem(ctx)
+	list_box = |props|
+		choice_control("ui-list-box", props.label, props.choices, props.selected, props.on_select, props.enabled, props.visible_rows)
+
+	RadioGroupProps(ctx) := {
+		label : Str,
+		choices : List(Choice),
+		selected : Signal(ctx, Str),
+		on_select : HandlerOf(ctx, Str),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+	}
+
+	## Select a required key from a static group of native radio buttons.
+	radio_group : RadioGroupProps(ctx) -> Elem(ctx)
+	radio_group = |props|
+		Engine.element(
+			"ui-radio-group",
+			[
+				Engine.attr("label", props.label),
+				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.attr_s("selected", props.selected),
+				Engine.on("change", props.on_select),
+			],
+			props.choices.map(|choice| Engine.element("ui-choice", [Engine.attr("key", choice.key), Engine.attr("label", choice.label)], [])),
+		)
+
 	## Receive handles for the files selected by the user.
 	FileButtonProps(ctx) := {
 		on_files : Engine.FilesHandler(ctx),
@@ -158,3 +213,35 @@ check_word = |state| match state {
 	Checked => "true"
 	Mixed => "mixed"
 }
+
+selection_key : Ui.Selection -> Str
+selection_key = |selection| match selection {
+	NoSelection => ""
+	Selected(key) => key
+}
+
+selection_from_key : Str -> Ui.Selection
+selection_from_key = |key| if (key.is_empty()) NoSelection else Selected(key)
+
+choice_control : Engine.Tag, Str, Signal(ctx, List(Ui.Choice)), Signal(ctx, Ui.Selection), HandlerOf(ctx, Ui.Selection), Signal(ctx, Bool), U32 -> Elem(ctx)
+choice_control = |tag, label, choices, selected, on_select, enabled, rows|
+	Engine.element(
+		tag,
+		[
+			Engine.attr("label", label),
+			Engine.attr("visible-rows", rows.to_str()),
+			Engine.attr_s("enabled", enabled.map(bool_word)),
+			Engine.attr_s("selected", selected.map(selection_key)),
+			Engine.on("change", on_select.from_payload_by(Engine.const({}), |_, key| selection_from_key(key))),
+		],
+		[
+			Engine.each(
+				choices.map(|options| options.map(|item| { key: item.key, label: item.label })),
+				|choice| choice.key,
+				|row| {
+					choice = row.item()
+					Engine.element("ui-choice", [Engine.attr_s("key", choice.map(|item| item.key)), Engine.attr_s("label", choice.map(|item| item.label))], [])
+				},
+			),
+		],
+	)

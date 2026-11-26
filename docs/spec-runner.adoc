@@ -27,11 +27,16 @@ the runner protocol in the platform bundle. On Windows on Arm, an x64 Roc
 process can test an ARM64 build with `test --target arm64mingw`.
 
 Selectors look up `button`, `checkbox`, `text-field`, `text`,
-`file-button` and `image`. Use `(within OUTER INNER)` to narrow a
+`file-button`, `image`, `combo-box`, `list-box` and `radio-group`. Use `(within OUTER INNER)` to narrow a
 selector to a row or container. An action needs a unique match. Use
 `expect-text`, `expect-visible`, `expect-absent`, `expect-disabled` and
 `expect-checked` to inspect the current control state. Keep control
 assertions independent of pixel output.
+
+Use `(select (combo-box "Status filter") "unread")` to propose a choice and
+`(expect-selection (combo-box "Status filter") "unread")` to assert the current
+selection. Both forms use the choice key. An empty string represents
+no selection for a drop-down or list box.
 
 == Simulate and run effects
 
@@ -57,7 +62,8 @@ matching interval with `fire-timer` or `tick-interval`. Inspect a period
 with `expect-interval`.
 
 `(files "tests/fixtures/hello.txt")` supplies a file as a picker result.
-The app reads or hashes it through the production file adapter.
+Pass several paths to simulate a multi-file picker. The app reads or
+hashes files through the production file adapter.
 `(await-work)` waits for file and Roc worker work to settle with a
 real-time bound. Use `(setup (live-effects http))` to exercise the real
 HTTP adapter or `(setup (live-effects time))` for real timers. Use a

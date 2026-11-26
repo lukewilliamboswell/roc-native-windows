@@ -214,6 +214,12 @@ impl App {
             (Control::Checkbox | Control::AggregateCheckbox, BN_CLICKED) => {
                 ("change", self.surface.input(key))
             }
+            (kind, code) if kind.is_choice() => {
+                let Some(value) = self.surface.choice_event(key, control, code) else {
+                    return Ok(());
+                };
+                ("change", value)
+            }
             (Control::FileButton, BN_CLICKED) => {
                 if let Some((node, listener)) = self.tree.event(key, "change") {
                     let multiple = self

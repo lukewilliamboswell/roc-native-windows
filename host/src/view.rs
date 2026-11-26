@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::choice::Choices;
 use crate::window::enabled_flag;
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
 use std::cell::RefCell;
@@ -29,6 +30,9 @@ pub(crate) enum Control {
     AggregateCheckbox,
     Edit,
     Image,
+    ComboBox,
+    ListBox,
+    RadioGroup,
 }
 
 impl Control {
@@ -42,6 +46,9 @@ impl Control {
             "ui-aggregate-checkbox" => Self::AggregateCheckbox,
             "ui-text-field" => Self::Edit,
             "ui-asset-image" => Self::Image,
+            "ui-combo-box" => Self::ComboBox,
+            "ui-list-box" => Self::ListBox,
+            "ui-radio-group" => Self::RadioGroup,
             _ => return Err(format!("unsupported native control {tag}")),
         };
         Ok(Some(control))
@@ -49,6 +56,10 @@ impl Control {
 
     pub(crate) fn is_checkbox(self) -> bool {
         matches!(self, Self::Checkbox | Self::AggregateCheckbox)
+    }
+
+    pub(crate) fn is_choice(self) -> bool {
+        matches!(self, Self::ComboBox | Self::ListBox | Self::RadioGroup)
     }
 
     fn class(self) -> (u32, PCWSTR, u32) {
@@ -63,6 +74,17 @@ impl Control {
                 WS_TABSTOP | ES_AUTOHSCROLL as u32,
             ),
             Self::Image => (0, w!("STATIC"), SS_BITMAP | SS_CENTERIMAGE),
+            Self::ComboBox => (
+                0,
+                w!("COMBOBOX"),
+                WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
+            ),
+            Self::ListBox => (
+                WS_EX_CLIENTEDGE,
+                w!("LISTBOX"),
+                WS_TABSTOP | WS_VSCROLL | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32,
+            ),
+            Self::RadioGroup => (WS_EX_CONTROLPARENT, w!("BUTTON"), BS_GROUPBOX as u32),
         }
     }
 }
@@ -74,6 +96,8 @@ struct View {
     props: Props,
     image: HBITMAP,
     rendered_image: Option<(String, i32, i32)>,
+    choices: Choices,
+    combo_position: Option<(HWND, i32, i32, i32, i32)>,
 }
 
 #[derive(Default)]
@@ -107,10 +131,13 @@ impl View {
             },
             image: null_mut(),
             rendered_image: None,
+            choices: Choices::default(),
+            combo_position: None,
         })
     }
 
     fn font(&self, font: HFONT) {
+        self.choices.font(font);
         // SAFETY: Both child windows, when present, are owned by this view.
         unsafe {
             SendMessageW(self.handle, WM_SETFONT, font as usize, 0);
@@ -123,12 +150,17 @@ impl View {
     fn update(&mut self, window: HWND, font: HFONT, desired: Props) -> Result<()> {
         // Compare the controlled edit value with what's on screen before
         // writing. Writing the same string can reset the selection and IME.
-        if self.props.caption != desired.caption
+        if !matches!(self.kind, Control::ListBox | Control::ComboBox)
+            && self.props.caption != desired.caption
             && (self.kind != Control::Edit || window_text(self.handle) != desired.caption)
         {
             set_text(self.handle, &desired.caption);
         }
-        if self.kind == Control::Edit && self.props.label != desired.label {
+        if matches!(
+            self.kind,
+            Control::Edit | Control::ListBox | Control::ComboBox
+        ) && self.props.label != desired.label
+        {
             if self.label.is_null() && !desired.label.is_empty() {
                 self.label = child(window, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?;
             }
@@ -285,7 +317,41 @@ impl Surface {
     }
 
     pub(crate) fn key(&self, handle: HWND) -> Option<Key> {
-        self.handles.get(&(handle as usize)).copied()
+        self.handles.get(&(handle as usize)).copied().or_else(|| {
+            self.views
+                .iter()
+                .find(|(_, view)| view.choices.contains_radio(handle))
+                .map(|(&key, _)| key)
+        })
+    }
+
+    pub(crate) fn choice_event(
+        &mut self,
+        key: Key,
+        child: HWND,
+        notification: u32,
+    ) -> Option<String> {
+        let view = self.views.get_mut(&key)?;
+        view.choices
+            .changed(view.handle, view.kind, child, notification)
+    }
+
+    pub(crate) fn spec_choice(&self, key: Key, selected: &str) -> Result<(HWND, u32)> {
+        let view = self
+            .views
+            .get(&key)
+            .filter(|view| view.kind.is_choice())
+            .ok_or("select requires a choice control")?;
+        view.choices.propose(view.handle, view.kind, selected)
+    }
+
+    pub(crate) fn spec_selection(&self, key: Key) -> Result<&str> {
+        let view = self
+            .views
+            .get(&key)
+            .filter(|view| view.kind.is_choice())
+            .ok_or("expect-selection requires a choice control")?;
+        Ok(view.choices.selected_key(view.handle, view.kind))
     }
 
     pub(crate) fn kind(&self, key: Key) -> Control {
@@ -345,6 +411,9 @@ impl Surface {
             } else {
                 window_text(view.label)
             });
+        }
+        if matches!(view.kind, Control::ListBox | Control::ComboBox) {
+            return Some(view.props.label.clone());
         }
         if kind == "image" {
             return Some(view.props.label.clone());
@@ -408,6 +477,7 @@ impl Surface {
                     };
                 }
             }
+            kind if kind.is_choice() => view.choices.restore(view.handle, kind),
             _ => {}
         }
     }
@@ -485,6 +555,7 @@ impl Surface {
                         node.attr("title").unwrap_or("").into()
                     }
                     Control::Edit => node.attr("value").unwrap_or("").into(),
+                    Control::RadioGroup => node.attr("label").unwrap_or("").into(),
                     Control::Image => node.attr("label").unwrap_or("").into(),
                     _ => tree.caption(key),
                 };
@@ -508,6 +579,11 @@ impl Surface {
                         window_default: node.attr("window-default").is_some_and(enabled_flag),
                     },
                 )?;
+                if kind.is_choice() {
+                    let view = self.views.get_mut(&key).unwrap();
+                    view.choices.sync(view.handle, self.font, kind, tree, key)?;
+                    return Ok(());
+                }
             }
             for &child in &node.children {
                 self.sync_node(tree, child)?;
@@ -605,14 +681,37 @@ impl Surface {
                 // SAFETY: The label belongs to this thread and is optional.
                 unsafe { ShowWindow(view.label, SW_HIDE) };
             }
-            position(
-                view.handle,
-                after,
-                item.x,
-                y + label_height,
-                item.width,
-                item.height - label_height,
-            );
+            let control_y = y + label_height;
+            let control_height = item.height - label_height;
+            if view.kind == Control::ComboBox {
+                let dropdown_height = control_height + scale(self.dpi, 200);
+                let placement = (after, item.x, control_y, item.width, dropdown_height);
+                // Repositioning an already laid-out combo can close its dropdown.
+                if view.combo_position != Some(placement) {
+                    position(
+                        view.handle,
+                        after,
+                        item.x,
+                        control_y,
+                        item.width,
+                        dropdown_height,
+                    );
+                    view.combo_position = Some(placement);
+                }
+            } else {
+                position(
+                    view.handle,
+                    after,
+                    item.x,
+                    control_y,
+                    item.width,
+                    control_height,
+                );
+            }
+            if view.kind == Control::RadioGroup {
+                view.choices
+                    .arrange(item.width, scale(self.dpi, 24), scale(self.dpi, 12));
+            }
             after = view.handle;
         }
         Ok(())
@@ -774,6 +873,26 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             max_width,
             dip(if view.props.label.is_empty() { 30 } else { 51 }),
         ),
+        Control::ComboBox => (
+            max_width,
+            dip(30 + if view.props.label.is_empty() { 0 } else { 21 }),
+        ),
+        Control::ListBox => {
+            // SAFETY: The HWND is a live fixed-height native list box.
+            let row_height = unsafe { SendMessageW(view.handle, LB_GETITEMHEIGHT, 0, 0) };
+            let row_height = i32::try_from(row_height)
+                .ok()
+                .filter(|&height| height > 0)
+                .unwrap_or(dip(20));
+            let rows = number(node, "visible-rows", 6).clamp(1, 20);
+            let label = if view.props.label.is_empty() {
+                0
+            } else {
+                dip(21)
+            };
+            (max_width, rows * row_height + dip(4) + label)
+        }
+        Control::RadioGroup => (max_width, dip(24 * (view.choices.count() as i32 + 1) + 8)),
         Control::Image => (
             dip(number(node, "width", 128)).max(1),
             dip(number(node, "height", 96)).max(1),
@@ -816,7 +935,7 @@ unsafe extern "system" fn edit_subclass(
     }
 }
 
-fn child(parent: HWND, font: HFONT, ex: u32, class: PCWSTR, style: u32) -> Result<HWND> {
+pub(crate) fn child(parent: HWND, font: HFONT, ex: u32, class: PCWSTR, style: u32) -> Result<HWND> {
     // SAFETY: The parent lives on our thread and the system class is an
     // internally selected, terminated string.
     unsafe {
@@ -845,7 +964,7 @@ fn child(parent: HWND, font: HFONT, ex: u32, class: PCWSTR, style: u32) -> Resul
     }
 }
 
-fn position(hwnd: HWND, after: HWND, x: i32, y: i32, width: i32, height: i32) {
+pub(crate) fn position(hwnd: HWND, after: HWND, x: i32, y: i32, width: i32, height: i32) {
     // SAFETY: The target and its preceding sibling, if any, are live HWNDs.
     unsafe {
         SetWindowPos(

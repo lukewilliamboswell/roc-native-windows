@@ -371,7 +371,8 @@ impl App {
             }
             (
                 "click" | "fill" | "toggle" | "press-enter" | "expect-visible" | "expect-absent"
-                | "expect-text" | "expect-checked" | "expect-disabled",
+                | "expect-text" | "expect-checked" | "expect-disabled" | "select"
+                | "expect-selection",
                 _,
             ) => self.control_step(step),
             _ => Err("unknown step or invalid arguments".into()),
@@ -461,7 +462,8 @@ impl App {
             ("expect-disabled", [value]) => {
                 expect(self.surface.spec_disabled(key)?, number(value)?)
             }
-            ("click" | "fill" | "toggle", _) => {
+            ("expect-selection", [wanted]) => expect(self.surface.spec_selection(key)?, *wanted),
+            ("click" | "fill" | "toggle" | "select", _) => {
                 if self.surface.spec_disabled(key)? {
                     return Err("control is disabled".into());
                 }
@@ -477,6 +479,7 @@ impl App {
                         (handle, BN_CLICKED)
                     }
                     ("fill", [value]) => (self.surface.spec_input(key, value)?, EN_CHANGE),
+                    ("select", [value]) => self.surface.spec_choice(key, value)?,
                     ("toggle", []) => (self.surface.spec_toggle(key)?, BN_CLICKED),
                     _ => return Err("invalid control arguments".into()),
                 };

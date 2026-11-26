@@ -8,6 +8,8 @@ mod capture;
 #[cfg(any(test, windows))]
 mod clipboard;
 #[cfg(windows)]
+mod choice;
+#[cfg(windows)]
 mod effects;
 #[cfg(windows)]
 #[allow(clippy::all)]

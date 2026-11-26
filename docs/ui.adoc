@@ -17,6 +17,9 @@ for state, stores, and worker tasks.
 | `Ui.button` | Push button | Title, `on_press`, optional `enabled`
 | `Ui.text_field` | Single-line edit control | Value, `on_input`, optional `label`, `placeholder` and `enabled`
 | `Ui.checkbox` | Check box | Title, `checked`, `on_change`, optional `enabled`
+| `Ui.combo_box` | Selection-only drop-down | `label`, `choices`, `selected`, `on_select`, optional `enabled`
+| `Ui.list_box` | Single-selection list | `label`, `choices`, `selected`, `on_select`, optional `enabled` and `visible_rows` (default 6)
+| `Ui.radio_group` | Labeled radio buttons | `label`, static `choices`, `selected` key, `on_select`, optional `enabled`
 | `Ui.file_button` | System file picker | Title, `on_files` handler, and optional `selection` (`SingleFile` or `MultipleFiles`)
 | `Ui.asset_image` | Bitmap image | Asset path, accessible `label`, `width` and `height`
 |===
@@ -25,6 +28,18 @@ Stack spacing, padding and image dimensions use device-independent pixels.
 An image path is relative to the app's `assets/` directory. Give each
 interactive control a meaningful caption or label. The test runner uses
 those names to locate controls.
+
+Each `Ui.Choice` contains a string `key` and `label`. Use a nonempty key
+unique within the control and keep it stable when renaming or reordering
+options. Visible labels may repeat. The drop-down and list box take
+choice and selection signals. A selected key that has no corresponding
+choice is shown as an empty selection. Their `on_select` handlers receive
+`Ui.Selection.Selected(key)` or `Ui.Selection.NoSelection`.
+
+A radio group needs at least one choice and a selected key from its
+static choices. Its `on_select` handler receives the selected string key.
+All three controls show the selection supplied by the app. A user choice
+becomes the displayed selection when the handler updates that signal.
 
 A multi-file confirmation delivers its files and refusal count in one
 event. Cancelling the picker leaves the app's selection alone.
