@@ -17,7 +17,7 @@ for state, stores, and worker tasks.
 | `Ui.button` | Push button | Title, `on_press`, optional `enabled`
 | `Ui.text_field` | Single-line edit control | Value, `on_input`, optional `label`, `placeholder` and `enabled`
 | `Ui.checkbox` | Check box | Title, `checked`, `on_change`, optional `enabled`
-| `Ui.file_button` | System file picker | Title and `on_files` handler
+| `Ui.file_button` | System file picker | Title, `on_files` handler, and optional `selection` (`SingleFile` or `MultipleFiles`)
 | `Ui.asset_image` | Bitmap image | Asset path, accessible `label`, `width` and `height`
 |===
 
@@ -25,6 +25,9 @@ Stack spacing, padding and image dimensions use device-independent pixels.
 An image path is relative to the app's `assets/` directory. Give each
 interactive control a meaningful caption or label. The test runner uses
 those names to locate controls.
+
+A multi-file confirmation delivers its files and refusal count in one
+event. Cancelling the picker leaves the app's selection alone.
 
 For a complete example, see the Starter app and its specs described in
 xref:apps.adoc#examples[Choose an example].

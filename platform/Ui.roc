@@ -78,12 +78,19 @@ Ui := [].{
 		)
 
 	## Receive handles for the files selected by the user.
-	FileButtonProps(ctx) := { on_files : Engine.FilesHandler(ctx) }
+	FileButtonProps(ctx) := {
+		on_files : Engine.FilesHandler(ctx),
+		selection : [SingleFile, MultipleFiles] ?? SingleFile,
+	}
 
 	## Open the system file picker.
 	file_button : Signal(ctx, Str), FileButtonProps(ctx) -> Elem(ctx)
 	file_button = |title, props|
-		Engine.element("ui-file-button", [Engine.on_files(Change, props.on_files)], [Engine.text_s(title)])
+		Engine.element(
+			"ui-file-button",
+			[Engine.attr("multiple", bool_word(props.selection == MultipleFiles)), Engine.on_files(Change, props.on_files)],
+			[Engine.text_s(title)],
+		)
 
 	## An image's accessible label and dimensions in device-independent pixels.
 	AssetImageProps := { label : Str, width : U32, height : U32 }
