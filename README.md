@@ -29,7 +29,7 @@ roc ../../windows.roc -- test
 roc ../../windows.roc -- package --target x64mingw
 ```
 
-This creates `dist/counter-x64mingw.zip` with the Windows executable and its `assets/` directory. Use `--target arm64mingw` for ARM64. On Windows, `run` defaults to the current architecture. Pass `--help` for all commands. Use `init --platform <platform/main.roc or bundle URL> <app-directory>` for a new app. Every example renders a bundled bitmap using `Ui.asset_image`.
+This creates `dist/counter-x64mingw.zip` with the Windows executable and its `assets/` directory. Use `--target arm64mingw` for ARM64. On Windows, `run` defaults to the current architecture. Pass `--help` for all commands. Use `init --platform <platform/main.roc or bundle URL> <app-directory>` for a new app. Every example renders a bundled BMP using `Ui.asset_image`.
 
 | Example | Behavior |
 | --- | --- |
@@ -39,6 +39,8 @@ This creates `dist/counter-x64mingw.zip` with the Windows executable and its `as
 | Files | Choose a file and compute its SHA-256 digest |
 | HTTP | Fetch and display a bounded response preview with WinHTTP |
 
+Cancelling a running worker discards its result. A pure Roc computation can still finish in the background, and a Roc crash in a worker exits the process.
+
 ## Verification
 
-macOS is the development host for the repository, build pipeline, and portable tests. Validate launch, input, focus, DPI, Narrator, file dialogs, networking, and packaging on Windows. Run the packaged examples on clean x64 and ARM64 installations to confirm the app bundle needs no separate runtime.
+macOS is the development host for the repository, build pipeline, and portable tests. Validate launch, input, focus, DPI, Narrator, file dialogs, networking, and packaging on Windows. Run the packaged examples on clean x64 and ARM64 installations to confirm the app bundle needs no separate runtime. Before publishing native inputs, follow the [roc-automation platform guidance](https://github.com/lukewilliamboswell/roc-automation/blob/main/docs/platforms.adoc) for release provenance, locked inputs, and SBOMs.

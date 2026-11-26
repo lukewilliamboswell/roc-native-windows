@@ -40,10 +40,35 @@ dispatch! = |args, roc| match args {
 	["build"] => build!(roc)
 	["bundle"] => {
 		hosts!()?
-		mkdir!("dist/platform")?
-		step!(roc, ["bundle", "platform/main.roc", "--output-dir=dist/platform"])
+		bundle!(roc)
 	}
 	_ => Err("Usage: scripts/build.roc -- check | build | bundle")
+}
+
+bundle! = |roc| {
+	stage = "build/platform-bundle"
+	if Path.exists!(Path.utf8(stage)) ?? Bool.False {
+		Path.delete_all!(Path.utf8(stage)) ? |error| "Could not refresh ${stage}: ${Str.inspect(error)}"
+	}
+	mkdir!(stage)?
+	mkdir!("dist/platform")?
+	out = Path.absolute!(Path.utf8("dist/platform")) ? |error| "Invalid platform output directory: ${Str.inspect(error)}"
+	entries = Path.list!(Path.utf8("platform")) ? |error| "Could not list platform source: ${Str.inspect(error)}"
+	modules = entries.keep_oks(|path| Path.filename(path).map_ok(Path.display)).keep_if(|name| name.ends_with(".roc"))
+	inputs = ["crt2.obj", "libhost.a", "windows.res", "runtime.lib"]
+	for target in windows_targets {
+		mkdir!("${stage}/targets/${target.roc}")?
+	}
+	link_files = windows_targets.fold([], |files, target| files.concat(inputs.map(|name| "targets/${target.roc}/${name}")))
+	for file in modules.concat(link_files) {
+		copy!("platform/${file}", "${stage}/${file}")?
+	}
+	notices = ["LICENSE", "THIRD_PARTY_LICENSES.md"]
+	for notice in notices {
+		copy!(notice, "${stage}/${notice}")?
+	}
+	arguments = ["bundle", "--output-dir", out.display()].concat(modules).concat(link_files).concat(notices)
+	run!(command(roc, arguments).cwd(Path.utf8(stage)), "bundle the Windows platform and both hosts")
 }
 
 check! = |roc| {
@@ -71,12 +96,26 @@ check_glue! = |roc| {
 	var $spec = override
 	for dir in path.split_on(":") {
 		candidate = "${dir}/roc-rust-glue"
-		if $spec.is_empty() and (Path.is_file!(Path.utf8(candidate)) ?? Bool.False) {
-			$spec = candidate
+		if $spec.is_empty() {
+			match Path.canonicalize!(Path.utf8(candidate)) {
+				Ok(found) => {
+					mkdir!("build")?
+					staged = Path.utf8("build/RustGlue.roc")
+					bytes = Path.read_bytes!(found) ? |error| "Could not read the locked Rust glue spec: ${Str.inspect(error)}"
+					if (Path.read_bytes!(staged) ?? []) != bytes {
+						if Path.exists!(staged) ?? Bool.False {
+							Path.set_permissions!(staged, OwnerOnly) ? |error| "Could not refresh the Rust glue spec: ${Str.inspect(error)}"
+						}
+						Path.write_bytes!(staged, bytes) ? |error| "Could not stage the Rust glue spec: ${Str.inspect(error)}"
+					}
+					$spec = "build/RustGlue.roc"
+				}
+				Err(_) => {}
+			}
 		}
 	}
 	if ($spec.is_empty()) return Err("Use Blueprint or set ROC_WINDOWS_GLUE_SPEC to the pinned compiler's RustGlue.roc")
-	step!(roc, ["scripts/check_glue.roc", "--", "--roc", roc, "--spec", $spec])
+	step!(roc, ["run", "scripts/check_glue.roc", "--", "--roc", roc, "--spec", $spec])
 }
 
 build! = |roc| {
@@ -84,7 +123,7 @@ build! = |roc| {
 	for target in windows_targets {
 		for example in examples {
 			dir = "examples/${example}"
-			cmd = command(roc, ["../../windows.roc", "--", "build", "--target", target.roc]).cwd(Path.utf8(dir)).env("ROC_WINDOWS_ROC", OsStr.from_str(roc))
+			cmd = command(roc, ["run", "../../windows.roc", "--", "build", "--target", target.roc]).cwd(Path.utf8(dir)).env("ROC_WINDOWS_ROC", OsStr.from_str(roc))
 			run!(cmd, "build ${example} for ${target.roc}")?
 		}
 	}
