@@ -116,14 +116,19 @@ with one interactive shell test skipped.
   on the desktop.
 * The staged release launcher generated a Reading List with a fresh Roc
   cache. Its Roc expect, two Win32 scenarios, and UI Automation probe all
-  passed locally on x64 and in the hosted verification job. The generated
-  app also passed the local Reading List keyboard probe.
+  passed locally on x64 and in the
+  https://github.com/lukewilliamboswell/roc-native-windows/actions/runs/45942525832[hosted standalone job].
+  The generated app also passed the local Reading List keyboard probe.
 * Axe.Windows 2.4.2 reported zero errors in the startup tree of each
   shipped example and the standalone-generated Reading List. The Workers
   `Product` heading cleared the three findings from its previous `Item`
   heading.
 
-The https://github.com/lukewilliamboswell/roc-native-windows/actions/runs/45942525832[hosted verification]
-also tracks native ARM64 scenarios and UI Automation. Record the full
-Narrator and display-settings walkthrough in
+After the window startup and example layout changes, `990777e` passed
+the local x64 runtime suites again, including 110 Rust host tests and all
+eight UI Automation targets. The integrated standalone preview passed
+locally with a fresh Roc cache. The
+https://github.com/lukewilliamboswell/roc-native-windows/actions/runs/45946149269[final hosted run]
+passed its Windows x64 job and also tracks the ARM64 suites. Record the
+full Narrator and display-settings walkthrough in
 https://github.com/lukewilliamboswell/roc-native-windows/issues/2[the desktop baseline issue].
