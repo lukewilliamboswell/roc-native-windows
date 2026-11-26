@@ -43,7 +43,8 @@ jobs:
             task: build
           - name: Windows x64 behavior
             runner: windows-2025
-            task: build
+            # The native and UI Automation suites build their own executables.
+            task: bundle
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
