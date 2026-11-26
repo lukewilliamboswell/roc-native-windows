@@ -81,11 +81,15 @@ jobs:
         run: blueprint run docs
 
   windows-arm:
-    name: Windows ARM64 behavior
+    name: Windows ARM64 ${{ matrix.suite }}
     needs: check
     if: ${{ !cancelled() && inputs.windows_arm }}
     runs-on: windows-11-arm
-    timeout-minutes: 15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(inputs.accessibility && '["scenarios", "accessibility"]' || '["scenarios"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -94,7 +98,7 @@ jobs:
         with:
           name: windows-link-inputs
           path: platform/targets/
-      - name: Install the pinned Windows x64 tools for emulation
+      - name: Install the pinned Windows x64 Roc compiler for emulation
         shell: pwsh
         run: |
           function Get-VerifiedFile($Url, $Path, $Sha256) {
@@ -105,10 +109,6 @@ jobs:
           }
           $tools = Join-Path $env:RUNNER_TEMP "roc-windows-tools"
           New-Item -ItemType Directory -Path $tools | Out-Null
-          Get-VerifiedFile `
-            "https://github.com/lukewilliamboswell/roc-blueprint/releases/download/0.13.0/blueprint-x86_64-windows.exe" `
-            (Join-Path $tools "blueprint.exe") `
-            "2fd36dc148fec0e21962e9508ca6f6f41f901e2a7f8d2e441bfb54d0ce599653"
           $archive = Join-Path $tools "roc.zip"
           Get-VerifiedFile `
             "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-11-26-890d6c8/roc_nightly-windows_x86_64-2026-11-26-890d6c8.zip" `
@@ -116,9 +116,14 @@ jobs:
           Expand-Archive -LiteralPath $archive -DestinationPath $tools
           $roc = Get-ChildItem $tools -Recurse -File -Filter roc.exe | Select-Object -First 1
           if (!$roc) { throw "The pinned compiler archive did not contain roc.exe" }
-          $tools, $roc.DirectoryName | Add-Content -Path $env:GITHUB_PATH
+          $roc.DirectoryName | Add-Content -Path $env:GITHUB_PATH
+          "ROC_WINDOWS_ROC=$($roc.FullName)" | Add-Content -Path $env:GITHUB_ENV
+          & $roc.FullName version
+      # Run the task script with the verified compiler. Blueprint's embedded
+      # compiler setup stalled under x64 emulation before the tasks began.
       - name: Run native Windows scenarios
-        run: blueprint run test-native -- --target arm64mingw
+        if: matrix.suite == 'scenarios'
+        run: roc scripts/build.roc -- test-native --target arm64mingw
       - name: Probe Windows UI Automation
-        if: ${{ !cancelled() && inputs.accessibility }}
-        run: blueprint run test-accessibility -- -Target arm64mingw -FreshStarter
+        if: matrix.suite == 'accessibility'
+        run: roc scripts/build.roc -- test-accessibility -Target arm64mingw -FreshStarter
