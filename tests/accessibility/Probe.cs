@@ -31,6 +31,7 @@ public static class RocWindowsAccessibility
             case "todos": Todos(window, process.Id); break;
             case "files": Files(window); break;
             case "http": Http(window); break;
+            case "progress": Progress(window); break;
             case "workers": Workers(window); break;
             default: throw new ArgumentOutOfRangeException("example");
         }
@@ -143,6 +144,7 @@ public static class RocWindowsAccessibility
     private static void Http(AutomationElement root)
     {
         using (var response = new LoopbackResponse())
+        using (var pending = new AutoResetEvent(false))
         using (var changed = new AutoResetEvent(false))
         {
             var url = Find(root, "URL", ControlType.Edit);
@@ -156,7 +158,10 @@ public static class RocWindowsAccessibility
                 try
                 {
                     var item = source as AutomationElement;
-                    if (item != null && item.Current.Name.StartsWith("HTTP 200"))
+                    if (item == null) return;
+                    var name = item.Current.Name;
+                    if (name.StartsWith("Fetching", StringComparison.Ordinal)) pending.Set();
+                    if (name.StartsWith("HTTP 200", StringComparison.Ordinal))
                     {
                         Interlocked.Increment(ref completed);
                         changed.Set();
@@ -171,6 +176,11 @@ public static class RocWindowsAccessibility
                 var fetch = Find(root, "Fetch", ControlType.Button);
                 Invoke(fetch);
                 Require(response.RequestReceived.WaitOne(4000), "The HTTP request did not reach loopback.");
+                Require(pending.WaitOne(4000), "HTTP pending status did not raise a live-region event.");
+                var animations = ClientAnimationsEnabled();
+                var progress = Find(root, animations ? "Request progress" : "Request progress (busy)",
+                    animations ? ControlType.ProgressBar : ControlType.Text);
+                Require(!progress.Current.IsOffscreen, "The request progress indicator is offscreen.");
                 var focused = AutomationElement.FocusedElement;
                 response.Complete.Set();
                 Require(changed.WaitOne(8000), "HTTP completion did not raise a live-region event.");
@@ -181,6 +191,28 @@ public static class RocWindowsAccessibility
             finally { Automation.RemoveAutomationEventHandler(live, root, handler); }
         }
     }
+
+    private static void Progress(AutomationElement root)
+    {
+        var progress = Find(root, "Transfer progress", ControlType.ProgressBar);
+        var range = Pattern<RangeValuePattern>(progress, RangeValuePattern.Pattern).Current;
+        Require(range.IsReadOnly, "Transfer progress is writable through UI Automation.");
+        Require(range.Maximum > range.Minimum &&
+                Math.Abs((range.Value - range.Minimum) / (range.Maximum - range.Minimum) - 0.25) < 0.001,
+                "Transfer progress does not expose the expected quarter-complete value.");
+    }
+
+    private static bool ClientAnimationsEnabled()
+    {
+        bool enabled;
+        Require(SystemParametersInfo(0x1042, 0, out enabled, 0), "Could not read the Windows client animation setting.");
+        return enabled;
+    }
+
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfo(uint action, uint parameter,
+        [MarshalAs(UnmanagedType.Bool)] out bool value, uint flags);
 
     private static void Workers(AutomationElement root)
     {

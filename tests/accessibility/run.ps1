@@ -1,7 +1,7 @@
 param(
     [string] $Roc = "roc",
     [ValidateSet("x64mingw", "arm64mingw")] [string] $Target,
-    [ValidateSet("counter", "starter", "todos", "files", "http", "workers")] [string[]] $Example,
+    [ValidateSet("counter", "starter", "todos", "files", "http", "workers", "progress")] [string[]] $Example,
     [string] $Starter,
     [switch] $FreshStarter,
     [int] $AppPid,
@@ -35,7 +35,7 @@ if (-not $Target) {
     $Target = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") { "arm64mingw" } else { "x64mingw" }
 }
 if (-not $Example) {
-    $Example = @("counter", "starter", "todos", "files", "http", "workers")
+    $Example = @("counter", "starter", "todos", "files", "http", "workers", "progress")
 }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $env:ROC_WINDOWS_ROC = $Roc
@@ -86,6 +86,8 @@ foreach ($name in $Example) {
         if ($Starter -and $name -eq "starter") {
             $directory = (Resolve-Path $Starter).Path
             Invoke-ExampleProbe $name $directory (Join-Path $directory "windows.roc") "supplied starter"
+        } elseif ($name -eq "progress") {
+            Invoke-ExampleProbe $name (Join-Path $PSScriptRoot "progress") $launcher "determinate progress fixture"
         } else {
             Invoke-ExampleProbe $name (Join-Path $repo "examples/$name") $launcher $name
         }
