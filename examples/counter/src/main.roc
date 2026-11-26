@@ -11,7 +11,13 @@ view = |count|
 	Ui.vstack(
 		{ padding: 16 },
 		[
-			Ui.text("Counter"),
+			Ui.hstack(
+				{ spacing: 12 },
+				[
+					Ui.asset_image("counter.bmp", { label: "Five tally marks", width: 48, height: 48 }),
+					Ui.text("Counter"),
+				],
+			),
 			Ui.text(count.signal().map(|value| "Count: ${value.to_str()}")),
 			Ui.hstack(
 				{},

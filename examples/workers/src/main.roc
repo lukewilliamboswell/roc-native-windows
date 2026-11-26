@@ -33,7 +33,13 @@ view = || {
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
-			Ui.text("Workers"),
+			Ui.hstack(
+				{ spacing: 12 },
+				[
+					Ui.asset_image("workers.bmp", { label: "Work splitting into two threads", width: 48, height: 48 }),
+					Ui.text("Workers"),
+				],
+			),
 			Ui.text(cells.status.signal()),
 			Ui.hstack(
 				{},

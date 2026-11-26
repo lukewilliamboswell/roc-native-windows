@@ -27,6 +27,13 @@ view = || {
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
+			Ui.hstack(
+				{ spacing: 12 },
+				[
+					Ui.asset_image("todos.bmp", { label: "A three-item checklist", width: 48, height: 48 }),
+					Ui.text("To-do list"),
+				],
+			),
 			Ui.text(todos.map(remaining)),
 			Ui.hstack(
 				{},

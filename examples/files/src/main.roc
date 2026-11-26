@@ -26,7 +26,13 @@ view = || {
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
-			Ui.text("Files"),
+			Ui.hstack(
+				{ spacing: 12 },
+				[
+					Ui.asset_image("files.bmp", { label: "A document in a folder", width: 48, height: 48 }),
+					Ui.text("Files"),
+				],
+			),
 			Ui.hstack(
 				{},
 				[

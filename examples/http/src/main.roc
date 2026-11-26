@@ -28,7 +28,13 @@ view = || {
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
-			Ui.text("HTTP"),
+			Ui.hstack(
+				{ spacing: 12 },
+				[
+					Ui.asset_image("http.bmp", { label: "A request arrow and a response arrow", width: 48, height: 48 }),
+					Ui.text("HTTP"),
+				],
+			),
 			Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
 			Ui.hstack(
 				{},
