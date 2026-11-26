@@ -1,5 +1,5 @@
 use crate::abi::{self, Engine};
-use crate::effects::Effects;
+use crate::effects::{Effects, SpecOptions};
 use crate::view::{Surface, wide};
 use crate::wire::{Declarations, EFFECT_NODE, Reader, Tree};
 use crate::{Event, Result};
@@ -30,6 +30,9 @@ use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW,
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::w;
 
+#[path = "spec_run.rs"]
+mod spec_run;
+
 const PUMP: usize = 1;
 
 thread_local! {
@@ -47,11 +50,14 @@ struct App {
     incoming: Receiver<Event>,
     private: VecDeque<Event>,
     opportunity: Option<u64>,
+    driven: bool,
 }
 
 impl App {
-    fn start(window: HWND) -> Result<Self> {
+    fn start(window: HWND, options: Option<SpecOptions>) -> Result<Self> {
         let (send, incoming) = channel();
+        let deterministic = options.as_ref().is_some_and(|options| !options.live_time);
+        let initial_time = options.as_ref().map_or(0, |options| options.initial_time);
         let mut app = Self {
             engine: Engine::default(),
             tree: Tree::new(),
@@ -60,32 +66,20 @@ impl App {
             incoming,
             private: VecDeque::new(),
             opportunity: None,
+            driven: options.is_some(),
         };
-        let declarations = Declarations::decode(&Engine::declarations()?)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|err| err.to_string())?;
-        let mut seed = [0; 16];
-        // SAFETY: The buffer is writable for exactly 16 bytes and the flag
-        // selects the system RNG with no algorithm handle.
-        if unsafe {
-            BCryptGenRandom(
-                null_mut(),
-                seed.as_mut_ptr(),
-                seed.len() as u32,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        } != 0
-        {
-            return Err("could not obtain random seed from Windows".into());
+        if let Some(options) = options {
+            app.effects.configure_spec(options)?;
         }
-        let boot = declarations.boot(
-            now.as_millis() as i64,
-            seed,
-            &language(),
-            zone_offset(),
-            |session, key| app.effects.boot_value(session, key),
-        )?;
+        let declarations = Declarations::decode(&Engine::declarations()?)?;
+        let (now, seed, locale, zone) = if deterministic {
+            (initial_time, [1; 16], "en-US".into(), 0)
+        } else {
+            live_boot()?
+        };
+        let boot = declarations.boot(now, seed, &locale, zone, |session, key| {
+            app.effects.boot_value(session, key)
+        })?;
         let output = app.engine.mount(&boot);
         app.apply(&output)?;
         app.drain_private()?;
@@ -295,6 +289,26 @@ fn modifiers() -> u8 {
     }
 }
 
+fn live_boot() -> Result<(i64, [u8; 16], String, i32)> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?;
+    let mut seed = [0; 16];
+    // SAFETY: The flag selects the system RNG, and the destination buffer is writable.
+    if unsafe {
+        BCryptGenRandom(
+            null_mut(),
+            seed.as_mut_ptr(),
+            seed.len() as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    } != 0
+    {
+        return Err("could not obtain random seed from Windows".into());
+    }
+    Ok((now.as_millis() as i64, seed, language(), zone_offset()))
+}
+
 fn language() -> String {
     let mut locale = [0_u16; 85]; // LOCALE_NAME_MAX_LENGTH
     // SAFETY: The OS receives the full length of a writable array.
@@ -347,6 +361,9 @@ fn app_name() -> String {
 
 pub(crate) fn report_error(error: &str) {
     eprintln!("roc-native-windows: {error}");
+    if std::env::var_os("ROC_WINDOWS_SPEC").is_some() {
+        return;
+    }
     let text = wide(error);
     // SAFETY: Both strings are terminated and live for the modal call.
     unsafe {
@@ -407,12 +424,14 @@ fn run() -> Result<()> {
             return Err(last_error("create Roc window"));
         }
 
-        APP.with(|state| -> Result<()> {
-            // The borrow suppresses synchronous notifications during mount.
-            let mut state = state.borrow_mut();
-            *state = Some(App::start(window)?);
-            Ok(())
-        })?;
+        if let Some(path) = std::env::var_os("ROC_WINDOWS_SPEC") {
+            let result = spec_run::run(window, &PathBuf::from(path));
+            clear_app();
+            DestroyWindow(window);
+            return result;
+        }
+
+        mount(window, None)?;
         DragAcceptFiles(window, 1);
         if SetTimer(window, PUMP, 15, None) == 0 {
             return Err(last_error("start Roc event pump"));
@@ -443,6 +462,15 @@ fn run() -> Result<()> {
         }
         Ok(())
     }
+}
+
+fn mount(window: HWND, options: Option<SpecOptions>) -> Result<()> {
+    APP.with(|state| {
+        // The borrow suppresses synchronous notifications during mount.
+        let mut state = state.borrow_mut();
+        *state = Some(App::start(window, options)?);
+        Ok(())
+    })
 }
 
 fn clear_app() {
@@ -486,7 +514,7 @@ unsafe extern "system" fn window_proc(
                         return Ok(false);
                     };
                     match message {
-                        WM_COMMAND if lparam != 0 => {
+                        WM_COMMAND if lparam != 0 && !app.driven => {
                             app.command(lparam as HWND, (wparam >> 16) as u16)?
                         }
                         WM_SIZE => app.surface.arrange(&app.tree)?,
@@ -509,7 +537,7 @@ unsafe extern "system" fn window_proc(
                             app.surface
                                 .scroll(&app.tree, 0, Some((wparam >> 16) as i16))?
                         }
-                        WM_DROPFILES => app.dropped(paths.unwrap_or_default())?,
+                        WM_DROPFILES if !app.driven => app.dropped(paths.unwrap_or_default())?,
                         _ => return Ok::<_, String>(false),
                     }
                     Ok(true)

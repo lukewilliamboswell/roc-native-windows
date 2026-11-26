@@ -19,6 +19,7 @@ pub(super) struct Order {
     files: Vec<Entry>,
     prep: Option<(String, usize, usize)>,
     pub(super) timeout: u32,
+    pub(super) finish_on_cancel: bool,
 }
 
 impl Order {
@@ -64,6 +65,7 @@ impl Order {
             files,
             prep,
             timeout,
+            finish_on_cancel: policy == 2,
         })
     }
 

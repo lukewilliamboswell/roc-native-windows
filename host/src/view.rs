@@ -12,7 +12,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_BITMAP, SS_CENTERIMAGE, SS_LEFT, SS_NOPREFIX};
 use windows_sys::Win32::UI::Controls::{BST_CHECKED, EM_SETCUEBANNER, EM_SETSEL, SetScrollInfo};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetFocus};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::{PCWSTR, w};
 
@@ -276,6 +276,62 @@ impl Surface {
         } else {
             "false".into()
         }
+    }
+
+    pub(crate) fn spec_handle(&self, key: Key) -> Option<HWND> {
+        self.views.get(&key).map(|view| view.handle)
+    }
+
+    pub(crate) fn spec_label(&self, key: Key, kind: &str) -> Option<String> {
+        let view = self.views.get(&key)?;
+        if kind == "text-field" {
+            return Some(if view.label.is_null() {
+                view.props.placeholder.clone()
+            } else {
+                window_text(view.label)
+            });
+        }
+        if kind == "image" {
+            return Some(view.props.label.clone());
+        }
+        Some(window_text(view.handle))
+    }
+
+    pub(crate) fn spec_text(&self, key: Key) -> Result<String> {
+        let handle = self
+            .spec_handle(key)
+            .ok_or("locator is not a native control")?;
+        Ok(window_text(handle))
+    }
+
+    pub(crate) fn spec_disabled(&self, key: Key) -> Result<bool> {
+        let handle = self
+            .spec_handle(key)
+            .ok_or("locator is not a native control")?;
+        // SAFETY: The HWND is a live control on the UI thread.
+        Ok(unsafe { IsWindowEnabled(handle) } == 0)
+    }
+
+    pub(crate) fn spec_input(&self, key: Key, text: &str) -> Result<HWND> {
+        let view = self
+            .views
+            .get(&key)
+            .filter(|view| view.kind == Control::Edit)
+            .ok_or("fill requires a text field")?;
+        set_text(view.handle, text);
+        Ok(view.handle)
+    }
+
+    pub(crate) fn spec_toggle(&self, key: Key) -> Result<HWND> {
+        let view = self
+            .views
+            .get(&key)
+            .filter(|view| view.kind == Control::Checkbox)
+            .ok_or("toggle requires a checkbox")?;
+        let checked = self.input(key) == "true";
+        // SAFETY: The HWND is a live checkbox on the UI thread.
+        unsafe { SendMessageW(view.handle, BM_SETCHECK, usize::from(!checked), 0) };
+        Ok(view.handle)
     }
 
     pub(crate) fn restore_controlled_value(&self, key: Key) {

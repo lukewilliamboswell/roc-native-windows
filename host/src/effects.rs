@@ -4,7 +4,7 @@ mod files;
 mod http;
 mod workers;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,8 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::HWND;
 
+use crate::spec_effects::{self, Simulated};
+use crate::spec_plan::valid_file_name;
 use crate::wire::Reader;
 use crate::{Event, Result};
 
@@ -20,6 +22,21 @@ pub(crate) use files::{register_handle_box, released_box};
 const EFFECT_NODE: u32 = u32::MAX;
 const MAX_TIMEOUT: u32 = 600_000;
 type Completion = (u32, Arc<AtomicBool>, Outcome);
+type Job = Box<dyn FnOnce(&AtomicBool, &dyn Fn(Vec<u8>)) -> Outcome + Send>;
+
+struct WorkOptions {
+    timeout: u32,
+    timeout_tag: u8,
+    finish_on_cancel: bool,
+    unavailable: Vec<u8>,
+}
+
+struct Queued {
+    id: u32,
+    cancelled: Arc<AtomicBool>,
+    options: WorkOptions,
+    run: Job,
+}
 
 enum Outcome {
     Bytes(Vec<u8>),
@@ -39,6 +56,19 @@ struct Timer {
 struct Flight {
     cancelled: Arc<AtomicBool>,
     deadline: Option<(Instant, u8)>,
+    finish_on_cancel: bool,
+    delivers: bool,
+}
+
+pub(crate) struct SpecOptions {
+    pub(crate) storage: PathBuf,
+    pub(crate) output: PathBuf,
+    pub(crate) local: Vec<(String, String)>,
+    pub(crate) session: Vec<(String, String)>,
+    pub(crate) initial_time: i64,
+    pub(crate) live_time: bool,
+    pub(crate) live_http: bool,
+    pub(crate) worker_limit: usize,
 }
 
 pub(crate) struct Effects {
@@ -51,6 +81,9 @@ pub(crate) struct Effects {
     timers: HashMap<u32, Timer>,
     session: HashMap<String, String>,
     local: Option<PathBuf>,
+    queued: VecDeque<Queued>,
+    spec: Option<SpecOptions>,
+    pub(crate) simulated: Simulated,
 }
 
 impl Effects {
@@ -75,7 +108,94 @@ impl Effects {
             timers: HashMap::new(),
             session: HashMap::new(),
             local,
+            queued: VecDeque::new(),
+            spec: None,
+            simulated: Simulated::default(),
         }
+    }
+
+    pub(crate) fn configure_spec(&mut self, mut options: SpecOptions) -> Result<()> {
+        self.local = Some(options.storage.clone());
+        self.simulated.now = options.initial_time;
+        for (key, value) in std::mem::take(&mut options.local) {
+            self.storage(1, &key, Some(value))?;
+        }
+        for (key, value) in std::mem::take(&mut options.session) {
+            self.storage(3, &key, Some(value))?;
+        }
+        self.spec = Some(options);
+        Ok(())
+    }
+
+    pub(crate) fn work_done(&self) -> bool {
+        self.queued.is_empty() && self.running.load(Ordering::Acquire) == 0
+    }
+
+    pub(crate) fn pending(&self) -> usize {
+        self.simulated.pending()
+            + self
+                .timers
+                .values()
+                .filter(|timer| !timer.recurring)
+                .count()
+            + self
+                .flights
+                .values()
+                .filter(|flight| flight.delivers)
+                .count()
+    }
+
+    pub(crate) fn interval_count(&self, ms: u32) -> usize {
+        self.simulated.timers(ms, true).len()
+            + self
+                .timers
+                .values()
+                .filter(|timer| timer.recurring && timer.interval == millis(ms))
+                .count()
+    }
+
+    pub(crate) fn cancelled(&self, number: usize) -> Result<bool> {
+        self.simulated.cancelled(number)
+    }
+
+    pub(crate) fn send_simulated(&self, (id, payload): (u32, Vec<u8>)) {
+        self.answer(id, payload);
+    }
+
+    pub(crate) fn expire_simulated_http(&mut self) -> bool {
+        if let Some(id) = self.simulated.next_timeout() {
+            self.answer(id, vec![7]);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn http_stub(
+        &mut self,
+        url: &str,
+        status: u16,
+        fields: &[&str],
+        body: &str,
+    ) -> Result<()> {
+        let headers = fields
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| (pair[0], pair[1]));
+        self.simulated
+            .stage(url, http::encode_response(status, headers, body.as_bytes()))
+    }
+
+    pub(crate) fn http_failure(&mut self, timeout: bool, detail: &str) -> Result<()> {
+        self.simulated.stage(
+            "",
+            if timeout {
+                vec![7]
+            } else {
+                http::failure(detail)
+            },
+        )
     }
 
     pub(crate) fn poll(&mut self) {
@@ -100,21 +220,27 @@ impl Effects {
                 && now >= deadline
             {
                 flight.cancelled.store(true, Ordering::Relaxed);
-                answers.push((id, vec![tag]));
+                if flight.delivers {
+                    answers.push((id, vec![tag]));
+                }
                 return false;
             }
             true
         });
         files::collect_released();
         for (id, token, outcome) in self.completed.try_iter() {
-            if self
+            let Some(flight) = self
                 .flights
                 .get(&id)
-                .is_some_and(|active| Arc::ptr_eq(&active.cancelled, &token))
-            {
-                if !matches!(outcome, Outcome::Progress(_)) {
-                    self.flights.remove(&id);
-                }
+                .filter(|flight| Arc::ptr_eq(&flight.cancelled, &token))
+            else {
+                continue;
+            };
+            let delivers = flight.delivers;
+            if !matches!(outcome, Outcome::Progress(_)) {
+                self.flights.remove(&id);
+            }
+            if delivers {
                 match outcome {
                     Outcome::Bytes(payload) | Outcome::Progress(payload) => {
                         answers.push((id, payload))
@@ -126,6 +252,7 @@ impl Effects {
         for (id, payload) in answers {
             self.answer(id, payload);
         }
+        self.start_queued();
     }
 
     fn work_answer(&self, id: u32, output: Vec<u8>, entries: Vec<files::Entry>) {
@@ -159,62 +286,105 @@ impl Effects {
     fn spawn(
         &mut self,
         id: u32,
-        timeout: u32,
-        timeout_tag: u8,
-        on_unavailable: Vec<u8>,
-        task: impl FnOnce(&AtomicBool, &dyn Fn(Vec<u8>)) -> Outcome + Send + 'static,
+        options: WorkOptions,
+        run: impl FnOnce(&AtomicBool, &dyn Fn(Vec<u8>)) -> Outcome + Send + 'static,
     ) {
-        // This count includes cancelled jobs until their OS call or Roc turn returns.
-        if self.running.load(Ordering::Relaxed) >= 32 {
-            self.answer(id, on_unavailable);
+        // A cancelled job still occupies its thread until it returns.
+        if (self.spec.is_none() && self.running.load(Ordering::Acquire) >= 32)
+            || self.queued.len() >= 1024
+        {
+            self.answer(id, options.unavailable);
             return;
         }
-        self.running.fetch_add(1, Ordering::Relaxed);
-        let running = Arc::clone(&self.running);
         let cancelled = Arc::new(AtomicBool::new(false));
-        let token = Arc::clone(&cancelled);
-        let sender = self.complete.clone();
-        let deadline = (timeout != 0).then(|| {
+        let deadline = (options.timeout != 0).then(|| {
             (
-                Instant::now() + millis(timeout.min(MAX_TIMEOUT)),
-                timeout_tag,
+                Instant::now() + millis(options.timeout.min(MAX_TIMEOUT)),
+                options.timeout_tag,
             )
         });
-        match std::thread::Builder::new()
-            .name("roc-effect".into())
-            .stack_size(8 << 20)
-            .spawn(move || {
-                if !token.load(Ordering::Relaxed) {
-                    let outcome = task(&token, &|payload| {
-                        if !token.load(Ordering::Relaxed) {
-                            let _ =
-                                sender.send((id, Arc::clone(&token), Outcome::Progress(payload)));
-                        }
-                    });
-                    let _ = sender.send((id, token, outcome));
-                }
-                running.fetch_sub(1, Ordering::Relaxed);
-            }) {
-            Ok(_) => {
-                self.flights.insert(
-                    id,
-                    Flight {
-                        cancelled,
-                        deadline,
-                    },
-                );
+        self.flights.insert(
+            id,
+            Flight {
+                cancelled: cancelled.clone(),
+                deadline,
+                finish_on_cancel: options.finish_on_cancel,
+                delivers: true,
+            },
+        );
+        self.queued.push_back(Queued {
+            id,
+            cancelled,
+            options,
+            run: Box::new(run),
+        });
+        self.start_queued();
+    }
+
+    fn start_queued(&mut self) {
+        let limit = self.spec.as_ref().map_or(32, |spec| spec.worker_limit);
+        while self.running.load(Ordering::Acquire) < limit {
+            let Some(Queued {
+                id,
+                cancelled,
+                options,
+                run,
+            }) = self.queued.pop_front()
+            else {
+                break;
+            };
+            if cancelled.load(Ordering::Relaxed) {
+                continue;
             }
-            Err(_) => {
+            self.running.fetch_add(1, Ordering::Relaxed);
+            let running = Arc::clone(&self.running);
+            let token = Arc::clone(&cancelled);
+            let sender = self.complete.clone();
+            if std::thread::Builder::new()
+                .name("roc-effect".into())
+                .stack_size(8 << 20)
+                .spawn(move || {
+                    if !token.load(Ordering::Relaxed) {
+                        let outcome = run(&token, &|payload| {
+                            if !token.load(Ordering::Relaxed) {
+                                let _ = sender.send((
+                                    id,
+                                    Arc::clone(&token),
+                                    Outcome::Progress(payload),
+                                ));
+                            }
+                        });
+                        let _ = sender.send((id, token, outcome));
+                    }
+                    running.fetch_sub(1, Ordering::Release);
+                })
+                .is_err()
+            {
                 self.running.fetch_sub(1, Ordering::Relaxed);
-                self.answer(id, on_unavailable);
+                if self
+                    .flights
+                    .remove(&id)
+                    .is_some_and(|flight| flight.delivers)
+                {
+                    self.answer(id, options.unavailable);
+                }
             }
         }
     }
 
     pub(crate) fn cancel(&mut self, id: u32) {
+        self.simulated.cancel(id);
         self.timers.remove(&id);
-        if let Some(flight) = self.flights.remove(&id) {
-            flight.cancelled.store(true, Ordering::Relaxed);
+        if let Some(flight) = self.flights.get_mut(&id) {
+            if flight.finish_on_cancel {
+                flight.delivers = false;
+                flight
+                    .deadline
+                    .get_or_insert_with(|| (Instant::now() + millis(MAX_TIMEOUT), 7));
+            } else {
+                let flight = self.flights.remove(&id).unwrap();
+                flight.cancelled.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -222,13 +392,21 @@ impl Effects {
         match kind {
             1 => {
                 let request = http::Request::read(reader)?;
-                self.spawn(
-                    id,
-                    request.timeout,
-                    7,
-                    http::failure("HTTP worker unavailable"),
-                    move |stop, report| Outcome::Bytes(request.run(stop, report)),
-                );
+                if self.spec.as_ref().is_some_and(|spec| !spec.live_http) {
+                    self.simulated
+                        .hold(id, spec_effects::Kind::Http(request.spec_request()));
+                } else {
+                    self.spawn(
+                        id,
+                        WorkOptions {
+                            timeout: request.timeout,
+                            timeout_tag: 7,
+                            finish_on_cancel: false,
+                            unavailable: http::failure("HTTP worker unavailable"),
+                        },
+                        move |stop, report| Outcome::Bytes(request.run(stop, report)),
+                    );
+                }
             }
             2 | 17 => {
                 let key = reader.string()?;
@@ -238,28 +416,52 @@ impl Effects {
                 self.answer(id, payload);
             }
             3 | 4 => {
-                let interval = millis(reader.u32()?.max(1));
-                self.timers.insert(
-                    id,
-                    Timer {
-                        next: Instant::now() + interval,
-                        interval,
-                        recurring: kind == 4,
-                    },
-                );
+                let delay = reader.u32()?;
+                if self.spec.as_ref().is_some_and(|spec| !spec.live_time) {
+                    let effect = if kind == 4 {
+                        spec_effects::Kind::Interval(delay.max(1))
+                    } else {
+                        spec_effects::Kind::Timer(delay)
+                    };
+                    self.simulated.hold(id, effect);
+                } else {
+                    let interval = millis(delay.max(1));
+                    self.timers.insert(
+                        id,
+                        Timer {
+                            next: Instant::now() + interval,
+                            interval,
+                            recurring: kind == 4,
+                        },
+                    );
+                }
             }
             5..=7 | 20 | 22 => {}
             8 => {
                 let order = workers::Order::read(reader)?;
-                self.spawn(id, order.timeout, 7, vec![11, 6], move |stop, _| {
-                    order.run(stop)
-                });
+                self.spawn(
+                    id,
+                    WorkOptions {
+                        timeout: order.timeout,
+                        timeout_tag: 7,
+                        finish_on_cancel: order.finish_on_cancel,
+                        unavailable: vec![11, 6],
+                    },
+                    move |stop, _| order.run(stop),
+                );
             }
             11 | 13 | 14 => {
                 let task = files::FileTask::read(kind, reader)?;
-                self.spawn(id, 0, 0, vec![13, 3], move |stop, _| {
-                    Outcome::Bytes(task.run(stop))
-                });
+                self.spawn(
+                    id,
+                    WorkOptions {
+                        timeout: 0,
+                        timeout_tag: 0,
+                        finish_on_cancel: false,
+                        unavailable: vec![13, 3],
+                    },
+                    move |stop, _| Outcome::Bytes(task.run(stop)),
+                );
             }
             16 | 18 => {
                 reader.string()?;
@@ -344,7 +546,16 @@ impl Effects {
     }
 
     pub(crate) fn save(&mut self, token: u64, start: u64, len: u64, name: &str) -> Result<()> {
-        files::save(self.window, token, start, len, name)
+        if let Some(spec) = &self.spec {
+            if !valid_file_name(name) {
+                return Err("spec save needs an ordinary file name without a path".into());
+            }
+            let saved = spec.output.join("saved");
+            std::fs::create_dir_all(&saved).map_err(storage_error)?;
+            files::save_to(token, start, len, saved.join(name))
+        } else {
+            files::save(self.window, token, start, len, name)
+        }
     }
 }
 

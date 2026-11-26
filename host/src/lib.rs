@@ -3,11 +3,17 @@
 
 #[cfg(windows)]
 mod abi;
+#[cfg(any(test, windows))]
+mod capture;
 #[cfg(windows)]
 mod effects;
 #[cfg(windows)]
 #[allow(clippy::all)]
 mod roc_platform_abi;
+#[cfg(any(test, windows))]
+mod spec_effects;
+#[cfg(any(test, windows))]
+mod spec_plan;
 #[cfg(windows)]
 mod view;
 #[cfg(windows)]

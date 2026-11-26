@@ -50,6 +50,15 @@ impl Request {
         })
     }
 
+    pub(super) fn spec_request(&self) -> crate::spec_effects::Request {
+        crate::spec_effects::Request {
+            method: self.method.clone(),
+            url: self.url.clone(),
+            body: self.body.clone(),
+            timeout: self.timeout,
+        }
+    }
+
     pub(super) fn run(self, stop: &AtomicBool, report: &dyn Fn(Vec<u8>)) -> Vec<u8> {
         match self.fetch(stop, report) {
             Ok(payload) => payload,
@@ -135,20 +144,34 @@ impl Request {
                 )?;
             }
             set_option(&request, WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS, 20)?;
-            set_option(
+            let decompress = match set_option(
                 &request,
                 WINHTTP_OPTION_DECOMPRESSION,
                 WINHTTP_DECOMPRESSION_FLAG_GZIP | WINHTTP_DECOMPRESSION_FLAG_DEFLATE,
-            )?;
+            ) {
+                Ok(()) => true,
+                // A WinHTTP implementation without this option can still
+                // deliver responses when we request the identity encoding.
+                Err(error) if error.raw_os_error() == Some(ERROR_WINHTTP_INVALID_OPTION as i32) => {
+                    false
+                }
+                Err(error) => return Err(error),
+            };
             let mut text_headers = String::new();
             for (name, value) in &self.headers {
                 if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
                     return Err(invalid("invalid HTTP header"));
                 }
+                if !decompress && name.eq_ignore_ascii_case("accept-encoding") {
+                    continue;
+                }
                 text_headers.push_str(name);
                 text_headers.push_str(": ");
                 text_headers.push_str(value);
                 text_headers.push_str("\r\n");
+            }
+            if !decompress {
+                text_headers.push_str("Accept-Encoding: identity\r\n");
             }
             let headers = wide(&text_headers)?;
             let body = if matches!(self.method.as_str(), "GET" | "HEAD") {
@@ -187,6 +210,18 @@ impl Request {
                 null_mut(),
             ))?;
             let headers = response_headers(&request)?;
+            if !decompress
+                && headers.lines().skip(1).any(|line| {
+                    line.split_once(':').is_some_and(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-encoding")
+                            && !value.trim().eq_ignore_ascii_case("identity")
+                    })
+                })
+            {
+                return Err(invalid(
+                    "server sent an unsupported compressed HTTP response",
+                ));
+            }
             let mut last_report = Instant::now();
             let mut body = Vec::new();
             let mut buffer = [0u8; 16 << 10];
@@ -223,7 +258,14 @@ impl Request {
                     Some(body.len() as u64),
                 ));
             }
-            Ok(encode_response(status as u16, &headers, &body))
+            Ok(encode_response(
+                status as u16,
+                headers
+                    .lines()
+                    .skip(1)
+                    .filter_map(|line| line.split_once(':')),
+                &body,
+            ))
         }
     }
 }
@@ -324,19 +366,21 @@ pub(super) fn failure(message: &str) -> Vec<u8> {
     tagged(2, message.as_bytes())
 }
 
-fn encode_response(status: u16, headers: &str, body: &[u8]) -> Vec<u8> {
+pub(super) fn encode_response<'a>(
+    status: u16,
+    headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+    body: &[u8],
+) -> Vec<u8> {
     let mut fields = BTreeMap::<String, String>::new();
-    for line in headers.lines().skip(1) {
-        if let Some((name, value)) = line.split_once(':') {
-            let value = value.trim();
-            fields
-                .entry(name.to_ascii_lowercase())
-                .and_modify(|current| {
-                    current.push_str(", ");
-                    current.push_str(value);
-                })
-                .or_insert_with(|| value.to_owned());
-        }
+    for (name, value) in headers {
+        let value = value.trim();
+        fields
+            .entry(name.to_ascii_lowercase())
+            .and_modify(|current| {
+                current.push_str(", ");
+                current.push_str(value);
+            })
+            .or_insert_with(|| value.to_owned());
     }
     let mut payload = vec![1];
     payload.extend(status.to_le_bytes());

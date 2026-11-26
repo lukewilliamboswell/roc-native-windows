@@ -159,20 +159,21 @@ pub(super) fn resolve(token: u64) -> Result<Entry> {
 }
 
 pub(super) fn selection(paths: Vec<PathBuf>) -> Option<(Vec<u8>, Vec<u64>)> {
+    let requested = paths.len();
+    if requested == 0 {
+        return None;
+    }
     let mut entries: Vec<_> = paths
         .into_iter()
         .filter_map(|path| Entry::new(path).ok())
         .collect();
-    if entries.is_empty() {
-        return None;
-    }
     let table = HANDLES.lock().unwrap();
     let accepted = entries
         .len()
         .min(MAX_HANDLES.saturating_sub(table.files.len()));
     let mut record = Vec::new();
     record.extend((accepted as u32).to_le_bytes());
-    record.extend(((entries.len() - accepted) as u32).to_le_bytes());
+    record.extend(((requested - accepted) as u32).to_le_bytes());
     drop(table);
     entries.truncate(accepted);
     let handles = mint_entries(entries, &mut record)?;
@@ -287,23 +288,32 @@ pub(super) fn open_dialog(window: HWND, multiple: bool) -> Result<Vec<PathBuf>> 
 pub(super) fn save(window: HWND, token: u64, start: u64, len: u64, name: &str) -> Result<()> {
     let entry = resolve(token)?;
     if let Some(destination) = dialog(window, Some(name), false)?.into_iter().next() {
-        if !start.checked_add(len).is_some_and(|end| end <= entry.size) {
-            return Err("save range is outside the file".into());
-        }
-        let mut input = File::open(&entry.path).map_err(file_error)?;
-        input.seek(SeekFrom::Start(start)).map_err(file_error)?;
-        if destination
-            .canonicalize()
-            .ok()
-            .is_some_and(|path| entry.path.canonicalize().ok() == Some(path))
-        {
-            let bytes = entry.read_range(start, len).map_err(file_error)?;
-            return std::fs::write(destination, bytes).map_err(file_error);
-        }
-        let mut output = File::create(destination).map_err(file_error)?;
-        if io::copy(&mut input.take(len), &mut output).map_err(file_error)? != len {
-            return Err("file changed while being saved".into());
-        }
+        write_range(entry, start, len, destination)?;
+    }
+    Ok(())
+}
+
+pub(super) fn save_to(token: u64, start: u64, len: u64, destination: PathBuf) -> Result<()> {
+    write_range(resolve(token)?, start, len, destination)
+}
+
+fn write_range(entry: Entry, start: u64, len: u64, destination: PathBuf) -> Result<()> {
+    if !start.checked_add(len).is_some_and(|end| end <= entry.size) {
+        return Err("save range is outside the file".into());
+    }
+    let mut input = File::open(&entry.path).map_err(file_error)?;
+    input.seek(SeekFrom::Start(start)).map_err(file_error)?;
+    if destination
+        .canonicalize()
+        .ok()
+        .is_some_and(|path| entry.path.canonicalize().ok() == Some(path))
+    {
+        let bytes = entry.read_range(start, len).map_err(file_error)?;
+        return std::fs::write(destination, bytes).map_err(file_error);
+    }
+    let mut output = File::create(destination).map_err(file_error)?;
+    if io::copy(&mut input.take(len), &mut output).map_err(file_error)? != len {
+        return Err("file changed while being saved".into());
     }
     Ok(())
 }
