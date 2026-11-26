@@ -168,6 +168,22 @@ repository-root `build/windows-diagnostics/` directory.
   Inspect the control's name, relationships, patterns, and events around the
   failing action. Compare them with the out-of-process probe and the
   xref:accessibility.adoc#verify-uia[keyboard and Narrator walkthrough].
+* For an automated accessibility scan, extract the portable CLI ZIP from
+  the https://github.com/microsoft/axe-windows/releases/tag/v2.4.2[Axe.Windows
+  release]. Open the example on the interactive desktop at the same privilege
+  level as the scanner. From the repository root, run the following with the
+  extracted CLI on `PATH` or use its full path. Replace `1234` with the app's PID.
++
+[source,powershell]
+----
+New-Item -ItemType Directory -Force build/windows-diagnostics/axe-windows
+AxeWindowsCLI.exe --processid 1234 --outputdirectory build/windows-diagnostics/axe-windows --alwayssavetestfile
+----
++
+Each scan checks the app's current UI Automation tree. Use the native probe and
+desktop walkthrough for workflow transitions, keyboard focus, and Narrator
+feedback. Open the `.a11ytest` report in Accessibility Insights for Windows
+to inspect individual findings.
 * For a slow or unresponsive app, use `wpr -profiles` to find a recording
   profile. From an elevated PowerShell, check `wpr -status`, then start a CPU
   recording with `wpr -start CPU -filemode`. Reproduce the action once and
