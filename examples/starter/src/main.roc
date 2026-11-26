@@ -12,6 +12,7 @@ store = Engine.store(
 	{
 		draft: Engine.cell(""),
 		items: Engine.cell(ReadingList.empty),
+		filter: Engine.cell(Ui.Selection.Selected("all")),
 	}.Engine.Cells,
 )
 
@@ -21,6 +22,15 @@ view : () -> Elem(Engine.StoreRoot(_))
 view = || {
 	draft = cells.draft.signal()
 	items = cells.items.signal()
+	filter = cells.filter.signal()
+	visible_items = { items, filter }.Signal.map(
+		|{ items: all, filter: choice }|
+			match choice {
+				Selected("unread") => all.keep_if(|item| !item.read)
+				Selected("read") => all.keep_if(|item| item.read)
+				_ => all
+			},
+	)
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
@@ -39,8 +49,18 @@ view = || {
 					Ui.button("Add", { enabled: draft.map(|text| !text.trim().is_empty()), on_press: Engine.handle_by(draft, |title, _| [change(Add(title)), cells.draft.set("")]) }),
 				],
 			),
+			Ui.combo_box({
+				label: "Status filter",
+				choices: Engine.const([
+					Ui.Choice.{ key: "all", label: "All statuses" },
+					Ui.Choice.{ key: "unread", label: "Unread" },
+					Ui.Choice.{ key: "read", label: "Read" },
+				]),
+				selected: filter,
+				on_select: Engine.handle(|value| [cells.filter.set(value)]),
+			}),
 			Engine.each(
-				items,
+				visible_items,
 				|item| item.title,
 				|row| {
 					item = row.item()
