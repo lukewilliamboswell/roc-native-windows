@@ -7,4 +7,6 @@
 - `windows.roc` uses the Roc packages `basic-cli`, `weaver`, and `roc-zip` at the content-addressed URLs in its header.
 - The separate MSI packaging utility uses `embala-msi` (MIT) and the crates in `packaging/Cargo.lock`. Its code runs on the packaging machine. MSI output contains the app payload and declarative Windows Installer data. See the [embala sources and license](https://github.com/hurricanehrndz/embala).
 
+- Counter ships `IBMPlexSans-Bold.ttf` from [IBM Plex Sans 1.3.6](https://github.com/IBM/plex/releases/tag/%40ibm%2Fplex-sans%401.3.6). HTTP ships `IBMPlexMono-Regular.ttf` from [IBM Plex Mono 2.5.0](https://github.com/IBM/plex/releases/tag/%40ibm%2Fplex-mono%402.5.0). Both are unmodified static TrueType files from the release archives' `fonts/complete/ttf` directories. Copyright © 2017 IBM Corp. with Reserved Font Name “Plex”. The SIL Open Font License 1.1 accompanies each font in its app's `assets/fonts/OFL.txt`.
+
 Before publishing binary releases, attach the corresponding license texts, component inventory, and provenance for the exact bundle. The repository ships source while native Windows and release verification are pending.
