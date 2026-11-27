@@ -81,6 +81,12 @@ view = || {
 						),
 						{
 							key: "mark",
+							icon: active.map(
+								|result| match result {
+									Ok(item) if !item.read => IconAsset("reading-list.ico")
+									_ => NoIcon
+								},
+							),
 							enabled: active.map(Try.is_ok),
 							on_press: Engine.handle_by(
 								active,
