@@ -50,6 +50,7 @@ view = || {
 	selected = cells.selected.signal()
 	format = cells.format.signal()
 	detail = cells.detail.signal()
+	on_files = Engine.handle_by(cells.next_key.signal(), receive)
 	selection = { queue, selected }.Signal.map(|{ queue: entries, selected: key }| active(entries, key))
 	group_selection = cells.group_selection.signal()
 	tree_selected = { selected, group_selection }.Signal.map(|value|
@@ -82,39 +83,47 @@ view = || {
 					Ui.text("Files"),
 				],
 			),
-			Ui.hstack(
-				{},
-				[
-					Ui.file_button("Choose Files…", { selection: MultipleFiles, on_files: Engine.handle_by(cells.next_key.signal(), receive) }),
-					Ui.folder_button("Choose Folder…", { on_folder: Engine.handle(receive_folder) }),
-					Ui.button("Clear", { on_press: Engine.handle(|_| reset(Clear)) }),
-				],
-			),
-			Ui.checkbox(
-				"Group by file type",
-				{ checked: cells.grouped.signal(), on_change: Engine.handle_by(selection, toggle_grouped) },
-			),
-			Engine.when(
-				cells.grouped.signal(),
-				|| Ui.vstack({}, [
-					Ui.tree_view({
-						label: "Picked files",
-						nodes: queue.map(group_nodes),
-						selected: tree_selected,
-						on_select: Engine.handle_by(queue, select_tree),
-						expanded: cells.expanded.signal(),
-						on_expand: Engine.handle(expand_group),
-						visible_rows: 5,
-					}),
-					Engine.when(group_summary.map(|title| !title.is_empty()), || Ui.text(group_summary), || Ui.vstack({}, [])),
-				]),
-				|| Ui.list_box({
-					label: "Picked files",
-					choices: queue.map(|entries| entries.map(|item| Ui.Choice.{ key: item.key, label: item.file.name() })),
-					selected,
-					on_select: Engine.handle_by(queue, select),
-					visible_rows: 4,
-				}),
+			Ui.file_drop_target(
+				{ label: "Drop files here", on_files },
+				Ui.vstack(
+					{},
+					[
+						Ui.hstack(
+							{},
+							[
+								Ui.file_button("Choose Files…", { selection: MultipleFiles, on_files }),
+								Ui.folder_button("Choose Folder…", { on_folder: Engine.handle(receive_folder) }),
+								Ui.button("Clear", { on_press: Engine.handle(|_| reset(Clear)) }),
+							],
+						),
+						Ui.checkbox(
+							"Group by file type",
+							{ checked: cells.grouped.signal(), on_change: Engine.handle_by(selection, toggle_grouped) },
+						),
+						Engine.when(
+							cells.grouped.signal(),
+							|| Ui.vstack({}, [
+								Ui.tree_view({
+									label: "Picked files",
+									nodes: queue.map(group_nodes),
+									selected: tree_selected,
+									on_select: Engine.handle_by(queue, select_tree),
+									expanded: cells.expanded.signal(),
+									on_expand: Engine.handle(expand_group),
+									visible_rows: 5,
+								}),
+								Engine.when(group_summary.map(|title| !title.is_empty()), || Ui.text(group_summary), || Ui.vstack({}, [])),
+							]),
+							|| Ui.list_box({
+								label: "Picked files",
+								choices: queue.map(|entries| entries.map(|item| Ui.Choice.{ key: item.key, label: item.file.name() })),
+								selected,
+								on_select: Engine.handle_by(queue, select),
+								visible_rows: 4,
+							}),
+						),
+					],
+				),
 			),
 			Ui.text_with(display.map(|state| state.name), { overflow: EllipsizeEnd }),
 			Ui.text(display.map(|state| state.size)),

@@ -1,8 +1,8 @@
 (demo "Inspect a text file"
-  (setup (window-size 480 620))
+  (setup (window-size 480 680))
   (steps
     (wait 600)
-    (files "tests/fixtures/hello.txt")
+    (drop-files (file-drop-target "Drop files here") "tests/fixtures/hello.txt")
     (await-work)
     (expect-visible (text "hello.txt"))
     (expect-visible (text "23 bytes"))
