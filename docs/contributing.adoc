@@ -76,7 +76,7 @@ Wine, and native Windows results each need their own record.
 
 [cols="1,2,3",options="header"]
 |===
-|WIP notes |Implemented in the examples or host |Windows verification or implementation remaining
+|Development tasks |Implemented in the examples or host |Windows verification remaining
 
 |01–09, 11–15
 |List and grid, native choices, edit, button, static labels, tabs, tree,
@@ -102,8 +102,7 @@ a real file from Explorer into Files.
 |19–20
 |Clipboard text, file and folder pickers, and scoped file results.
 |Check copy into a second app, native picker cancellation, Unicode
-names, and Save As on Windows. The stricter authority contract remains
-part of WIP 36.
+names, and Save As on Windows. Task 36 covers the authority checks.
 
 |23–27
 |Packaged and rendered rasters, Direct3D shader views, custom input,
