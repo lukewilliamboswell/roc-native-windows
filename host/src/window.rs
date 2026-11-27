@@ -476,14 +476,14 @@ impl App {
                         .node(key)
                         .attr("multiple")
                         .is_some_and(enabled_flag);
-                    let (owner, _, _) = self.surface.grid_coordinates();
+                    let (owner, _) = self.surface.grid_coordinates();
                     self.effects.pick(owner, node, listener.handler, multiple)?;
                 }
                 return Ok(());
             }
             (Control::FolderButton, BN_CLICKED) => {
                 if let Some((node, listener)) = self.tree.event(key, "change") {
-                    let (owner, _, _) = self.surface.grid_coordinates();
+                    let (owner, _) = self.surface.grid_coordinates();
                     self.effects.pick_folder(owner, node, listener.handler)?;
                 }
                 return Ok(());
@@ -815,12 +815,11 @@ impl App {
             if !self.select_key(key) {
                 continue;
             }
-            let (root, font, dpi) = self.surface.grid_coordinates();
             if let Some((hwnd, grid)) = self.surface.grid_mut(key) {
                 if let Some(intent) = grid.automation_action(key, hwnd, action)? {
                     self.deliver_grid(intent)?;
                 } else {
-                    grid.arrange(hwnd, root, font, dpi)?;
+                    self.surface.arrange(&self.tree)?;
                 }
             }
         }
@@ -860,7 +859,7 @@ impl App {
         let Some(grid_key) = self.surface.grid_key(handle) else {
             return Ok(false);
         };
-        let (root, font, dpi) = self.surface.grid_coordinates();
+        let (root, font) = self.surface.grid_coordinates();
         let (hwnd, grid) = self.surface.grid_mut(grid_key).unwrap();
         // SAFETY: The key modifiers refer to this UI thread's input queue.
         let shift = unsafe { GetKeyState(VK_SHIFT as i32) < 0 };
@@ -901,7 +900,7 @@ impl App {
                 _ => return Ok(false),
             }
         }
-        grid.arrange(hwnd, root, font, dpi)?;
+        self.surface.arrange(&self.tree)?;
         Ok(true)
     }
 
@@ -911,7 +910,7 @@ impl App {
         let Some(key) = self.surface.key(header.hwndFrom) else {
             return Ok(());
         };
-        let (root, font, dpi) = self.surface.grid_coordinates();
+        let (root, font) = self.surface.grid_coordinates();
         let Some((hwnd, grid)) = self.surface.grid_mut(key) else {
             return Ok(());
         };
@@ -926,11 +925,11 @@ impl App {
             LVN_ENDSCROLL => {
                 grid.position_editor(hwnd, root);
                 grid.publish_automation(hwnd);
+                return Ok(());
             }
             _ => return Ok(()),
         }
-        grid.arrange(hwnd, root, font, dpi)?;
-        Ok(())
+        self.surface.arrange(&self.tree)
     }
 
     fn dropped(&mut self, point: Option<POINT>, paths: Vec<PathBuf>) -> Result<()> {

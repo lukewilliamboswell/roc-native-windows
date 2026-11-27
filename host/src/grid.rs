@@ -3,7 +3,7 @@ use crate::accessibility::{Mount, NativeName};
 use crate::accessibility_grid::{self as automation, Action, Operation, Projection, Snapshot};
 use crate::grid_clipboard::ClipboardText;
 use crate::list_view::{ListView, Report};
-use crate::view::{child, position, scale, set_text, window_text};
+use crate::view::{child, position, set_text, window_text};
 use crate::wire::{Key, Listener, Tree};
 use std::collections::BTreeMap;
 use std::ptr::null_mut;
@@ -709,19 +709,7 @@ impl Grid {
         self.active == Some(self.report.projection().rows[row].mounted[column])
     }
 
-    pub(crate) fn arrange(
-        &mut self,
-        hwnd: HWND,
-        window: HWND,
-        font: HFONT,
-        dpi: u32,
-    ) -> Result<HWND> {
-        if self.status.is_null() {
-            self.status = child(window, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?;
-        }
-        let mut rect = win_rect(hwnd);
-        // SAFETY: A RECT contains two adjacent POINT values.
-        unsafe { MapWindowPoints(null_mut(), window, (&mut rect as *mut RECT).cast(), 2) };
+    pub(crate) fn status_text(&self) -> String {
         let mut status = if let Some(meta) = self.active.and_then(|key| self.cells.get(&key)) {
             let (row, column) = meta.position;
             let heading = &self.report.projection().columns[column].heading;
@@ -742,6 +730,23 @@ impl Grid {
                 right - left + 1
             ));
         }
+        status
+    }
+
+    pub(crate) fn arrange(
+        &mut self,
+        hwnd: HWND,
+        window: HWND,
+        font: HFONT,
+        status_height: i32,
+    ) -> Result<HWND> {
+        if self.status.is_null() {
+            self.status = child(window, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?;
+        }
+        let mut rect = win_rect(hwnd);
+        // SAFETY: A RECT contains two adjacent POINT values.
+        unsafe { MapWindowPoints(null_mut(), window, (&mut rect as *mut RECT).cast(), 2) };
+        let status = self.status_text();
         if window_text(self.status) != status {
             set_text(self.status, &status);
         }
@@ -756,7 +761,7 @@ impl Grid {
             rect.left,
             rect.bottom,
             rect.right - rect.left,
-            scale(dpi, 22),
+            status_height,
         );
         self.position_editor(hwnd, window);
         self.publish_automation(hwnd);

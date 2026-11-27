@@ -908,7 +908,7 @@ impl App {
     }
 
     fn grid_step(&mut self, key: Key, command: &str, args: &[&str]) -> Result<()> {
-        let (root, font, dpi) = self.surface.grid_coordinates();
+        let (root, font) = self.surface.grid_coordinates();
         let (hwnd, grid) = self
             .surface
             .grid_mut(key)
@@ -938,13 +938,13 @@ impl App {
                 if command == "begin-cell" {
                     grid.begin(hwnd, root, font)?;
                 }
-                grid.arrange(hwnd, root, font, dpi).map(|_| ())
+                self.surface.arrange(&self.tree)
             }
             ("select-cell-range", [first_row, first_column, last_row, last_column]) => {
                 let first = cell(grid, first_row, first_column)?;
                 let last = cell(grid, last_row, last_column)?;
                 grid.select_range(hwnd, first, last)?;
-                grid.arrange(hwnd, root, font, dpi).map(|_| ())
+                self.surface.arrange(&self.tree)
             }
             ("paste-grid", [text]) => {
                 let clipboard = crate::grid_clipboard::ClipboardText::from_text(text);

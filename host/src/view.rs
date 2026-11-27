@@ -1118,8 +1118,8 @@ impl Surface {
         })
     }
 
-    pub(crate) fn grid_coordinates(&self) -> (HWND, HFONT, u32) {
-        (self.window, self.font, self.dpi)
+    pub(crate) fn grid_coordinates(&self) -> (HWND, HFONT) {
+        (self.window, self.font)
     }
 
     pub(crate) fn grid_key(&self, hwnd: HWND) -> Option<Key> {
@@ -2016,7 +2016,7 @@ impl Surface {
                 );
             }
             after = if let Some(grid) = &mut view.grid {
-                grid.arrange(view.handle, self.window, self.font, self.dpi)?
+                grid.arrange(view.handle, self.window, self.font, item.detail_height)?
             } else if let Some(editor) = &view.civil_edit {
                 editor.note
             } else {
@@ -2166,7 +2166,12 @@ impl Surface {
                 Control::RadioGroup => {
                     scale(self.dpi, 24).max(line_height(dc) + scale(self.dpi, 6))
                 }
-                Control::DataGrid => scale(self.dpi, 22).max(line_height(dc) + scale(self.dpi, 4)),
+                Control::DataGrid => grid_status_height(
+                    dc,
+                    &view.grid.as_ref().unwrap().status_text(),
+                    max_width,
+                    self.dpi,
+                ),
                 _ => 0,
             };
             let (width, height) = natural(view, node, dc, self.dpi, max_width, detail_height);
@@ -2618,6 +2623,10 @@ pub(crate) fn text_width(dc: HDC, text: &str) -> i32 {
     size.cx
 }
 
+fn grid_status_height(dc: HDC, text: &str, width: i32, dpi: u32) -> i32 {
+    (wrap_height(dc, text, width) + scale(dpi, 4)).max(scale(dpi, 22))
+}
+
 fn line_height(dc: HDC) -> i32 {
     let mut metrics = TEXTMETRICW::default();
     // SAFETY: The DC contains the control font and metrics is writable.
@@ -2646,7 +2655,25 @@ fn wrap_height(dc: HDC, text: &str, width: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_lines, native_lines};
+    use super::*;
+
+    #[test]
+    fn grid_feedback_height_accounts_for_the_painted_font_and_wrapping() {
+        let fonts = Fonts::new(96, 2.0).unwrap();
+        let text = "Row 3 · Counted: Enter a non-negative whole number";
+        // SAFETY: This private DC uses the same font as a mounted grid.
+        unsafe {
+            let dc = CreateCompatibleDC(null_mut());
+            assert!(!dc.is_null());
+            let previous = SelectObject(dc, fonts.get(FontRole::Body));
+            let single = grid_status_height(dc, text, 1500, 96);
+            let wrapped = grid_status_height(dc, text, 160, 96);
+            SelectObject(dc, previous);
+            DeleteDC(dc);
+            assert!(single > scale(96, 22));
+            assert!(wrapped > single);
+        }
+    }
 
     #[test]
     fn multiline_values_preserve_spacing_and_empty_lines() {
