@@ -40,8 +40,25 @@ pub(crate) struct Snapshot {
     pub(crate) range: Option<(usize, usize, usize, usize)>,
     pub(crate) focused: bool,
     pub(crate) enabled: bool,
-    pub(crate) editor: Option<(Key, usize)>,
+    pub(crate) editor: Option<Editor>,
     pub(crate) scroll: [ScrollAxis; 2],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Editor {
+    pub(crate) cell: Key,
+    pub(crate) hwnd: usize,
+    pub(crate) generation: u64,
+    pub(crate) focused: bool,
+}
+
+impl Editor {
+    fn item(self) -> Item {
+        Item::Editor {
+            cell: self.cell,
+            generation: self.generation,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -79,11 +96,23 @@ impl Snapshot {
             Item::Grid => true,
             Item::Header(index) => self.headers.get(index).is_some(),
             Item::Cell(key) => self.cells.contains_key(&key),
+            Item::Editor { .. } => self.editor.is_some_and(|editor| editor.item() == node),
             Item::Feedback(key) => self
                 .cells
                 .get(&key)
                 .is_some_and(|cell| !cell.feedback.is_empty()),
         }
+    }
+
+    fn focus(&self) -> Option<Item> {
+        if !self.enabled {
+            return None;
+        }
+        if let Some(editor) = self.editor.filter(|editor| editor.focused) {
+            return Some(editor.item());
+        }
+        self.focused
+            .then(|| self.active.map_or(Item::Grid, Item::Cell))
     }
 
     fn selected(&self, cell: &Cell) -> bool {
@@ -120,6 +149,7 @@ impl Snapshot {
             Item::Header(index) => self.headers[index].1,
             Item::Cell(key) => self.cells[&key].bounds,
             Item::Feedback(_) => UiaRect::default(),
+            Item::Editor { cell, .. } => self.cells[&cell].bounds,
         }
     }
 
@@ -130,12 +160,18 @@ impl Snapshot {
                 self.node_at((self.headers.len() + self.order.len()).checked_sub(1)?)
             }
             (Item::Grid, _) => None,
-            (Item::Feedback(key), NavigateDirection_Parent) => Some(Item::Cell(key)),
-            (Item::Feedback(_), _) => None,
+            (Item::Editor { cell, .. }, NavigateDirection_Parent)
+            | (Item::Feedback(cell), NavigateDirection_Parent) => Some(Item::Cell(cell)),
+            (Item::Editor { cell, .. }, NavigateDirection_NextSibling) => self.feedback(cell),
+            (Item::Feedback(cell), NavigateDirection_PreviousSibling) => self.editor_item(cell),
+            (Item::Editor { .. } | Item::Feedback(_), _) => None,
             (_, NavigateDirection_Parent) => Some(Item::Grid),
-            (Item::Cell(key), NavigateDirection_FirstChild | NavigateDirection_LastChild) => self
-                .contains(Item::Feedback(key))
-                .then_some(Item::Feedback(key)),
+            (Item::Cell(key), NavigateDirection_FirstChild) => {
+                self.editor_item(key).or_else(|| self.feedback(key))
+            }
+            (Item::Cell(key), NavigateDirection_LastChild) => {
+                self.feedback(key).or_else(|| self.editor_item(key))
+            }
             (_, NavigateDirection_NextSibling) => self.node_at(self.index(from)? + 1),
             (_, NavigateDirection_PreviousSibling) => {
                 self.node_at(self.index(from)?.checked_sub(1)?)
@@ -143,13 +179,25 @@ impl Snapshot {
             _ => None,
         }
     }
+
+    fn editor_item(&self, cell: Key) -> Option<Item> {
+        self.editor
+            .filter(|editor| editor.cell == cell)
+            .map(Editor::item)
+    }
+
+    fn feedback(&self, cell: Key) -> Option<Item> {
+        self.contains(Item::Feedback(cell))
+            .then_some(Item::Feedback(cell))
+    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
     Grid,
     Header(usize),
     Cell(Key),
+    Editor { cell: Key, generation: u64 },
     Feedback(Key),
 }
 
@@ -159,6 +207,7 @@ pub(crate) enum Operation {
     ExtendSelection,
     Reveal,
     Focus,
+    FocusEditor(u64),
     Scroll([i32; 2]),
 }
 
@@ -171,6 +220,43 @@ pub(crate) struct Action {
 struct State {
     snapshot: Option<Arc<Snapshot>>,
     actions: VecDeque<Action>,
+}
+
+impl State {
+    fn snapshot(&self, item: Item) -> windows::core::Result<&Snapshot> {
+        self.snapshot
+            .as_deref()
+            .filter(|s| s.contains(item))
+            .ok_or_else(unavailable)
+    }
+
+    fn action(&mut self, item: Item, operation: Operation) -> windows::core::Result<()> {
+        let snapshot = self.snapshot(item)?;
+        let key = match item {
+            Item::Grid if matches!(operation, Operation::Focus | Operation::Scroll(_)) => {
+                snapshot.active.ok_or_else(unsupported)?
+            }
+            Item::Cell(key) | Item::Editor { cell: key, .. } => key,
+            _ => return Err(unsupported()),
+        };
+        let cell = snapshot.cells.get(&key).ok_or_else(unavailable)?;
+        if !snapshot.enabled {
+            return Err(Error::from_hresult(HRESULT(UIA_E_ELEMENTNOTENABLED as i32)));
+        }
+        if matches!(operation, Operation::SetValue(_))
+            && (cell.read_only || snapshot.editor.is_some())
+        {
+            return Err(unsupported());
+        }
+        if self.actions.len() >= MAX_ACTIONS {
+            return Err(Error::from_hresult(HRESULT(UIA_E_TIMEOUT as i32)));
+        }
+        self.actions.push_back(Action {
+            cell: key,
+            operation,
+        });
+        Ok(())
+    }
 }
 
 pub(crate) struct Projection {
@@ -196,12 +282,37 @@ impl Projection {
         self.state.lock().unwrap().snapshot = Some(Arc::new(snapshot));
     }
 
-    pub(crate) fn set_focus(&self, focused: bool) {
+    pub(crate) fn set_interaction(&self, enabled: bool, focused: bool, editor_focus: bool) {
         let mut state = self.state.lock().unwrap();
+        if !enabled {
+            state.actions.clear();
+        }
         if let Some(snapshot) = &mut state.snapshot
-            && snapshot.focused != focused
+            && (snapshot.enabled != enabled
+                || snapshot.focused != focused
+                || snapshot
+                    .editor
+                    .is_some_and(|editor| editor.focused != editor_focus))
         {
-            Arc::make_mut(snapshot).focused = focused;
+            let snapshot = Arc::make_mut(snapshot);
+            snapshot.enabled = enabled;
+            snapshot.focused = focused;
+            if let Some(editor) = &mut snapshot.editor {
+                editor.focused = editor_focus;
+            }
+        }
+    }
+
+    pub(crate) fn mount_editor(&self, hwnd: RawHwnd, editor: Editor) -> crate::Result<Mount> {
+        Mount::new(
+            hwnd,
+            Provider::element(self.hwnd, self.state.clone(), editor.item()),
+        )
+    }
+
+    pub(crate) fn retire_editor(&self) {
+        if let Some(snapshot) = &mut self.state.lock().unwrap().snapshot {
+            Arc::make_mut(snapshot).editor = None;
         }
     }
 
@@ -222,7 +333,10 @@ impl Projection {
         }
         let Some(prior) = prior else { return };
         let current = self.reported.as_ref().unwrap();
-        if prior.order != current.order || prior.headers.len() != current.headers.len() {
+        if prior.order != current.order
+            || prior.headers.len() != current.headers.len()
+            || prior.editor.map(Editor::item) != current.editor.map(Editor::item)
+        {
             // SAFETY: The retained fragment provider is live and null runtime ID names its root.
             unsafe {
                 let _ = UiaRaiseStructureChangedEvent(
@@ -233,14 +347,16 @@ impl Projection {
                 );
             }
         }
-        if current.focused
-            && (prior.active != current.active || !prior.focused)
-            && let Some(key) = current.active
+        if let Some(item) = current.focus()
+            && Some(item) != prior.focus()
+            && !matches!(item, Item::Editor { .. })
         {
-            let cell = Provider::element(self.hwnd, self.state.clone(), Item::Cell(key));
-            // SAFETY: The focused cell was read from the committed projection.
+            // Windows raises focus for the native EDIT. The grid supplies its
+            // own event when focus returns to an internal cell.
+            let provider = Provider::element(self.hwnd, self.state.clone(), item);
+            // SAFETY: The focused item was read from the committed projection.
             unsafe {
-                let _ = UiaRaiseAutomationEvent(&cell, UIA_AutomationFocusChangedEventId);
+                let _ = UiaRaiseAutomationEvent(&provider, UIA_AutomationFocusChangedEventId);
             }
         }
         if prior.range != current.range {
@@ -296,7 +412,11 @@ struct Provider {
 
 impl Provider {
     fn element(hwnd: usize, state: Arc<Mutex<State>>, item: Item) -> IRawElementProviderSimple {
-        let provider: SimpleAbi = Self { hwnd, state, item }.into();
+        let provider: SimpleAbi = if matches!(item, Item::Editor { .. }) {
+            EditorProvider { hwnd, state, item }.into()
+        } else {
+            Self { hwnd, state, item }.into()
+        };
         provider.into_provider()
     }
 }
@@ -307,12 +427,7 @@ impl Provider_Impl {
         read: impl FnOnce(&Snapshot) -> windows::core::Result<T>,
     ) -> windows::core::Result<T> {
         let state = self.state.lock().unwrap();
-        let snapshot = state
-            .snapshot
-            .as_ref()
-            .filter(|s| s.contains(self.item))
-            .ok_or_else(unavailable)?;
-        read(snapshot)
+        read(state.snapshot(self.item)?)
     }
 
     fn other(&self, item: Item) -> IRawElementProviderSimple {
@@ -327,31 +442,7 @@ impl Provider_Impl {
     }
 
     fn action(&self, operation: Operation) -> windows::core::Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let snapshot = state.snapshot.as_ref().ok_or_else(unavailable)?;
-        let key = match self.item {
-            Item::Grid if matches!(operation, Operation::Focus | Operation::Scroll(_)) => {
-                snapshot.active.ok_or_else(unsupported)?
-            }
-            _ => self.cell()?,
-        };
-        let cell = snapshot.cells.get(&key).ok_or_else(unavailable)?;
-        if !snapshot.enabled {
-            return Err(Error::from_hresult(HRESULT(UIA_E_ELEMENTNOTENABLED as i32)));
-        }
-        if matches!(operation, Operation::SetValue(_))
-            && (cell.read_only || snapshot.editor.is_some())
-        {
-            return Err(unsupported());
-        }
-        if state.actions.len() >= MAX_ACTIONS {
-            return Err(Error::from_hresult(HRESULT(UIA_E_TIMEOUT as i32)));
-        }
-        state.actions.push_back(Action {
-            cell: key,
-            operation,
-        });
-        Ok(())
+        self.state.lock().unwrap().action(self.item, operation)
     }
 }
 
@@ -398,10 +489,9 @@ impl IRawElementProviderSimple_Impl for Provider_Impl {
 
     fn GetPropertyValue(&self, id: UIA_PROPERTY_ID) -> windows::core::Result<VARIANT> {
         self.with(|s| {
-            let cell = if let Item::Cell(key) = self.item {
-                s.cells.get(&key)
-            } else {
-                None
+            let cell = match self.item {
+                Item::Cell(key) => s.cells.get(&key),
+                _ => None,
             };
             Ok(match id {
                 UIA_ControlTypePropertyId => integer(
@@ -410,6 +500,7 @@ impl IRawElementProviderSimple_Impl for Provider_Impl {
                         Item::Header(_) => UIA_HeaderItemControlTypeId,
                         Item::Cell(_) => UIA_DataItemControlTypeId,
                         Item::Feedback(_) => UIA_TextControlTypeId,
+                        Item::Editor { .. } => unreachable!("editor has its own provider"),
                     }
                     .0,
                 ),
@@ -418,6 +509,7 @@ impl IRawElementProviderSimple_Impl for Provider_Impl {
                     Item::Header(index) => &s.headers[index].0,
                     Item::Cell(key) => &s.headers[s.cells[&key].column].0,
                     Item::Feedback(key) => &s.cells[&key].feedback,
+                    Item::Editor { .. } => unreachable!("editor has its own provider"),
                 }),
                 UIA_IsControlElementPropertyId | UIA_IsContentElementPropertyId => boolean(true),
                 UIA_IsEnabledPropertyId => boolean(s.enabled),
@@ -425,21 +517,10 @@ impl IRawElementProviderSimple_Impl for Provider_Impl {
                 UIA_IsKeyboardFocusablePropertyId => {
                     boolean(s.enabled && matches!(self.item, Item::Grid | Item::Cell(_)))
                 }
-                UIA_HasKeyboardFocusPropertyId => boolean(
-                    s.focused
-                        && match self.item {
-                            Item::Grid => s.active.is_none(),
-                            Item::Cell(key) => Some(key) == s.active,
-                            _ => false,
-                        },
-                ),
+                UIA_HasKeyboardFocusPropertyId => boolean(s.focus() == Some(self.item)),
                 UIA_HelpTextPropertyId if cell.is_some() => string(&cell.unwrap().feedback),
-                UIA_DescribedByPropertyId
-                    if let Item::Cell(key) = self.item
-                        && s.contains(Item::Feedback(key)) =>
-                {
-                    let provider = self.other(Item::Feedback(key)).cast()?;
-                    provider_list(array_for([provider])?)
+                UIA_DescribedByPropertyId if let Item::Cell(key) = self.item => {
+                    description(s, self.hwnd, &self.state, key)?
                 }
                 _ => VARIANT::default(),
             })
@@ -471,6 +552,7 @@ impl IRawElementProviderFragment_Impl for Provider_Impl {
         self.with(|_| {
             let (kind, key) = match self.item {
                 Item::Grid => return Ok(null_mut()),
+                Item::Editor { .. } => unreachable!("editor has its own provider"),
                 Item::Header(index) => (1, index),
                 Item::Cell(key) => (2, key),
                 Item::Feedback(key) => (3, key),
@@ -515,7 +597,9 @@ impl IRawElementProviderFragmentRoot_Impl for Provider_Impl {
             let item = s
                 .cells
                 .iter()
-                .find_map(|(&key, cell)| hit(cell.bounds).then_some(Item::Cell(key)))
+                .find_map(|(&key, cell)| {
+                    hit(cell.bounds).then(|| s.editor_item(key).unwrap_or(Item::Cell(key)))
+                })
                 .or_else(|| {
                     s.headers
                         .iter()
@@ -528,43 +612,112 @@ impl IRawElementProviderFragmentRoot_Impl for Provider_Impl {
     }
 
     fn GetFocus(&self) -> windows::core::Result<IRawElementProviderFragment> {
-        self.with(|s| {
-            if s.focused {
-                self.other(s.active.map_or(Item::Grid, Item::Cell)).cast()
-            } else {
-                Err(absent())
-            }
+        self.with(|s| self.other(s.focus().ok_or_else(absent)?).cast())
+    }
+}
+
+// Keep the native EDIT's patterns, but attach its host to the cell fragment.
+#[implement(SimpleAbi, FragmentAbi)]
+struct EditorProvider {
+    hwnd: usize,
+    state: Arc<Mutex<State>>,
+    item: Item,
+}
+
+impl EditorProvider_Impl {
+    fn with<T>(
+        &self,
+        read: impl FnOnce(&Snapshot, Editor) -> windows::core::Result<T>,
+    ) -> windows::core::Result<T> {
+        let state = self.state.lock().unwrap();
+        let snapshot = state.snapshot(self.item)?;
+        read(snapshot, snapshot.editor.ok_or_else(unavailable)?)
+    }
+
+    fn other(&self, item: Item) -> IRawElementProviderSimple {
+        Provider::element(self.hwnd, self.state.clone(), item)
+    }
+}
+
+impl IRawElementProviderSimple_Impl for EditorProvider_Impl {
+    fn ProviderOptions(&self) -> windows::core::Result<ProviderOptions> {
+        Ok(ProviderOptions_ServerSideProvider | ProviderOptions_OverrideProvider)
+    }
+
+    fn GetPatternProvider(&self, _: UIA_PATTERN_ID) -> windows::core::Result<IUnknown> {
+        self.with(|_, _| Err(absent()))
+    }
+
+    fn GetPropertyValue(&self, id: UIA_PROPERTY_ID) -> windows::core::Result<VARIANT> {
+        self.with(|s, editor| {
+            let cell = &s.cells[&editor.cell];
+            Ok(match id {
+                UIA_NamePropertyId => string(&s.headers[cell.column].0),
+                UIA_HelpTextPropertyId => string(&cell.feedback),
+                UIA_DescribedByPropertyId => description(s, self.hwnd, &self.state, editor.cell)?,
+                _ => VARIANT::default(),
+            })
         })
     }
-}
 
-#[implement(SimpleAbi)]
-struct EditorOverride {
-    hwnd: usize,
-    context: IRawElementProviderSimple,
-}
-
-impl IRawElementProviderSimple_Impl for EditorOverride_Impl {
-    fn ProviderOptions(&self) -> windows::core::Result<ProviderOptions> {
-        Ok(ProviderOptions_OverrideProvider)
-    }
-    fn GetPatternProvider(&self, _: UIA_PATTERN_ID) -> windows::core::Result<IUnknown> {
-        Err(absent())
-    }
-    fn GetPropertyValue(&self, id: UIA_PROPERTY_ID) -> windows::core::Result<VARIANT> {
-        if matches!(
-            id,
-            UIA_NamePropertyId | UIA_HelpTextPropertyId | UIA_DescribedByPropertyId
-        ) {
-            // SAFETY: The cell provider owns its synchronized retained projection.
-            unsafe { self.context.GetPropertyValue(id) }
-        } else {
-            Ok(VARIANT::default())
-        }
-    }
     fn HostRawElementProvider(&self) -> windows::core::Result<IRawElementProviderSimple> {
-        // SAFETY: UIA resolves only an extant edit window.
-        unsafe { UiaHostProviderFromHwnd(HWND(self.hwnd as _)) }
+        let hwnd = self.with(|_, editor| Ok(editor.hwnd))?;
+        // SAFETY: This HWND is the currently mounted editable child.
+        unsafe { UiaHostProviderFromHwnd(HWND(hwnd as _)) }
+    }
+}
+
+impl IRawElementProviderFragment_Impl for EditorProvider_Impl {
+    fn Navigate(
+        &self,
+        direction: NavigateDirection,
+    ) -> windows::core::Result<IRawElementProviderFragment> {
+        self.with(|s, _| {
+            self.other(s.navigation(self.item, direction).ok_or_else(absent)?)
+                .cast()
+        })
+    }
+
+    fn GetRuntimeId(&self) -> windows::core::Result<*mut SAFEARRAY> {
+        // UIA uses the native EDIT HWND's runtime identity.
+        self.with(|_, _| Ok(null_mut()))
+    }
+
+    fn BoundingRectangle(&self) -> windows::core::Result<UiaRect> {
+        self.with(|s, _| Ok(s.rectangle(self.item)))
+    }
+
+    fn GetEmbeddedFragmentRoots(&self) -> windows::core::Result<*mut SAFEARRAY> {
+        self.with(|_, _| Ok(null_mut()))
+    }
+
+    fn SetFocus(&self) -> windows::core::Result<()> {
+        let Item::Editor { generation, .. } = self.item else {
+            return Err(unsupported());
+        };
+        self.state
+            .lock()
+            .unwrap()
+            .action(self.item, Operation::FocusEditor(generation))
+    }
+
+    fn FragmentRoot(&self) -> windows::core::Result<IRawElementProviderFragmentRoot> {
+        self.with(|_, _| self.other(Item::Grid).cast())
+    }
+}
+
+fn description(
+    snapshot: &Snapshot,
+    hwnd: usize,
+    state: &Arc<Mutex<State>>,
+    key: Key,
+) -> windows::core::Result<VARIANT> {
+    let item = Item::Feedback(key);
+    if snapshot.contains(item) {
+        let provider = Provider::element(hwnd, state.clone(), item).cast()?;
+        Ok(provider_list(array_for([provider])?))
+    } else {
+        Ok(VARIANT::default())
     }
 }
 
@@ -574,16 +727,11 @@ impl IRawElementProviderHwndOverride_Impl for Provider_Impl {
         hwnd: HWND,
     ) -> windows::core::Result<IRawElementProviderSimple> {
         self.with(|s| {
-            let (key, editor) = s
+            let editor = s
                 .editor
-                .filter(|(_, editor)| *editor == hwnd.0 as usize)
+                .filter(|editor| editor.hwnd == hwnd.0 as usize)
                 .ok_or_else(absent)?;
-            let provider: SimpleAbi = EditorOverride {
-                hwnd: editor,
-                context: self.other(Item::Cell(key)),
-            }
-            .into();
-            Ok(provider.into_provider())
+            Ok(self.other(editor.item()))
         })
     }
 }
@@ -899,10 +1047,55 @@ mod tests {
             assert_eq!(action.cell, 11);
             assert!(matches!(action.operation, Operation::SetValue(draft) if draft == "7"));
 
+            let before = Editor {
+                cell: 11,
+                hwnd: 1,
+                generation: 1,
+                focused: true,
+            };
             {
                 let mut state = state.lock().unwrap();
-                Arc::make_mut(state.snapshot.as_mut().unwrap()).enabled = false;
+                let snapshot = Arc::make_mut(state.snapshot.as_mut().unwrap());
+                snapshot.active = Some(11);
+                snapshot.focused = true;
+                snapshot.editor = Some(before);
+                snapshot.cells.get_mut(&11).unwrap().feedback = "Invalid count".into();
+                assert_eq!(snapshot.focus(), Some(before.item()));
+                assert_eq!(
+                    snapshot.navigation(Item::Cell(11), NavigateDirection_FirstChild),
+                    Some(before.item())
+                );
+                assert_eq!(
+                    snapshot.navigation(before.item(), NavigateDirection_Parent),
+                    Some(Item::Cell(11))
+                );
             }
+            let fragment_root = root.cast::<IRawElementProviderFragmentRoot>().unwrap();
+            let edit = fragment_root.GetFocus().unwrap();
+            assert!(edit.GetRuntimeId().unwrap().is_null());
+            let parent = edit.Navigate(NavigateDirection_Parent).unwrap();
+            let id = parent.GetRuntimeId().unwrap();
+            assert!(!id.is_null());
+            SafeArrayDestroy(id).unwrap();
+            assert!(value.SetValue(windows::core::w!("While editing")).is_err());
+            edit.SetFocus().unwrap();
+            let action = state.lock().unwrap().actions.pop_front().unwrap();
+            assert!(matches!(action.operation, Operation::FocusEditor(1)));
+            {
+                let mut state = state.lock().unwrap();
+                let snapshot = Arc::make_mut(state.snapshot.as_mut().unwrap());
+                snapshot.editor = Some(Editor {
+                    generation: 2,
+                    ..before
+                });
+                assert!(!snapshot.contains(before.item()));
+                snapshot.enabled = false;
+                assert_eq!(snapshot.focus(), None);
+            }
+            assert_eq!(
+                edit.SetFocus().unwrap_err().code().0,
+                UIA_E_ELEMENTNOTAVAILABLE as i32
+            );
             assert_eq!(
                 value.SetValue(windows::core::w!("9")).unwrap_err().code().0,
                 UIA_E_ELEMENTNOTENABLED as i32

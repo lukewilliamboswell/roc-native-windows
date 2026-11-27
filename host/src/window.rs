@@ -548,6 +548,7 @@ impl App {
             Some(window_proc),
         )?;
         self.calendars.insert(surface, calendar);
+        self.surface.refresh_automation_interaction();
         Ok(())
     }
 
@@ -569,6 +570,7 @@ impl App {
         let calendar = self.calendars.remove(&owner).unwrap();
         let origin = calendar.origin;
         calendar.close(true);
+        self.surface.refresh_automation_interaction();
         if let Some(value) = value
             && self.select_key(origin.field)
             && self.surface.selected() == owner

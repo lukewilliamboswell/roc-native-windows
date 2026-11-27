@@ -1098,13 +1098,21 @@ impl Surface {
         Some((view.handle, view.grid.as_mut()?))
     }
 
+    pub(crate) fn refresh_automation_interaction(&self) {
+        for view in self.views.values() {
+            if let Some(grid) = &view.grid {
+                grid.refresh_automation_interaction(view.handle);
+            }
+        }
+    }
+
     pub(crate) fn automation_actions(
         &mut self,
     ) -> impl Iterator<Item = (Key, crate::accessibility_grid::Action)> + '_ {
         self.views.iter_mut().flat_map(|(&key, view)| {
             let hwnd = view.handle;
             view.grid.iter_mut().flat_map(move |grid| {
-                grid.refresh_automation_focus(hwnd);
+                grid.refresh_automation_interaction(hwnd);
                 grid.take_automation().map(move |action| (key, action))
             })
         })

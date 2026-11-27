@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Automation;
@@ -176,6 +177,28 @@ public static class RocWindowsAccessibility
         var sameCell = data.GetItem(0, 2);
         Require(Value(sameCell) == "7" && identity.SequenceEqual(sameCell.GetRuntimeId()),
                 "Rejected edit changed the committed value or live cell identity.");
+        sameCell.SetFocus();
+        WaitFor("Counted cell takes focus", () => CurrentFocus(sameCell));
+        PostKey(grid, 0x71); // F2 enters a native EDIT.
+        var editor = WaitFor("native Counted editor takes focus", () =>
+        {
+            var focused = AutomationElement.FocusedElement;
+            return focused != null && focused.Current.ControlType == ControlType.Edit &&
+                   focused.Current.ProcessId == root.Current.ProcessId &&
+                   focused.Current.Name == "Counted" ? focused : null;
+        });
+        var parent = TreeWalker.RawViewWalker.GetParent(editor);
+        Require(parent != null && Automation.Compare(parent, sameCell),
+                "The focused EDIT is missing from the Counted cell's fragment.");
+        Require(Value(editor) == "7" && editor.Current.HelpText.Contains("whole number"),
+                "The EDIT did not expose its draft and the cell's validation.");
+        Pattern<TextPattern>(editor, TextPattern.Pattern);
+        SetValue(editor, "9");
+        Require(Value(editor) == "9" && Value(sameCell) == "7",
+                "The EDIT and the committed cell must expose their own values.");
+        PostKey(editor, 0x1b); // Escape cancels the draft and refocuses the cell.
+        WaitFor("Counted cell regains focus", () => CurrentFocus(sameCell));
+        Require(Value(sameCell) == "7", "Escape committed the editor draft.");
         Invoke(Find(root, "Reverse order", ControlType.Button));
         WaitFor("old cell retired after sort and paging", () =>
         {
@@ -183,6 +206,23 @@ public static class RocWindowsAccessibility
             catch (ElementNotAvailableException) { return grid; }
         });
     }
+
+    private static AutomationElement CurrentFocus(AutomationElement expected)
+    {
+        var focused = AutomationElement.FocusedElement;
+        return focused != null && Automation.Compare(focused, expected) ? focused : null;
+    }
+
+    private static void PostKey(AutomationElement target, int key)
+    {
+        var hwnd = new IntPtr(target.Current.NativeWindowHandle);
+        Require(hwnd != IntPtr.Zero && PostMessage(hwnd, 0x100, new UIntPtr((uint)key), new IntPtr(1)),
+                "Could not post a native key to " + target.Current.Name + ".");
+    }
+
+    [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(IntPtr window, uint message, UIntPtr key, IntPtr flags);
 
     private static AutomationElement TopLevel(int process, string caption)
     {

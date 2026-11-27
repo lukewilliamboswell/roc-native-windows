@@ -431,7 +431,14 @@ mod native {
                     unsafe { ShowWindow(hwnd, SW_SHOWNORMAL) };
                 }
             }
+            self.refresh_automation_interaction();
             Ok(())
+        }
+
+        pub(crate) fn refresh_automation_interaction(&self) {
+            for entry in self.mounted.values() {
+                entry.surface.refresh_automation_interaction();
+            }
         }
 
         fn title_for<'a>(&'a self, wanted: &'a Declaration) -> &'a str {

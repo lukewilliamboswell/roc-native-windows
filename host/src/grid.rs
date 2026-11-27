@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::accessibility::NativeName;
+use crate::accessibility::{Mount, NativeName};
 use crate::accessibility_grid::{self as automation, Action, Operation, Projection, Snapshot};
 use crate::grid_clipboard::ClipboardText;
 use crate::list_view::{ListView, Report};
@@ -51,11 +51,25 @@ enum IntentSource {
 struct Editing {
     handle: HWND,
     cell: Cell,
+    generation: u64,
     name: Option<NativeName>,
+    automation: Option<Mount>,
+}
+
+impl Editing {
+    fn automation(&self, focus: HWND) -> automation::Editor {
+        automation::Editor {
+            cell: self.cell.key,
+            hwnd: self.handle as usize,
+            generation: self.generation,
+            focused: self.handle == focus,
+        }
+    }
 }
 
 impl Drop for Editing {
     fn drop(&mut self) {
+        drop(self.automation.take());
         drop(self.name.take());
         // SAFETY: The grid owns this live EDIT HWND on the UI thread.
         unsafe { DestroyWindow(self.handle) };
@@ -71,6 +85,7 @@ pub(crate) struct Grid {
     paste: Option<(u32, Listener)>,
     revision: u64,
     editing: Option<Editing>,
+    edit_generation: u64,
     status: HWND,
     enabled: bool,
     automation: Option<Projection>,
@@ -221,7 +236,14 @@ impl Grid {
     }
 
     pub(crate) fn cancel(&mut self, hwnd: HWND, refocus: bool) {
-        if self.editing.take().is_some() && refocus && self.enabled {
+        let Some(editing) = self.editing.take() else {
+            return;
+        };
+        if let Some(automation) = &self.automation {
+            automation.retire_editor();
+        }
+        drop(editing);
+        if refocus && self.interaction_enabled(hwnd) {
             // SAFETY: The report is on the UI thread and outlives the editor.
             unsafe { SetFocus(hwnd) };
         }
@@ -306,7 +328,11 @@ impl Grid {
         hwnd: HWND,
         action: Action,
     ) -> Result<Option<Intent>> {
-        let Some(cell) = self.cells.get(&action.cell).filter(|_| self.enabled) else {
+        let Some(cell) = self
+            .cells
+            .get(&action.cell)
+            .filter(|_| self.interaction_enabled(hwnd))
+        else {
             return Ok(None);
         };
         let (row, column) = cell.position;
@@ -333,6 +359,16 @@ impl Grid {
                 self.activate(hwnd, row, column)?;
                 // SAFETY: The grid is live, enabled, and on this UI thread.
                 unsafe { SetFocus(hwnd) };
+            }
+            Operation::FocusEditor(generation) => {
+                if let Some(editing) = self
+                    .editing
+                    .as_ref()
+                    .filter(|edit| edit.generation == generation && edit.cell.key == action.cell)
+                {
+                    // SAFETY: This EDIT still belongs to the enabled grid.
+                    unsafe { SetFocus(editing.handle) };
+                }
             }
             Operation::Scroll([x, y]) => {
                 let horizontal = scroll_axis(hwnd, SB_HORZ);
@@ -421,22 +457,36 @@ impl Grid {
             bounds: rect_to_uia(win_rect(hwnd)),
             active: self.active,
             range: self.range(),
-            focused: focus == hwnd || self.editing(focus),
-            enabled: self.enabled,
+            focused: focus == hwnd,
+            enabled: self.interaction_enabled(hwnd),
             editor: self
                 .editing
                 .as_ref()
-                .map(|editing| (editing.cell.key, editing.handle as usize)),
+                .map(|editing| editing.automation(focus)),
             scroll: [scroll_axis(hwnd, SB_HORZ), scroll_axis(hwnd, SB_VERT)],
         });
     }
 
-    pub(crate) fn refresh_automation_focus(&self, hwnd: HWND) {
+    pub(crate) fn refresh_automation_interaction(&self, hwnd: HWND) {
         if let Some(automation) = &self.automation {
             // SAFETY: GetFocus refers to the UI thread that owns the live grid.
             let focus = unsafe { GetFocus() };
-            automation.set_focus(focus == hwnd || self.editing(focus));
+            automation.set_interaction(
+                self.interaction_enabled(hwnd),
+                focus == hwnd,
+                self.editing(focus),
+            );
         }
+    }
+
+    fn interaction_enabled(&self, hwnd: HWND) -> bool {
+        // SAFETY: These checks run on the UI thread with the mounted grid HWND.
+        self.enabled
+            && unsafe {
+                IsWindowVisible(hwnd) != 0
+                    && IsWindowEnabled(hwnd) != 0
+                    && IsWindowEnabled(GetAncestor(hwnd, GA_ROOT)) != 0
+            }
     }
 }
 
@@ -554,11 +604,25 @@ impl Grid {
         if let Some(annotation) = &mut name {
             annotation.help(&self.cells[&cell.key].feedback);
         }
-        self.editing = Some(Editing { handle, cell, name });
+        self.edit_generation = self.edit_generation.wrapping_add(1);
+        let mut editing = Editing {
+            handle,
+            cell,
+            generation: self.edit_generation,
+            name,
+            automation: None,
+        };
+        if let Some(automation) = &self.automation {
+            editing.automation =
+                Some(automation.mount_editor(handle, editing.automation(null_mut()))?);
+        }
+        self.editing = Some(editing);
         self.position_editor(hwnd, window);
+        self.publish_automation(hwnd);
         if self.editing.is_some() {
             // SAFETY: The transient editor is live and arranged.
             unsafe { SetFocus(handle) };
+            self.refresh_automation_interaction(hwnd);
         }
         Ok(())
     }
@@ -814,4 +878,45 @@ fn range_rect(hwnd: HWND, top: usize, left: usize, bottom: usize, right: usize) 
 
 fn address<T>(value: &mut T) -> isize {
     std::ptr::from_mut(value) as isize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::windows::OwnedWindow;
+    use std::ptr::null;
+
+    #[test]
+    fn native_owner_must_be_enabled_for_grid_automation() {
+        // SAFETY: Both native windows belong to this test thread. The owner
+        // stays offscreen and does not activate the test process.
+        unsafe {
+            let owner = OwnedWindow(CreateWindowExW(
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!("Grid automation test"),
+                WS_POPUP,
+                -400,
+                -400,
+                100,
+                100,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null(),
+            ));
+            assert!(!owner.0.is_null());
+            let handle = child(owner.0, null_mut(), 0, w!("STATIC"), WS_VISIBLE).unwrap();
+            let mut grid = Grid::default();
+            grid.enabled = true;
+            assert!(!grid.interaction_enabled(handle));
+            ShowWindow(owner.0, SW_SHOWNOACTIVATE);
+            assert!(grid.interaction_enabled(handle));
+            EnableWindow(owner.0, 0);
+            assert_ne!(IsWindowEnabled(handle), 0);
+            assert!(!grid.interaction_enabled(handle));
+            EnableWindow(owner.0, 1);
+            assert!(grid.interaction_enabled(handle));
+        }
+    }
 }
