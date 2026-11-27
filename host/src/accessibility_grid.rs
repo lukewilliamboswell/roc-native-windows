@@ -37,7 +37,7 @@ pub(crate) struct Snapshot {
     pub(crate) cells: BTreeMap<Key, Cell>,
     pub(crate) bounds: UiaRect,
     pub(crate) active: Option<Key>,
-    pub(crate) range: Option<(usize, usize, usize, usize)>,
+    pub(crate) range: Option<Range>,
     pub(crate) focused: bool,
     pub(crate) enabled: bool,
     pub(crate) editor: Option<Editor>,
@@ -116,9 +116,8 @@ impl Snapshot {
     }
 
     fn selected(&self, cell: &Cell) -> bool {
-        self.range.is_some_and(|(top, left, bottom, right)| {
-            (top..=bottom).contains(&cell.row) && (left..=right).contains(&cell.column)
-        })
+        self.range
+            .is_some_and(|range| contains_cell(range, cell.row, cell.column))
     }
 
     fn node_at(&self, index: usize) -> Option<Item> {
@@ -204,11 +203,72 @@ enum Item {
 pub(crate) enum Operation {
     SetValue(String),
     Select,
-    ExtendSelection,
+    ChangeSelection(SelectionChange),
     Reveal,
     Focus,
     FocusEditor(u64),
     Scroll([i32; 2]),
+}
+
+pub(crate) type Range = (usize, usize, usize, usize);
+
+#[derive(Clone, Copy)]
+pub(crate) enum SelectionChange {
+    Add,
+    Remove,
+}
+
+impl SelectionChange {
+    // The grid stores a nonempty rectangle. A single added or removed item
+    // may only extend or shrink a contiguous row or column.
+    pub(crate) fn updated(
+        self,
+        range: Option<Range>,
+        row: usize,
+        column: usize,
+    ) -> windows::core::Result<Option<Range>> {
+        let Some((top, left, bottom, right)) = range else {
+            return Ok(match self {
+                Self::Add => Some((row, column, row, column)),
+                Self::Remove => None,
+            });
+        };
+        let selected = contains_cell((top, left, bottom, right), row, column);
+        let result = match self {
+            Self::Add if selected => None,
+            Self::Remove if !selected => None,
+            Self::Add if top == bottom && row == top && column.checked_add(1) == Some(left) => {
+                Some((top, column, bottom, right))
+            }
+            Self::Add if top == bottom && row == top && right.checked_add(1) == Some(column) => {
+                Some((top, left, bottom, column))
+            }
+            Self::Add if left == right && column == left && row.checked_add(1) == Some(top) => {
+                Some((row, left, bottom, right))
+            }
+            Self::Add if left == right && column == left && bottom.checked_add(1) == Some(row) => {
+                Some((top, left, row, right))
+            }
+            Self::Remove if top == bottom && left < right && column == left => {
+                Some((top, left + 1, bottom, right))
+            }
+            Self::Remove if top == bottom && left < right && column == right => {
+                Some((top, left, bottom, right - 1))
+            }
+            Self::Remove if left == right && top < bottom && row == top => {
+                Some((top + 1, left, bottom, right))
+            }
+            Self::Remove if left == right && top < bottom && row == bottom => {
+                Some((top, left, bottom - 1, right))
+            }
+            _ => return Err(unsupported()),
+        };
+        Ok(result)
+    }
+}
+
+fn contains_cell((top, left, bottom, right): Range, row: usize, column: usize) -> bool {
+    (top..=bottom).contains(&row) && (left..=right).contains(&column)
 }
 
 pub(crate) struct Action {
@@ -247,6 +307,13 @@ impl State {
             && (cell.read_only || snapshot.editor.is_some())
         {
             return Err(unsupported());
+        }
+        if let Operation::ChangeSelection(change) = operation
+            && change
+                .updated(snapshot.range, cell.row, cell.column)?
+                .is_none()
+        {
+            return Ok(());
         }
         if self.actions.len() >= MAX_ACTIONS {
             return Err(Error::from_hresult(HRESULT(UIA_E_TIMEOUT as i32)));
@@ -830,16 +897,10 @@ impl ISelectionItemProvider_Impl for Provider_Impl {
         self.action(Operation::Select)
     }
     fn AddToSelection(&self) -> windows::core::Result<()> {
-        self.action(Operation::ExtendSelection)
+        self.action(Operation::ChangeSelection(SelectionChange::Add))
     }
     fn RemoveFromSelection(&self) -> windows::core::Result<()> {
-        self.with(|s| {
-            if s.selected(&s.cells[&self.cell()?]) {
-                Err(unsupported())
-            } else {
-                Ok(())
-            }
-        })
+        self.action(Operation::ChangeSelection(SelectionChange::Remove))
     }
     fn IsSelected(&self) -> windows::core::Result<BOOL> {
         self.with(|s| Ok(s.selected(&s.cells[&self.cell()?]).into()))
@@ -987,6 +1048,30 @@ fn provider_list(value: *mut SAFEARRAY) -> VARIANT {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_item_changes_preserve_unrelated_cells() {
+        use SelectionChange::{Add, Remove};
+
+        let row = Some((1, 2, 1, 4));
+        assert_eq!(Add.updated(row, 1, 3).unwrap(), None);
+        assert_eq!(Add.updated(row, 1, 1).unwrap(), Some((1, 1, 1, 4)));
+        assert_eq!(Add.updated(row, 1, 5).unwrap(), Some((1, 2, 1, 5)));
+        assert_eq!(Remove.updated(row, 1, 1).unwrap(), None);
+        assert_eq!(Remove.updated(row, 1, 2).unwrap(), Some((1, 3, 1, 4)));
+        assert_eq!(Remove.updated(row, 1, 4).unwrap(), Some((1, 2, 1, 3)));
+        assert!(Add.updated(row, 1, 6).is_err());
+        assert!(Remove.updated(row, 1, 3).is_err());
+
+        let column = Some((1, 0, 2, 0));
+        assert_eq!(Add.updated(column, 0, 0).unwrap(), Some((0, 0, 2, 0)));
+        assert_eq!(Remove.updated(column, 2, 0).unwrap(), Some((1, 0, 1, 0)));
+        assert!(Remove.updated(Some((1, 0, 1, 0)), 1, 0).is_err());
+
+        let square = Some((0, 0, 1, 1));
+        assert!(Add.updated(square, 2, 0).is_err());
+        assert!(Remove.updated(square, 0, 0).is_err());
+    }
 
     #[test]
     fn automation_targets_are_scoped_to_enabled_live_cells() {

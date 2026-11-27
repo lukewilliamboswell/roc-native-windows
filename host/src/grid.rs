@@ -276,7 +276,7 @@ impl Grid {
         self.move_to(hwnd, end.0, end.1)
     }
 
-    fn range(&self) -> Option<(usize, usize, usize, usize)> {
+    fn range(&self) -> Option<automation::Range> {
         let active = self.active?;
         let (row, column) = self.cells[&active].position;
         let (anchor_row, anchor_column) = self.cells[&self.anchor.unwrap_or(active)].position;
@@ -348,11 +348,12 @@ impl Grid {
                     }));
             }
             Operation::Select => self.activate(hwnd, row, column)?,
-            Operation::ExtendSelection => {
-                if self.anchor.is_none() {
-                    self.anchor = self.active;
+            Operation::ChangeSelection(change) => {
+                if let Ok(Some((top, left, bottom, right))) =
+                    change.updated(self.range(), row, column)
+                {
+                    self.select_range(hwnd, (top, left), (bottom, right))?;
                 }
-                self.move_to(hwnd, row, column)?;
             }
             Operation::Reveal => reveal_cell(hwnd, row, column),
             Operation::Focus => {
