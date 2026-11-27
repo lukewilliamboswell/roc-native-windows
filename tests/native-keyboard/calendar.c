@@ -44,6 +44,15 @@ static HWND picker(void) {
     return FindWindowW(L"#32770", L"Choose date for New due date");
 }
 
+static HWND wait_for_picker(void) {
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        HWND window = picker();
+        if (window && IsWindowVisible(window)) return window;
+        Sleep(50);
+    }
+    return NULL;
+}
+
 static int verify(HWND owner, HWND choose) {
     HWND title = FindWindowExW(owner, NULL, L"EDIT", NULL);
     HWND date = FindWindowExW(owner, title, L"EDIT", NULL);
@@ -60,7 +69,7 @@ static int verify(HWND owner, HWND choose) {
     read_text(date, before);
 
     key(VK_RETURN, 0);
-    HWND calendar = picker();
+    HWND calendar = wait_for_picker();
     if (!calendar || GetWindow(calendar, GW_OWNER) != owner || IsWindowEnabled(owner)) return 5;
     if (!wait_for_focus_caption(calendar, L"31")) return 6;
     key(VK_NEXT, 0);
@@ -79,15 +88,15 @@ static int verify(HWND owner, HWND choose) {
         return 12;
 
     key(VK_SPACE, 0);
-    calendar = picker();
-    if (!calendar || !has_caption(focus(calendar), L"31")) return 13;
+    calendar = wait_for_picker();
+    if (!calendar || !wait_for_focus_caption(calendar, L"31")) return 13;
     key(VK_NEXT, 0);
     key(VK_RETURN, 0);
     if (picker() || focus(owner) != choose || has_caption(date, before)) return 14;
 
     key(VK_RETURN, 0);
-    calendar = picker();
-    if (!calendar || !has_caption(focus(calendar), L"29")) return 15;
+    calendar = wait_for_picker();
+    if (!calendar || !wait_for_focus_caption(calendar, L"29")) return 15;
     key(VK_ESCAPE, 0);
     if (picker()) return 16;
     puts("Calendar passed leap-month navigation, one date Tab stop, selection, cancellation, and opener focus");
