@@ -1,10 +1,9 @@
 use super::d3d::{Gpu, Program, ViewGpu};
 use super::{Display, Snapshot, Source};
 use crate::Result;
-use crate::raster::{Pixels, decode_asset, resolve_asset};
+use crate::raster::{Pixels, decode_asset};
 use crate::shader_bytecode::{MAX_BYTES, Reflection, parameters};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
@@ -370,10 +369,10 @@ fn load_program(snapshot: &Snapshot) -> Result<Program> {
             snapshot.shader
         ));
     }
-    let path = resolve_asset(&snapshot.assets, name)?;
     let mut bytes = Vec::new();
-    File::open(&path)
-        .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes))
+    crate::rooted::read_asset(&snapshot.assets, name)?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|err| format!("could not read shader {:?}: {err}", snapshot.shader))?;
     let reflection =
         Reflection::read(&bytes).map_err(|err| format!("shader {:?}: {err}", snapshot.shader))?;

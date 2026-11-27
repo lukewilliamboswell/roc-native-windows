@@ -1,12 +1,12 @@
 use crate::Result;
-use crate::raster::resolve_asset;
+use crate::rooted::{Identity, identity, read_asset};
 use crate::view::wide;
 use crate::wire::Node;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use windows_sys::Win32::Foundation::{HANDLE, HWND, S_FALSE};
@@ -105,8 +105,8 @@ impl Selection {
 
 #[derive(Default)]
 pub(crate) struct Registrations {
-    files: BTreeMap<PathBuf, Rc<Registration>>,
-    claimed: BTreeMap<(String, String), PathBuf>,
+    files: BTreeMap<Identity, Rc<Registration>>,
+    claimed: BTreeMap<(String, String), Identity>,
     diagnostics: BTreeSet<Typeface>,
 }
 
@@ -143,16 +143,21 @@ impl Registrations {
     ) -> Result<PackagedFont> {
         let selection = requested.selection()?;
         let name = crate::asset_catalog::resolve(&requested.asset)?;
-        let path = resolve_asset(assets, name)?;
+        let file = read_asset(assets, name)?;
+        let asset = identity(&file).map_err(|error| format!("cannot identify font: {error}"))?;
         let claim = (requested.family.to_uppercase(), requested.face.clone());
-        if self.claimed.get(&claim).is_some_and(|owner| owner != &path) {
+        if self
+            .claimed
+            .get(&claim)
+            .is_some_and(|owner| owner != &asset)
+        {
             return Err("another app asset already supplied this family and face".into());
         }
-        let registration = if let Some(registered) = self.files.get(&path) {
+        let registration = if let Some(registered) = self.files.get(&asset) {
             selection.check(&registered.bytes)?;
             Rc::clone(registered)
         } else {
-            Rc::new(Registration::open(&path, &selection)?)
+            Rc::new(Registration::open(file, &selection)?)
         };
         // SAFETY: A complete initialized LOGFONTW is read synchronously.
         let handle = unsafe { CreateFontIndirectW(&selection.metrics(base)) };
@@ -170,8 +175,8 @@ impl Registrations {
         {
             return Err("Windows did not select the requested asset face".into());
         }
-        self.files.entry(path.clone()).or_insert(registration);
-        self.claimed.entry(claim).or_insert(path);
+        self.files.entry(asset).or_insert(registration);
+        self.claimed.entry(claim).or_insert(asset);
         Ok(font)
     }
 }
@@ -182,10 +187,10 @@ struct Registration {
 }
 
 impl Registration {
-    fn open(path: &Path, selection: &Selection) -> Result<Self> {
+    fn open(file: File, selection: &Selection) -> Result<Self> {
         let mut bytes = Vec::new();
-        File::open(path)
-            .and_then(|file| file.take(MAX_FONT_BYTES + 1).read_to_end(&mut bytes))
+        file.take(MAX_FONT_BYTES + 1)
+            .read_to_end(&mut bytes)
             .map_err(|error| format!("cannot read font: {error}"))?;
         if bytes.len() as u64 > MAX_FONT_BYTES {
             return Err("font file exceeds 16 MiB".into());

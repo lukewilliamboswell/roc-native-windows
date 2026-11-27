@@ -1,8 +1,8 @@
-use crate::raster::resolve_asset;
+use crate::rooted::read_asset;
 use crate::view::scale;
-use std::os::windows::ffi::OsStrExt;
+use std::io::Read;
 use std::path::Path;
-use std::ptr::{null, null_mut};
+use std::ptr::null;
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::UI::Controls::{
@@ -10,7 +10,7 @@ use windows_sys::Win32::UI::Controls::{
     ILC_MASK, ImageList_Create, ImageList_Destroy, ImageList_ReplaceIcon,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, HICON, IMAGE_ICON, LR_LOADFROMFILE, LoadImageW, SendMessageW,
+    CreateIconFromResourceEx, DestroyIcon, HICON, LookupIconIdFromDirectoryEx, SendMessageW,
 };
 
 pub(crate) struct Images(HIMAGELIST);
@@ -33,29 +33,73 @@ impl Images {
         if !ext.eq_ignore_ascii_case("ico") {
             return None;
         }
-        let path = resolve_asset(root, name).ok()?;
-        let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-        let edge = scale(dpi, 16).max(1);
-        // SAFETY: Load an owned HICON from a live terminated filename.
-        // ImageList_ReplaceIcon copies it before we destroy the loaded handle.
+        const MAX_ENCODED: u64 = 16 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        read_asset(root, name)
+            .ok()?
+            .take(MAX_ENCODED + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_ENCODED {
+            return None;
+        }
+        let icon = native_icon(&bytes, scale(dpi, 16).max(1))?;
+        // SAFETY: ImageList_ReplaceIcon copies the loaded image before destruction.
         let index = unsafe {
-            let icon = LoadImageW(
-                null_mut(),
-                path.as_ptr(),
-                IMAGE_ICON,
-                edge,
-                edge,
-                LR_LOADFROMFILE,
-            ) as HICON;
-            if icon.is_null() {
-                return None;
-            }
             let index = ImageList_ReplaceIcon(self.0, -1, icon);
             DestroyIcon(icon);
             index
         };
         (index >= 0).then_some(index)
     }
+}
+
+fn native_icon(bytes: &[u8], edge: i32) -> Option<HICON> {
+    if !bytes.starts_with(&[0, 0, 1, 0]) {
+        return None;
+    }
+    let count = u16::from_le_bytes(bytes.get(4..6)?.try_into().ok()?);
+    if !(1..=256).contains(&count) {
+        return None;
+    }
+    let directory = bytes.get(6..6 + usize::from(count) * 16)?;
+    let mut group = vec![0u16, 1, count];
+    let mut images = Vec::with_capacity(count.into());
+    for (index, entry) in directory.as_chunks::<16>().0.iter().enumerate() {
+        let length = u32::from_le_bytes(entry[8..12].try_into().ok()?) as usize;
+        let offset = u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize;
+        if length == 0 || offset < 6 + directory.len() {
+            return None;
+        }
+        images.push(bytes.get(offset..offset.checked_add(length)?)?);
+        group.extend(
+            entry[..12]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .copied()
+                .map(u16::from_le_bytes),
+        );
+        group.push(index as u16 + 1);
+    }
+    // SAFETY: The group header and bounded GRPICONDIRENTRY fields are aligned and complete.
+    let index = unsafe { LookupIconIdFromDirectoryEx(group.as_ptr().cast(), 1, edge, edge, 0) };
+    let image = images.get(usize::try_from(index).ok()?.checked_sub(1)?)?;
+    let mut aligned = vec![0u32; image.len().div_ceil(4)];
+    // SAFETY: The output holds at least image.len() initialized writable bytes.
+    let icon = unsafe {
+        std::ptr::copy_nonoverlapping(image.as_ptr(), aligned.as_mut_ptr().cast(), image.len());
+        CreateIconFromResourceEx(
+            aligned.as_ptr().cast(),
+            image.len() as u32,
+            1,
+            0x00030000,
+            edge,
+            edge,
+            0,
+        )
+    };
+    (!icon.is_null()).then_some(icon)
 }
 
 impl Drop for Images {
@@ -125,5 +169,21 @@ impl ButtonIcon {
         } else {
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn creates_a_native_icon_from_the_packaged_frames() {
+        let sample = include_bytes!("../../examples/starter/assets/reading-list.ico");
+        for edge in [16, 24, 32] {
+            let icon = native_icon(sample, edge).unwrap();
+            // SAFETY: The test owns the native icon.
+            assert_ne!(unsafe { DestroyIcon(icon) }, 0);
+        }
+        assert!(native_icon(&sample[..14], 16).is_none());
     }
 }

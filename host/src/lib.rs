@@ -58,6 +58,8 @@ mod regional;
 #[allow(clippy::all)]
 mod roc_platform_abi;
 #[cfg(windows)]
+mod rooted;
+#[cfg(windows)]
 mod shader;
 #[cfg(any(test, windows))]
 mod shader_bytecode;

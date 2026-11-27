@@ -71,6 +71,17 @@ runs the declared cases once.
 See xref:spec-runner.adoc#write-a-spec[Write behaviour specs] for native
 control actions, effect simulation, and recording.
 
+[#open-packaged-assets]
+== Open packaged assets
+
+Images, shaders, command icons, and packaged fonts open their files beneath
+the installed `assets` directory. Use a relative name such as
+`images/preview.png`. Each directory component resolves through an open
+parent handle, and the loader uses the resulting file or its bytes.
+The Windows loader rejects traversal, alternate streams, reserved device
+names, and reparse points. Use a drive-letter installation path with regular
+files and directories.
+
 [#copy-text]
 == Copy text from an app action
 

@@ -1,7 +1,7 @@
 //! Bounded image sources and a shared top-down premultiplied BGRA representation.
 
 use crate::Result;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 pub(crate) const MAX_ENCODED_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_DIMENSION: u32 = 8192;
@@ -121,34 +121,6 @@ impl Format {
 #[cfg(windows)]
 pub(crate) fn supports(bytes: &[u8]) -> bool {
     Format::content(bytes).is_some()
-}
-
-/// Resolve an opted-in asset beneath the installed assets directory.
-pub(crate) fn resolve_asset(root: &Path, name: &str) -> Result<PathBuf> {
-    let path = Path::new(name);
-    // A colon may name a Windows alternate data stream. The components check
-    // also rejects rooted paths, prefixes, and parent traversal.
-    if name.is_empty()
-        || name.contains([':', '\0'])
-        || path
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-    {
-        return Err(format!("asset path must stay under assets: {name:?}"));
-    }
-    let root = root
-        .canonicalize()
-        .map_err(|error| format!("cannot find assets directory: {error}"))?;
-    let asset = root
-        .join(path)
-        .canonicalize()
-        .map_err(|error| format!("cannot find asset {name:?}: {error}"))?;
-    if !asset.starts_with(root) || !asset.is_file() {
-        return Err(format!(
-            "asset is outside assets or is not a regular file: {name:?}"
-        ));
-    }
-    Ok(asset)
 }
 
 pub(crate) fn destination(
@@ -289,8 +261,7 @@ mod native {
             let name = crate::asset_catalog::resolve(name)?;
             let expected =
                 Format::extension(Path::new(name)).ok_or("expected a PNG, JPEG or BMP asset")?;
-            let path = resolve_asset(root, name)?;
-            let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+            let file = crate::rooted::read_asset(root, name)?;
             let size = file.metadata().map_err(|error| error.to_string())?.len();
             if size > MAX_ENCODED_BYTES as u64 {
                 return Err("encoded image exceeds 32 MiB".into());
@@ -475,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_and_path_escapes_are_restricted() {
+    fn image_formats_are_restricted() {
         assert_eq!(
             Format::extension(Path::new("Café.JPEG")),
             Some(Format::Jpeg)
@@ -487,7 +458,5 @@ mod tests {
             Format::extension(Path::new("mislabeled.png"))
         );
         assert_eq!(MAX_ENCODED_BYTES, 33_554_432);
-        assert!(resolve_asset(Path::new("."), "../escape.png").is_err());
-        assert!(resolve_asset(Path::new("."), "asset.png:stream").is_err());
     }
 }
