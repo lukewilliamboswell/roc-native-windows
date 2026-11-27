@@ -27,6 +27,7 @@ pub(super) struct Entry {
     pub(super) folder: Option<Arc<Folder>>,
     folder_file: Option<Arc<Mutex<File>>>,
     _temporary: Option<Arc<Temporary>>,
+    pub(super) image: Option<Arc<crate::raster::Pixels>>,
 }
 
 struct Temporary(PathBuf);
@@ -59,6 +60,7 @@ impl Entry {
             folder: None,
             folder_file: None,
             _temporary: None,
+            image: None,
         })
     }
 
@@ -77,6 +79,7 @@ impl Entry {
             folder: Some(folder),
             folder_file: None,
             _temporary: None,
+            image: None,
         })
     }
 
@@ -91,6 +94,7 @@ impl Entry {
             folder: None,
             folder_file: Some(Arc::new(Mutex::new(file))),
             _temporary: None,
+            image: None,
         }
     }
 
@@ -117,7 +121,21 @@ impl Entry {
             folder: None,
             folder_file: None,
             _temporary: Some(backing),
+            image: None,
         })
+    }
+
+    pub(super) fn image(pixels: Arc<crate::raster::Pixels>) -> Self {
+        Self {
+            path: PathBuf::new(),
+            size: 0,
+            name: "Image".into(),
+            mime: "application/x-roc-windows-raster".into(),
+            folder: None,
+            folder_file: None,
+            _temporary: None,
+            image: Some(pixels),
+        }
     }
 
     pub(super) fn read_range(&self, start: u64, len: u64) -> io::Result<Vec<u8>> {
@@ -126,6 +144,9 @@ impl Entry {
                 io::ErrorKind::InvalidInput,
                 "file range is outside the supported bounds",
             ));
+        }
+        if self.image.is_some() {
+            return Err(io::ErrorKind::InvalidInput.into());
         }
         if self.folder.is_some() {
             return Err(io::ErrorKind::IsADirectory.into());

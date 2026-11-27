@@ -2,7 +2,7 @@ use super::{
     Result,
     files::{self, Entry},
 };
-use crate::wire::{FOLDER_PORT, Reader};
+use crate::wire::Reader;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -44,10 +44,6 @@ pub(super) struct Request {
 }
 
 pub(super) fn request(reader: &mut Reader<'_>) -> Result<Option<Request>> {
-    let port = reader.string()?;
-    if port != FOLDER_PORT {
-        return Err(format!("unsupported native port {port:?}"));
-    }
     let json = reader.string()?;
     // The private typed record's PortJson codec emits ordered, compact keys.
     let limit = json

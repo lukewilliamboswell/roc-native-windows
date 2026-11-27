@@ -344,11 +344,11 @@ fn perform(
                 if windows.exited {
                     return Ok(());
                 }
-                if with_app(|app| Ok(app.effects.work_done()))? {
+                if with_app(|app| Ok(app.work_done()))? {
                     // The worker publishes its answer before lowering running;
                     // this drain catches racing completions and follow-up work.
                     pump(windows, capture, started)?;
-                    if windows.exited || with_app(|app| Ok(app.effects.work_done()))? {
+                    if windows.exited || with_app(|app| Ok(app.work_done()))? {
                         return Ok(());
                     }
                 }
@@ -1078,9 +1078,9 @@ impl App {
                 } else {
                     let expected = if kind == "image" { "asset-image" } else { kind };
                     matches!(&node.kind, Kind::Element(tag) if tag.strip_prefix("ui-") == Some(expected)
+                        || (kind == "image" && tag == "ui-image")
                         || (expected == "checkbox" && tag == "ui-aggregate-checkbox")
-                        || (expected == "text-area" && tag == "textarea")
-                        || (kind == "image" && tag == "ui-image"))
+                        || (expected == "text-area" && tag == "textarea"))
                         && (label.is_empty()
                             || self.surface.spec_label(key, kind).as_deref() == Some(label))
                 };

@@ -1,3 +1,5 @@
+import engine.Port
+import engine.Wire as ImageWire
 import Engine exposing [Elem, Handler, HandlerOf, Signal]
 import Files
 
@@ -825,21 +827,118 @@ Ui := [].{
 	}
 
 	## An image's accessible label and dimensions in device-independent pixels.
-	AssetImageProps := { label : Str, width : U32, height : U32 }
+	AssetImageProps := { label : Str, width : U32, height : U32, fit : [Stretch, Contain] ?? Stretch }
 
-	## Show a BMP using a path relative to the app's assets directory.
+	## Show a packaged PNG, JPEG or BMP. An empty path clears the image.
 	asset_image : Signal(ctx, Str), AssetImageProps -> Elem(ctx)
 	asset_image = |path, props|
 		Engine.element(
 			"ui-asset-image",
-			[
-				Engine.attr_s("asset", path),
-				Engine.attr("label", props.label),
-				Engine.attr("width", props.width.to_str()),
-				Engine.attr("height", props.height.to_str()),
-			],
+			[Engine.attr_s("asset", path)].concat(image_attributes(props)),
 			[],
 		)
+
+	## Immutable image data in sRGB with straight (unpremultiplied) RGBA input.
+	Raster :: { data : [Raw({ width : U32, height : U32, rgba : List(U8) }), Decoded(Engine.File)] }.{
+		is_eq : Raster, Raster -> Bool
+		is_eq = |left, right| left.data == right.data
+	}
+
+	RasterError : [InvalidDimensions, InvalidBytes, TooLarge, UnsupportedFormat, Unreadable, DecodeFailed, Unavailable]
+
+	RasterProps : { width : U32, height : U32, rgba : List(U8) }
+
+	## Validate a top-down row-major raster before it can be displayed.
+	raster : RasterProps -> Try(Raster, RasterError)
+	raster = |props| {
+		width = props.width.to_u64()
+		height = props.height.to_u64()
+		if width == 0 or height == 0 {
+			Err(InvalidDimensions)
+		} else if width > 8192 or height > 8192 or width * height > 8388608 {
+			Err(TooLarge)
+		} else if props.rgba.len() != width * height * 4 {
+			Err(InvalidBytes)
+		} else {
+			Ok(Raster.{ data: Raw(props) })
+		}
+	}
+
+	## Decode a selected file capability on a Windows worker.
+	decode_image : Engine.File -> Engine.Ask(Raster, RasterError)
+	decode_image = |file| Engine.ask_of(DecodeImage.{}, file)
+
+	ImageSource : [NoImage, RasterImage(Raster)]
+	ImageProps : AssetImageProps
+
+	## Show immutable app-produced or decoded raster data.
+	image : Signal(ctx, ImageSource), ImageProps -> Elem(ctx)
+	image = |source, props| Ui.with_raster_binding(source, |bind, attachment|
+		Engine.element("ui-image", image_attributes(props).append(bind), [attachment]),
+	)
+
+	## The input identity crosses as a private typed port attachment.
+	with_raster_binding : Signal(ctx, ImageSource), (Engine.Attr(Engine.In(ctx, U64)), Elem(Engine.In(ctx, U64)) -> Elem(Engine.In(ctx, U64))) -> Elem(ctx)
+	with_raster_binding = |source, build| Engine.state(0.U64, |local| {
+		update = { binding: local.signal(), source: source.lift() }.Engine.Signal
+		bind = Engine.on("roc-raster-bind", local.set_value(|_, token| U64.from_str(token) ?? 0))
+		attachment = Engine.watch(
+			update,
+			|{ binding, source: current }| if (binding == 0) [] else [Engine.command(attach_raster.send(raster_payload(binding, current)))],
+			Engine.ignore({}),
+		)
+		build(bind, attachment)
+	})
+
+	image_ports : {} -> List(Engine.PortRegistration)
+	image_ports = |_| Port.registrations({ attach: attach_raster, decode: decode_image_port })
+
+}
+
+image_attributes : Ui.AssetImageProps -> List(Engine.Attr(ctx))
+image_attributes = |props| [
+	Engine.attr("label", props.label),
+	Engine.attr("width", props.width.to_str()),
+	Engine.attr("height", props.height.to_str()),
+	Engine.attr("fit", if (props.fit == Contain) "contain" else "stretch"),
+]
+
+RasterAttachment : { binding : U64, bytes : ImageWire.Bytes, files : List(Engine.File), height : U32, width : U32 }
+
+attach_raster : Port.Command(RasterAttachment)
+attach_raster = Port.command({ name: "roc-native-windows/bind-raster" })
+
+raster_payload : U64, Ui.ImageSource -> RasterAttachment
+raster_payload = |binding, source| {
+	empty = { binding, bytes: ImageWire.Bytes.from_list([]), files: [], height: 0, width: 0 }
+	match source {
+		NoImage => empty
+		RasterImage(Ui.Raster.{ data }) => match data {
+			Raw({ width, height, rgba }) => { ..empty, width, height, bytes: ImageWire.Bytes.from_list(rgba) }
+			Decoded(file) => { ..empty, files: [file] }
+		}
+	}
+}
+
+decode_image_port : Port.Call(Engine.File, { code : U8, files : List(Engine.File) })
+decode_image_port = Port.call({ name: "roc-native-windows/decode-image", timeout: Ms(15000) })
+
+DecodeImage := {}.{
+	request : DecodeImage, Engine.File -> Engine.Request
+	request = |_, file| decode_image_port.request(file)
+
+	result : DecodeImage, Engine.Result -> Try(Ui.Raster, Ui.RasterError)
+	result = |_, answer| match answer {
+		PortAnswer(_) => match decode_image_port.result(answer) {
+			Ok({ code: 0, files: [file] }) => Ok(Ui.Raster.{ data: Decoded(file) })
+			Ok({ code: 1, .. }) => Err(Unreadable)
+			Ok({ code: 2, .. }) => Err(UnsupportedFormat)
+			Ok({ code: 3, .. }) => Err(TooLarge)
+			Ok({ code: 4, .. }) => Err(DecodeFailed)
+			_ => Err(Unavailable)
+		}
+		_ => Err(Unavailable)
+	}
 }
 
 stack : Engine.Tag, Ui.StackProps, List(Elem(ctx)) -> Elem(ctx)

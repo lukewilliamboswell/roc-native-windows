@@ -23,8 +23,14 @@ mod grid_clipboard;
 mod list_view;
 #[cfg(windows)]
 mod modal;
+#[cfg(windows)]
+mod picture;
 #[cfg(any(test, windows))]
 mod progress;
+#[cfg(any(test, windows))]
+mod raster;
+#[cfg(windows)]
+mod raster_bridge;
 #[cfg(windows)]
 #[allow(clippy::all)]
 mod roc_platform_abi;

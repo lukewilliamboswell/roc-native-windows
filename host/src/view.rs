@@ -4,7 +4,9 @@ use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
 use crate::command_icon::ButtonIcon;
 use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
+use crate::picture::Picture;
 use crate::progress::{Progress, native::ProgressBar};
+use crate::raster::Pixels;
 use crate::slider::native::Slider;
 use crate::style::{
     Accent,
@@ -18,16 +20,13 @@ use crate::window_chrome::{WindowDeclaration, native::StatusBar};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
+use std::sync::Arc;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemServices::{
-    SS_BITMAP, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX,
-};
+use windows_sys::Win32::System::SystemServices::{SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX};
 use windows_sys::Win32::UI::Controls::{
     BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, CCM_SETUNICODEFORMAT, CCS_NODIVIDER,
     CCS_NOPARENTALIGN, CCS_NORESIZE, DTS_SHORTDATEFORMAT, DTS_SHOWNONE, DTS_TIMEFORMAT,
@@ -91,7 +90,7 @@ impl Control {
             "ui-aggregate-checkbox" => Self::AggregateCheckbox,
             "ui-text-field" => Self::Edit,
             "textarea" => Self::TextArea,
-            "ui-asset-image" => Self::Image,
+            "ui-asset-image" | "ui-image" => Self::Image,
             "ui-combo-box" => Self::ComboBox,
             "ui-list-box" => Self::ListBox,
             "ui-radio-group" => Self::RadioGroup,
@@ -179,7 +178,7 @@ impl Control {
                     | WS_VSCROLL
                     | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_READONLY) as u32,
             ),
-            Self::Image => (0, w!("STATIC"), SS_BITMAP | SS_CENTERIMAGE),
+            Self::Image => (0, w!("STATIC"), SS_LEFT | SS_NOPREFIX),
             Self::ComboBox => (
                 0,
                 w!("COMBOBOX"),
@@ -232,8 +231,7 @@ struct View {
     label_style: Option<StyledWindow>,
     font_role: FontRole,
     force_pending: bool,
-    image: HBITMAP,
-    rendered_image: Option<(String, i32, i32)>,
+    picture: Option<Picture>,
     choices: Choices,
     tree: TreeProjection,
     tab_owner: Option<Key>,
@@ -300,6 +298,18 @@ impl View {
             Toolbar::initialize(handle);
             Toolbar::default()
         });
+        let picture = if kind == Control::Image {
+            match Picture::new(handle) {
+                Ok(picture) => Some(picture),
+                Err(error) => {
+                    // SAFETY: A failed image mount has no live subclass.
+                    unsafe { DestroyWindow(handle) };
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         let view = Self {
             handle,
             label: null_mut(),
@@ -312,8 +322,7 @@ impl View {
                 ..Props::default()
             },
             force_pending: false,
-            image: null_mut(),
-            rendered_image: None,
+            picture,
             choices: Choices::default(),
             tree: TreeProjection::default(),
             tab_owner: None,
@@ -447,77 +456,11 @@ impl View {
             set_text(self.handle, value);
         }
     }
-
-    fn update_bitmap(&mut self, root: &Path, name: &str, width: i32, height: i32) -> Result<()> {
-        if name.is_empty() {
-            self.clear_bitmap();
-            return Ok(());
-        }
-        if self
-            .rendered_image
-            .as_ref()
-            .is_some_and(|current| current.0 == name && current.1 == width && current.2 == height)
-        {
-            return Ok(());
-        }
-        let path = resolve_bitmap(root, name)?;
-        let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
-        // SAFETY: The path is a live terminated Windows filename. Without
-        // LR_SHARED, this view owns the returned bitmap handle.
-        let image = unsafe {
-            LoadImageW(
-                null_mut(),
-                wide_path.as_ptr(),
-                IMAGE_BITMAP,
-                width,
-                height,
-                LR_LOADFROMFILE,
-            )
-        };
-        if image.is_null() {
-            return Err(format!(
-                "cannot load bitmap {name}: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        self.clear_bitmap();
-        // SAFETY: The bitmap stays live until we remove it from the control.
-        unsafe {
-            SendMessageW(
-                self.handle,
-                STM_SETIMAGE,
-                IMAGE_BITMAP as usize,
-                image as isize,
-            )
-        };
-        self.image = image;
-        self.rendered_image = Some((name.into(), width, height));
-        Ok(())
-    }
-
-    fn clear_bitmap(&mut self) {
-        if self.image.is_null() {
-            return;
-        }
-        // SAFETY: First remove the bitmap from the static control. User32 may
-        // have copied it, in which case the returned copy is also ours.
-        unsafe {
-            let displayed =
-                SendMessageW(self.handle, STM_SETIMAGE, IMAGE_BITMAP as usize, 0) as HBITMAP;
-            if !displayed.is_null() && displayed != self.image {
-                DeleteObject(displayed);
-            }
-            DeleteObject(self.image);
-        }
-        self.image = null_mut();
-        self.rendered_image = None;
-    }
 }
 
 impl Drop for View {
     fn drop(&mut self) {
-        self.clear_bitmap();
+        drop(self.picture.take());
         // SAFETY: Children are owned by this surface and were created on
         // this thread. DestroyWindow also tolerates an already closed HWND.
         unsafe {
@@ -541,6 +484,7 @@ pub(crate) struct Surface {
     dpi: u32,
     assets: PathBuf,
     views: BTreeMap<Key, View>,
+    raster_inputs: BTreeMap<Key, Arc<Pixels>>,
     handles: BTreeMap<usize, Key>,
     scroll_position: i32,
     wheel_delta: i32,
@@ -567,6 +511,7 @@ impl Surface {
             dpi,
             assets,
             views: BTreeMap::new(),
+            raster_inputs: BTreeMap::new(),
             handles: BTreeMap::new(),
             scroll_position: 0,
             wheel_delta: 0,
@@ -592,6 +537,18 @@ impl Surface {
 
     pub(crate) fn title(&self, title: &str) {
         set_text(self.window, title);
+    }
+
+    pub(crate) fn raster(&self, key: Key) -> Option<Arc<Pixels>> {
+        self.raster_inputs.get(&key).cloned()
+    }
+
+    pub(crate) fn set_raster(&mut self, key: Key, pixels: Option<Arc<Pixels>>) {
+        if let Some(pixels) = pixels {
+            self.raster_inputs.insert(key, pixels);
+        } else {
+            self.raster_inputs.remove(&key);
+        }
     }
 
     pub(crate) fn key(&self, handle: HWND) -> Option<Key> {
@@ -1168,6 +1125,9 @@ impl Surface {
                     view.label_style = Some(StyledWindow::new(view.label, label)?);
                 }
             }
+            if let Some(picture) = &mut view.picture {
+                picture.set_background(background);
+            }
         }
         for &child in &node.children {
             self.style_node(tree, child, background)?;
@@ -1199,6 +1159,7 @@ impl Surface {
         } else {
             self.status = None;
         }
+        self.raster_inputs.retain(|key, _| owns(key));
         self.views.retain(|key, view| {
             if owns(key) {
                 true
@@ -1450,6 +1411,7 @@ impl Surface {
             .as_ref()
             .map_or(HWND_TOP, |status| status.handle);
         for item in placement {
+            let pixels = self.raster(item.key);
             let view = self.views.get_mut(&item.key).unwrap();
             let y = item.y - self.scroll_position;
             let visible = view.kind != Control::ProgressBar || view.progress.visible();
@@ -1467,9 +1429,9 @@ impl Surface {
                 );
                 after = view.label;
             }
-            if view.kind == Control::Image {
-                let name = tree.node(item.key).attr("asset").unwrap_or("");
-                view.update_bitmap(&self.assets, name, item.width, item.height)?;
+            if let Some(picture) = &mut view.picture {
+                let contain = tree.node(item.key).attr("fit") == Some("contain");
+                picture.update(pixels, contain)?;
             }
             if !view.label.is_null() && view.props.label.is_empty() {
                 // SAFETY: The label belongs to this thread and is optional.
@@ -2033,45 +1995,6 @@ fn wrap_height(dc: HDC, text: &str, width: i32) -> i32 {
         )
     };
     rect.bottom
-}
-
-fn resolve_bitmap(root: &Path, name: &str) -> Result<PathBuf> {
-    resolve_asset(root, name, "bmp", "BMP")
-}
-
-pub(crate) fn resolve_asset(
-    root: &Path,
-    name: &str,
-    extension: &str,
-    format_name: &str,
-) -> Result<PathBuf> {
-    if name.contains('\0') {
-        return Err("asset path contains a NUL".into());
-    }
-    let path = Path::new(name);
-    if path
-        .components()
-        .any(|part| !matches!(part, Component::Normal(_)))
-        || !path
-            .extension()
-            .and_then(OsStr::to_str)
-            .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
-    {
-        return Err(format!(
-            "asset must be a {format_name} path under assets: {name}"
-        ));
-    }
-    let root = root
-        .canonicalize()
-        .map_err(|err| format!("cannot find assets directory: {err}"))?;
-    let path = root
-        .join(path)
-        .canonicalize()
-        .map_err(|err| format!("cannot find asset {name}: {err}"))?;
-    if !path.starts_with(&root) {
-        return Err(format!("asset path leaves the assets directory: {name}"));
-    }
-    Ok(path)
 }
 
 #[cfg(test)]

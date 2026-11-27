@@ -3,6 +3,7 @@ use crate::civil::{self, Value as CivilValue};
 use crate::effects::{Effects, SpecOptions};
 use crate::grid::Intent as GridIntent;
 use crate::modal;
+use crate::raster_bridge::{Attachment, Bridge as RasterBridge, Update as RasterUpdate};
 use crate::taskbar::native::Taskbar;
 use crate::tree_view::TreeIntent;
 use crate::view::{composing, wide};
@@ -76,6 +77,7 @@ struct App {
     input: InputState,
     quit_posted: bool,
     effects: Effects,
+    rasters: RasterBridge,
     incoming: Receiver<Event>,
     private: VecDeque<Event>,
     opportunity: Option<u64>,
@@ -104,6 +106,7 @@ impl App {
             input: InputState::default(),
             quit_posted: false,
             effects,
+            rasters: RasterBridge::default(),
             incoming,
             private: VecDeque::new(),
             opportunity: None,
@@ -155,6 +158,8 @@ impl App {
         }
         self.surface.poll();
         self.effects.poll();
+        let images = self.rasters.poll()?;
+        self.publish_rasters(images)?;
         if let Some(generation) = self.opportunity.take() {
             let mut payload = vec![255];
             payload.extend_from_slice(&generation.to_le_bytes());
@@ -180,6 +185,7 @@ impl App {
             return Err(format!("unknown command flags {flags}"));
         }
         let mut references = Vec::new();
+        let mut attachments = Vec::new();
         while !reader.done() {
             let opcode = reader.u8()?;
             if self.tree.command(opcode, &mut reader)? {
@@ -213,6 +219,7 @@ impl App {
                     read_reference(op, &mut reader)?;
                     references.push((op, id));
                 }
+                19 => attachments.push(Attachment::read(&mut reader)?),
                 20 => {
                     let token = reader.u64()?;
                     let start = reader.u64()?;
@@ -255,6 +262,14 @@ impl App {
         }
         self.surface.sync(&self.tree)?;
         self.reconcile_input();
+        let (bindings, mut images) = self.rasters.sync(&self.tree)?;
+        self.private.extend(bindings);
+        for attachment in attachments {
+            if let Some(update) = self.rasters.attach(&self.tree, attachment)? {
+                images.push(update);
+            }
+        }
+        self.publish_rasters(images)?;
         for (op, id) in references {
             if let Some(key) = self.tree.reference(id)
                 && let Some(owner) = self.surface.for_key(key)
@@ -386,6 +401,26 @@ impl App {
             self.drain_private()?;
         }
         Ok(())
+    }
+
+    fn publish_rasters(&mut self, images: Vec<RasterUpdate>) -> Result<()> {
+        let mut changed = false;
+        for (key, pixels) in images {
+            if let Some(owner) = self.surface.for_key(key)
+                && let Some(surface) = self.surface.at_mut(owner)
+            {
+                surface.set_raster(key, pixels);
+                changed = true;
+            }
+        }
+        if changed {
+            self.surface.sync(&self.tree)?;
+        }
+        Ok(())
+    }
+
+    fn work_done(&self) -> bool {
+        self.effects.work_done() && self.rasters.ready()
     }
 
     fn command(&mut self, control: HWND, notification: u16) -> Result<()> {

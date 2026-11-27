@@ -1,4 +1,5 @@
-use crate::view::{resolve_asset, scale};
+use crate::raster::resolve_asset;
+use crate::view::scale;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
@@ -27,7 +28,11 @@ impl Images {
     }
 
     pub(crate) fn add(&self, root: &Path, name: &str, dpi: u32) -> Option<i32> {
-        let path = resolve_asset(root, name, "ico", "ICO").ok()?;
+        let ext = Path::new(name).extension()?.to_str()?;
+        if !ext.eq_ignore_ascii_case("ico") {
+            return None;
+        }
+        let path = resolve_asset(root, name).ok()?;
         let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
         let edge = scale(dpi, 16).max(1);
         // SAFETY: Load an owned HICON from a live terminated filename.

@@ -58,9 +58,12 @@ Step : { cmds : List(U8), state : Handle, work : List(U8) }
 ## back to Roc without reading its contents.
 Handle : Box(EngineHost.App(Store))
 
+native_ports : () -> List(Engine.PortRegistration)
+native_ports = || Files.folder_ports().concat(Ui.image_ports({}))
+
 ## The wire protocol version the engine speaks (design.md, Appendix B).
 version_for_host : () -> U32
-version_for_host = || (EngineHost.driver(main.with_ports(Files.folder_ports()))).version
+version_for_host = || (EngineHost.driver(main.with_ports(native_ports()))).version
 
 ## The program's declaration sections (2, 5, 6, 10, 11 and 14), which tell
 ## the host what to read before mount: storage keys, media queries, the zone
@@ -69,12 +72,12 @@ version_for_host = || (EngineHost.driver(main.with_ports(Files.folder_ports())))
 ## host binds no roles from it and would need the cbor package to build it,
 ## so the declarations cross as the engine writes them.
 keys_for_host : () -> List(U8)
-keys_for_host = || ((EngineHost.driver(main.with_ports(Files.folder_ports()))).keys)()
+keys_for_host = || ((EngineHost.driver(main.with_ports(native_ports()))).keys)()
 
 ## Mount with the boot bytes the host read for those declarations.
 init_for_host : List(U8) -> Step
 init_for_host = |boot| {
-	(state, cmds, work) = ((EngineHost.driver(main.with_ports(Files.folder_ports()))).init)(boot)
+	(state, cmds, work) = ((EngineHost.driver(main.with_ports(native_ports()))).init)(boot)
 	{ cmds, state: Box.box(state), work }
 }
 
@@ -82,7 +85,7 @@ init_for_host = |boot| {
 ## turn, reusing the previous call's command and work buffers.
 event_for_host : Handle, List(U8), List(U8), U32, U32, List(U8) -> Step
 event_for_host = |boxed, buf, wbuf, node, handler, payload| {
-	(next, cmds, work) = ((EngineHost.driver(main.with_ports(Files.folder_ports()))).event)(Box.unbox(boxed), buf, wbuf, node, handler, payload)
+	(next, cmds, work) = ((EngineHost.driver(main.with_ports(native_ports()))).event)(Box.unbox(boxed), buf, wbuf, node, handler, payload)
 	{ cmds, state: Box.box(next), work }
 }
 
@@ -91,7 +94,7 @@ event_for_host = |boxed, buf, wbuf, node, handler, payload| {
 ## engine with the call.
 files_for_host : Handle, List(U8), List(U8), U32, U32, List(U8), List(Box(U64)) -> Step
 files_for_host = |boxed, buf, wbuf, node, handler, record, blobs| {
-	(next, cmds, work) = ((EngineHost.driver(main.with_ports(Files.folder_ports()))).files)(Box.unbox(boxed), buf, wbuf, node, handler, record, blobs)
+	(next, cmds, work) = ((EngineHost.driver(main.with_ports(native_ports()))).files)(Box.unbox(boxed), buf, wbuf, node, handler, record, blobs)
 	{ cmds, state: Box.box(next), work }
 }
 

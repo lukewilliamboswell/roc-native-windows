@@ -3,6 +3,7 @@
 mod files;
 mod folders;
 mod http;
+mod images;
 mod workers;
 
 use std::collections::{HashMap, VecDeque};
@@ -43,6 +44,7 @@ struct Queued {
 enum Outcome {
     Bytes(Vec<u8>),
     Progress(Vec<u8>),
+    Raster(Arc<crate::raster::Pixels>),
     Work {
         output: Vec<u8>,
         files: Vec<files::Entry>,
@@ -261,6 +263,15 @@ impl Effects {
                         let mut record = vec![10];
                         record.extend((files.len() as u32).to_le_bytes());
                         self.file_answer(id, record, files, &output, vec![11, 2]);
+                    }
+                    Outcome::Raster(pixels) => {
+                        self.file_answer(
+                            id,
+                            images::answer(0, true),
+                            vec![files::Entry::image(pixels)],
+                            &[],
+                            images::answer(5, false),
+                        );
                     }
                     Outcome::Folder { flags, files } => {
                         self.file_answer(
@@ -493,30 +504,49 @@ impl Effects {
                     move |stop, _| order.run(stop),
                 );
             }
-            9 => {
-                if let Some(folders::Request {
-                    folder,
-                    limit,
-                    timeout,
-                }) = folders::request(reader)?
-                {
+            9 => match reader.string()? {
+                crate::wire::FOLDER_PORT => {
+                    if let Some(folders::Request {
+                        folder,
+                        limit,
+                        timeout,
+                    }) = folders::request(reader)?
+                    {
+                        self.spawn(
+                            id,
+                            WorkOptions {
+                                timeout,
+                                timeout_tag: 7,
+                                finish_on_cancel: false,
+                                unavailable: vec![15, 2],
+                            },
+                            move |stop, _| match folder.list(limit, stop) {
+                                Ok((files, flags)) => Outcome::Folder { files, flags },
+                                Err(_) => Outcome::Bytes(vec![15, 3]),
+                            },
+                        );
+                    } else {
+                        self.answer(id, vec![15, 3]);
+                    }
+                }
+                crate::wire::DECODE_IMAGE_PORT => {
+                    let request = images::Request::read(reader)?;
                     self.spawn(
                         id,
                         WorkOptions {
-                            timeout,
+                            timeout: request.timeout,
                             timeout_tag: 7,
                             finish_on_cancel: false,
-                            unavailable: vec![15, 2],
+                            unavailable: images::answer(5, false),
                         },
-                        move |stop, _| match folder.list(limit, stop) {
-                            Ok((files, flags)) => Outcome::Folder { files, flags },
-                            Err(_) => Outcome::Bytes(vec![15, 3]),
+                        move |_, _| match request.decode() {
+                            Ok(pixels) => Outcome::Raster(pixels),
+                            Err(code) => Outcome::Bytes(images::answer(code, false)),
                         },
                     );
-                } else {
-                    self.answer(id, vec![15, 3]);
                 }
-            }
+                port => return Err(format!("unsupported native port {port:?}")),
+            },
             11 | 13 | 14 => {
                 let task = files::FileTask::read(kind, reader)?;
                 self.spawn(
@@ -676,6 +706,23 @@ impl Drop for Effects {
         }
         files::collect_released();
     }
+}
+
+pub(crate) fn raster_digest(bytes: &[u8]) -> Option<[u8; 32]> {
+    files::sha256(bytes)
+}
+
+pub(crate) fn resolve_raster(
+    token: u64,
+    start: u64,
+    len: u64,
+) -> Result<Arc<crate::raster::Pixels>> {
+    if start != 0 || len != 0 {
+        return Err("a raster capability cannot be sliced".into());
+    }
+    files::resolve(token)?
+        .image
+        .ok_or_else(|| "expected a raster capability".into())
 }
 
 fn storage_error(error: io::Error) -> String {

@@ -8,6 +8,8 @@ pub(crate) const VERSION: u32 = 23;
 #[cfg(windows)]
 pub(crate) const EFFECT_NODE: u32 = u32::MAX;
 pub(crate) const FOLDER_PORT: &str = "roc-native-windows/folder-files";
+pub(crate) const ATTACH_RASTER_PORT: &str = "roc-native-windows/bind-raster";
+pub(crate) const DECODE_IMAGE_PORT: &str = "roc-native-windows/decode-image";
 const MAX_DEPTH: usize = 256;
 
 pub(crate) struct Reader<'a> {
@@ -103,14 +105,28 @@ impl Declarations {
             }
             match tag {
                 2 => out.local_keys = read_strings(&mut body)?,
-                5 => match body.u32()? {
-                    0 => {}
-                    1 if body.string()? == FOLDER_PORT
-                        && body.u8()? == 2
-                        && body.u8()? == 0
-                        && body.u32()? == 0 => {}
-                    _ => return Err("unsupported native port declaration".into()),
-                },
+                5 => {
+                    let count = body.u32()?;
+                    if count > 3 {
+                        return Err("too many native port declarations".into());
+                    }
+                    let mut seen = Vec::new();
+                    for _ in 0..count {
+                        let port = body.string()?;
+                        let kind = body.u8()?;
+                        if seen.contains(&port)
+                            || !matches!(
+                                (port, kind),
+                                (FOLDER_PORT | DECODE_IMAGE_PORT, 2) | (ATTACH_RASTER_PORT, 1)
+                            )
+                            || body.u8()? != 0
+                            || body.u32()? != 0
+                        {
+                            return Err("unsupported native port declaration".into());
+                        }
+                        seen.push(port);
+                    }
+                }
                 6 => out.media_queries = read_strings(&mut body)?,
                 10 => out.zone_days = body.u16()?,
                 11 => out.session_keys = read_strings(&mut body)?,
@@ -399,6 +415,11 @@ impl Tree {
             templates: BTreeMap::new(),
             next: 1,
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = (Key, &Node)> {
+        self.nodes.iter().map(|(&key, node)| (key, node))
     }
 
     pub(crate) fn node(&self, key: Key) -> &Node {
