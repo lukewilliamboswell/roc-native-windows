@@ -1,6 +1,7 @@
 //! Operating-system effects requested by the engine. Only the UI thread delivers turns.
 
 mod files;
+mod folders;
 mod http;
 mod workers;
 
@@ -44,6 +45,10 @@ enum Outcome {
     Progress(Vec<u8>),
     Work {
         output: Vec<u8>,
+        files: Vec<files::Entry>,
+    },
+    Folder {
+        flags: u8,
         files: Vec<files::Entry>,
     },
 }
@@ -252,7 +257,20 @@ impl Effects {
                     Outcome::Bytes(payload) | Outcome::Progress(payload) => {
                         answers.push((id, payload))
                     }
-                    Outcome::Work { output, files } => self.work_answer(id, output, files),
+                    Outcome::Work { output, files } => {
+                        let mut record = vec![10];
+                        record.extend((files.len() as u32).to_le_bytes());
+                        self.file_answer(id, record, files, &output, vec![11, 2]);
+                    }
+                    Outcome::Folder { flags, files } => {
+                        self.file_answer(
+                            id,
+                            folders::answer_prefix(files.len(), flags),
+                            files,
+                            &[],
+                            vec![15, 2],
+                        );
+                    }
                 }
             }
         }
@@ -262,23 +280,23 @@ impl Effects {
         self.start_queued();
     }
 
-    fn work_answer(&self, id: u32, output: Vec<u8>, entries: Vec<files::Entry>) {
-        let mut record = vec![10];
-        record.extend((entries.len() as u32).to_le_bytes());
+    fn file_answer(
+        &self,
+        id: u32,
+        mut record: Vec<u8>,
+        entries: Vec<files::Entry>,
+        suffix: &[u8],
+        unavailable: Vec<u8>,
+    ) {
         let Some(handles) = files::mint_entries(entries, &mut record) else {
-            self.answer(id, vec![11, 2]);
+            self.answer(id, unavailable);
             return;
         };
-        record.extend(output);
+        record.extend_from_slice(suffix);
         if handles.is_empty() {
             self.answer(id, record);
         } else {
-            let _ = self.send.send(Event::Files {
-                node: EFFECT_NODE,
-                handler: id,
-                record,
-                handles,
-            });
+            let _ = self.send_files(EFFECT_NODE, id, record, handles);
         }
     }
 
@@ -475,6 +493,30 @@ impl Effects {
                     move |stop, _| order.run(stop),
                 );
             }
+            9 => {
+                if let Some(folders::Request {
+                    folder,
+                    limit,
+                    timeout,
+                }) = folders::request(reader)?
+                {
+                    self.spawn(
+                        id,
+                        WorkOptions {
+                            timeout,
+                            timeout_tag: 7,
+                            finish_on_cancel: false,
+                            unavailable: vec![15, 2],
+                        },
+                        move |stop, _| match folder.list(limit, stop) {
+                            Ok((files, flags)) => Outcome::Folder { files, flags },
+                            Err(_) => Outcome::Bytes(vec![15, 3]),
+                        },
+                    );
+                } else {
+                    self.answer(id, vec![15, 3]);
+                }
+            }
             11 | 13 | 14 => {
                 let task = files::FileTask::read(kind, reader)?;
                 self.spawn(
@@ -551,6 +593,24 @@ impl Effects {
         self.deliver_paths(node, handler, paths)
     }
 
+    pub(crate) fn pick_folder(&mut self, node: u32, handler: u32) -> Result<()> {
+        match folders::pick(self.window) {
+            Ok(Some(path)) => self.deliver_folder(node, handler, Some(path)),
+            Ok(None) => Ok(()),
+            Err(_) => self.deliver_folder(node, handler, None),
+        }
+    }
+
+    pub(crate) fn deliver_folder(
+        &mut self,
+        node: u32,
+        handler: u32,
+        path: Option<PathBuf>,
+    ) -> Result<()> {
+        let (record, handles) = files::folder_selection(path);
+        self.send_files(node, handler, record, handles)
+    }
+
     pub(crate) fn deliver_paths(
         &mut self,
         node: u32,
@@ -558,14 +618,26 @@ impl Effects {
         paths: Vec<PathBuf>,
     ) -> Result<()> {
         if let Some((record, handles)) = files::selection(paths) {
-            self.send
-                .send(Event::Files {
-                    node,
-                    handler,
-                    record,
-                    handles,
-                })
-                .map_err(|_| "window closed while delivering files".to_owned())?;
+            self.send_files(node, handler, record, handles)?;
+        }
+        Ok(())
+    }
+
+    fn send_files(
+        &self,
+        node: u32,
+        handler: u32,
+        record: Vec<u8>,
+        handles: Vec<u64>,
+    ) -> Result<()> {
+        if let Err(mpsc::SendError(Event::Files { handles, .. })) = self.send.send(Event::Files {
+            node,
+            handler,
+            record,
+            handles,
+        }) {
+            files::discard_entries(handles);
+            return Err("window closed while delivering file capabilities".into());
         }
         Ok(())
     }

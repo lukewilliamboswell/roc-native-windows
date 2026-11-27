@@ -1,4 +1,5 @@
 import Engine exposing [Elem, Handler, HandlerOf, Signal]
+import Files
 
 ## Native Windows controls backed by the roc-signals engine.
 Ui := [].{
@@ -174,6 +175,12 @@ Ui := [].{
 			[Engine.attr("multiple", bool_word(props.selection == MultipleFiles)), Engine.on_files(Change, props.on_files)],
 			[Engine.text_s(title)],
 		)
+
+	FolderButtonProps(ctx) : Files.FolderButtonProps(ctx)
+
+	## Open the system folder picker. Cancelling preserves the current selection.
+	folder_button : Signal(ctx, Str), FolderButtonProps(ctx) -> Elem(ctx)
+	folder_button = Files.folder_button
 
 	## An image's accessible label and dimensions in device-independent pixels.
 	AssetImageProps := { label : Str, width : U32, height : U32 }

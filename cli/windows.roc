@@ -633,6 +633,7 @@ spec_step = |expr| {
 			Ok(parts.append(word))
 		}
 		("files", _) => spec_texts(args, "Expected a fixture path in quotes")
+		("folder", []) | ("folder", [Quoted(_, _)]) => spec_texts(args, "Expected a fixture directory in quotes")
 		("await-work", []) | ("clipboard-busy", []) => Ok([])
 		("expect-clipboard", [count, Quoted(value, _)]) =>
 			spec_number(count, "clipboard writes", 0, 4294967295).map_ok(|number| [number, value])
@@ -699,7 +700,7 @@ spec_locator = |expr| {
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text", "file-button", "image", "test-id", "combo-box", "list-box", "radio-group"]
+	kinds = ["button", "checkbox", "text-field", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?

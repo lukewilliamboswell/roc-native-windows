@@ -26,6 +26,7 @@ pub(crate) enum Control {
     Text,
     Button,
     FileButton,
+    FolderButton,
     Checkbox,
     AggregateCheckbox,
     Edit,
@@ -42,6 +43,7 @@ impl Control {
             "ui-text" => Self::Text,
             "ui-button" => Self::Button,
             "ui-file-button" => Self::FileButton,
+            "ui-folder-button" => Self::FolderButton,
             "ui-checkbox" => Self::Checkbox,
             "ui-aggregate-checkbox" => Self::AggregateCheckbox,
             "ui-text-field" => Self::Edit,
@@ -65,7 +67,9 @@ impl Control {
     fn class(self) -> (u32, PCWSTR, u32) {
         match self {
             Self::Text => (0, w!("STATIC"), SS_LEFT | SS_NOPREFIX),
-            Self::Button | Self::FileButton => (0, w!("BUTTON"), WS_TABSTOP | BS_PUSHBUTTON as u32),
+            Self::Button | Self::FileButton | Self::FolderButton => {
+                (0, w!("BUTTON"), WS_TABSTOP | BS_PUSHBUTTON as u32)
+            }
             Self::Checkbox => (0, w!("BUTTON"), WS_TABSTOP | BS_AUTOCHECKBOX as u32),
             Self::AggregateCheckbox => (0, w!("BUTTON"), WS_TABSTOP | BS_3STATE as u32),
             Self::Edit => (
@@ -393,7 +397,12 @@ impl Surface {
             }
         }
         let target = focused
-            .filter(|view| matches!(view.kind, Control::Button | Control::FileButton))
+            .filter(|view| {
+                matches!(
+                    view.kind,
+                    Control::Button | Control::FileButton | Control::FolderButton
+                )
+            })
             .unwrap_or(default);
         // SAFETY: The target is a mounted control owned by this thread.
         (unsafe { IsWindowEnabled(target.handle) } != 0).then_some(target.handle)
@@ -862,7 +871,7 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             max_width,
             wrap_height(dc, &view.props.caption, max_width).max(dip(20)),
         ),
-        Control::Button | Control::FileButton => (
+        Control::Button | Control::FileButton | Control::FolderButton => (
             (text_width(dc, &view.props.caption) + dip(30)).max(dip(80)),
             dip(30),
         ),

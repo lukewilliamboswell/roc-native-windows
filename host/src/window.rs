@@ -231,6 +231,12 @@ impl App {
                 }
                 return Ok(());
             }
+            (Control::FolderButton, BN_CLICKED) => {
+                if let Some((node, listener)) = self.tree.event(key, "change") {
+                    self.effects.pick_folder(node, listener.handler)?;
+                }
+                return Ok(());
+            }
             _ => return Ok(()),
         };
         if let Some((node, listener)) = self.tree.event(key, event_name) {

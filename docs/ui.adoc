@@ -44,6 +44,15 @@ becomes the displayed selection when the handler updates that signal.
 A multi-file confirmation delivers its files and refusal count in one
 event. Cancelling the picker leaves the app's selection alone.
 
+`Ui.folder_button` delivers either `FolderChosen(folder)` or
+`FolderRefused(Unavailable)`. Use `folder.name()` for display and
+`folder.files({})` in an engine request to obtain up to 16 immediate
+ordinary files. Set `limit` to request fewer. Results are ordered by
+UTF-16 filename and report a partial listing when the scan or result
+limit is reached or an entry is skipped. Enumeration skips subdirectories
+and reports reparse points as skipped entries. The returned files support
+reading, hashing, and saving a copy. The host keeps their paths private.
+
 For a complete example, see the Starter app and its specs described in
 xref:apps.adoc#examples[Choose an example].
 

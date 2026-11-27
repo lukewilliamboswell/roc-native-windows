@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 pub(crate) const VERSION: u32 = 23;
 #[cfg(windows)]
 pub(crate) const EFFECT_NODE: u32 = u32::MAX;
+pub(crate) const FOLDER_PORT: &str = "roc-native-windows/folder-files";
 const MAX_DEPTH: usize = 256;
 
 pub(crate) struct Reader<'a> {
@@ -102,8 +103,14 @@ impl Declarations {
             }
             match tag {
                 2 => out.local_keys = read_strings(&mut body)?,
-                5 if body.u32()? == 0 => {}
-                5 => return Err("this host does not support ports".into()),
+                5 => match body.u32()? {
+                    0 => {}
+                    1 if body.string()? == FOLDER_PORT
+                        && body.u8()? == 2
+                        && body.u8()? == 0
+                        && body.u32()? == 0 => {}
+                    _ => return Err("unsupported native port declaration".into()),
+                },
                 6 => out.media_queries = read_strings(&mut body)?,
                 10 => out.zone_days = body.u16()?,
                 11 => out.session_keys = read_strings(&mut body)?,

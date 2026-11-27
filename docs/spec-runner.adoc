@@ -64,6 +64,9 @@ with `expect-interval`.
 `(files "tests/fixtures/hello.txt")` supplies a file as a picker result.
 Pass several paths to simulate a multi-file picker. The app reads or
 hashes files through the production file adapter.
+`(folder "tests/fixtures/photos")` supplies a directory to a folder picker
+and runs the same bounded listing as a live selection. `(folder)`
+simulates cancelling the dialog. Fixture paths are relative to the app.
 `(await-work)` waits for file and Roc worker work to settle with a
 real-time bound. Use `(setup (live-effects http))` to exercise the real
 HTTP adapter or `(setup (live-effects time))` for real timers. Use a

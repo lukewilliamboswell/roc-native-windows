@@ -36,6 +36,9 @@ impl Order {
             let entry = files::resolve(reader.u64()?)?;
             let start = reader.u64()?;
             let len = reader.u64()?;
+            if entry.folder.is_some() {
+                return Err("worker file input is a folder capability".into());
+            }
             if !start.checked_add(len).is_some_and(|end| end <= entry.size) {
                 return Err("worker input range is outside its file".into());
             }

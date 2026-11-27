@@ -299,6 +299,8 @@ impl App {
     fn spec_step(&mut self, step: &Step<'_>) -> Result<()> {
         match (step.command, step.args.as_slice()) {
             ("files", _) => self.spec_files(&step.args),
+            ("folder", []) => Ok(()),
+            ("folder", [name]) => self.spec_folder(name),
             ("clipboard-busy", []) => {
                 self.effects.clipboard_busy = true;
                 Ok(())
@@ -394,21 +396,9 @@ impl App {
             .tree
             .event(key, "change")
             .ok_or("file picker has no handler")?;
-        let root = std::env::current_dir()
-            .map_err(|err| format!("cannot resolve fixture directory: {err}"))?;
         let paths = args
             .iter()
-            .map(|name| {
-                let path = Path::new(name);
-                if name.is_empty()
-                    || path
-                        .components()
-                        .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
-                {
-                    return Err("file fixtures must be relative to the app directory".into());
-                }
-                Ok(root.join(path))
-            })
+            .map(|name| fixture_path(name))
             .collect::<Result<Vec<_>>>()?;
         if paths.len() > 1
             && !self
@@ -420,6 +410,20 @@ impl App {
             return Err("the file picker accepts one file".into());
         }
         self.effects.deliver_paths(node, listener.handler, paths)?;
+        self.poll()
+    }
+
+    fn spec_folder(&mut self, fixture: &str) -> Result<()> {
+        let key = self.one_control(&[("folder-button", "")])?;
+        if self.surface.spec_disabled(key)? {
+            return Err("the folder picker is disabled".into());
+        }
+        let (node, listener) = self
+            .tree
+            .event(key, "change")
+            .ok_or("folder picker has no handler")?;
+        self.effects
+            .deliver_folder(node, listener.handler, Some(fixture_path(fixture)?))?;
         self.poll()
     }
 
@@ -548,6 +552,20 @@ impl App {
         }
         Ok(found)
     }
+}
+
+fn fixture_path(name: &str) -> Result<std::path::PathBuf> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+    {
+        return Err("fixtures must be relative to the app directory".into());
+    }
+    std::env::current_dir()
+        .map(|root| root.join(path))
+        .map_err(|error| format!("cannot resolve fixture directory: {error}"))
 }
 
 fn number<T: FromStr>(value: &str) -> Result<T> {

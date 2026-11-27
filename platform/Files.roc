@@ -1,4 +1,5 @@
 import engine.EngineHost
+import engine.Port
 import Effects
 import Engine
 
@@ -8,11 +9,47 @@ import Engine
 ## and builders carry the job's effects. Opening a builder has no file to
 ## carry them, so it is the one effect a task calls through this module.
 ##
-## `Files` is part of the platform alone. An app module that imports it
-## builds for the browser and as the native spec runner, which serve the
-## effects, but not into a fuzz target, which depends on the engine as a
-## package: a target fuzzes such an app's pure parts instead.
+## Folder capabilities and worker file builders.
 Files := [].{
+
+	FolderSelection : [FolderChosen(Folder), FolderRefused(FolderFailure)]
+
+	FolderFailure : [Unavailable]
+
+	## A chosen directory. The display name omits the location.
+	Folder :: { file : Engine.File }.{
+		name : Folder -> Str
+		name = |{ file }| file.name()
+
+		## Request immediate ordinary files, in filename order, up to the limit.
+		files : Folder, FolderFilesProps -> Engine.Ask(FolderListing, FolderFailure)
+		files = |{ file }, props| Engine.ask_of(ListFolder.{}, { file, limit: props.limit.max(1).min(16) })
+	}
+
+	## Defaults to 16 files. The supported range is 1 through 16.
+	FolderFilesProps := { limit : U8 ?? 16 }
+
+	FolderListing : {
+		files : List(Engine.File),
+		completeness : [Complete, Partial({ limit_reached : Bool, skipped_entries : Bool })],
+	}
+
+	FolderButtonProps(ctx) := { on_folder : Engine.HandlerOf(ctx, FolderSelection) }
+
+	folder_button : Engine.Signal(ctx, Str), FolderButtonProps(ctx) -> Engine.Elem(ctx)
+	folder_button = |title, props| {
+		handler = props.on_folder.from_payload_by(
+			Engine.const({}),
+			|_, { files, refused }| match (files, refused) {
+				([file], 0) => FolderChosen(Folder.{ file })
+				_ => FolderRefused(Unavailable)
+			},
+		)
+		Engine.element("ui-folder-button", [Engine.on_files(Change, handler)], [Engine.text_s(title)])
+	}
+
+	folder_ports : () -> List(Engine.PortRegistration)
+	folder_ports = || Port.registrations({ folders: list_port })
 
 	## How a builder starts: the new file's `name`, its media `mime` type
 	## (`Auto`: the type of the file it starts from, or none), and what it
@@ -36,3 +73,22 @@ Files := [].{
 	build! : BuildProps => Engine.Builder
 	build! = |props| EngineHost.open_builder!(Effects.job, props)
 }
+
+ListFolder := {}.{
+	request : ListFolder, { file : Engine.File, limit : U8 } -> Engine.Request
+	request = |_, { file, limit }| list_port.request({ folder: file, limit })
+
+	result : ListFolder, Engine.Result -> Try(Files.FolderListing, Files.FolderFailure)
+	result = |_, answer| match answer {
+		PortAnswer(_) => match list_port.result(answer) {
+			Ok({ flags: 0, files }) => Ok({ files, completeness: Complete })
+			Ok({ flags, files }) if flags >= 1 and flags <= 3 =>
+				Ok({ files, completeness: Partial({ limit_reached: flags != 2, skipped_entries: flags != 1 }) })
+			_ => Err(Unavailable)
+		}
+		_ => Err(Unavailable)
+	}
+}
+
+list_port : Port.Call({ folder : Engine.File, limit : U8 }, { files : List(Engine.File), flags : U8 })
+list_port = Port.call({ name: "roc-native-windows/folder-files", timeout: Ms(10000) })

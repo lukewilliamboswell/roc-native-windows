@@ -1,4 +1,4 @@
-use super::{Result, put_string, tagged};
+use super::{Result, folders::Folder, put_string, tagged};
 use crate::wire::Reader;
 use std::collections::HashMap;
 use std::ffi::{OsString, c_void};
@@ -24,6 +24,8 @@ pub(super) struct Entry {
     pub(super) size: u64,
     name: String,
     mime: String,
+    pub(super) folder: Option<Arc<Folder>>,
+    folder_file: Option<Arc<Mutex<File>>>,
     _temporary: Option<Arc<Temporary>>,
 }
 
@@ -54,8 +56,42 @@ impl Entry {
             size: meta.len(),
             name,
             mime,
+            folder: None,
+            folder_file: None,
             _temporary: None,
         })
+    }
+
+    fn for_folder(path: PathBuf) -> io::Result<Self> {
+        let folder = Arc::new(Folder::open(&path)?);
+        let name = path
+            .file_name()
+            .unwrap_or(std::ffi::OsStr::new("Selected folder"))
+            .to_string_lossy()
+            .into_owned();
+        Ok(Self {
+            path: PathBuf::new(),
+            size: 0,
+            name,
+            mime: String::new(),
+            folder: Some(folder),
+            folder_file: None,
+            _temporary: None,
+        })
+    }
+
+    pub(super) fn folder_file(path: PathBuf, file: File, size: u64) -> Self {
+        let name = path.to_string_lossy().into_owned();
+        let mime = mime(&path).into();
+        Self {
+            path,
+            size,
+            name,
+            mime,
+            folder: None,
+            folder_file: Some(Arc::new(Mutex::new(file))),
+            _temporary: None,
+        }
     }
 
     pub(super) fn temporary(name: &str, mime: &str, bytes: &[u8]) -> io::Result<Self> {
@@ -78,6 +114,8 @@ impl Entry {
             size: bytes.len() as u64,
             name: name.into(),
             mime: mime.into(),
+            folder: None,
+            folder_file: None,
             _temporary: Some(backing),
         })
     }
@@ -89,17 +127,13 @@ impl Entry {
                 "file range is outside the supported bounds",
             ));
         }
-        let mut file = File::open(&self.path)?;
-        file.seek(SeekFrom::Start(start))?;
-        let mut data = Vec::new();
-        file.take(len).read_to_end(&mut data)?;
-        if data.len() as u64 != len {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "file changed while being read",
-            ));
+        if self.folder.is_some() {
+            return Err(io::ErrorKind::IsADirectory.into());
         }
-        Ok(data)
+        if let Some(file) = &self.folder_file {
+            return read_range(&mut file.lock().unwrap(), start, len);
+        }
+        read_range(&mut File::open(&self.path)?, start, len)
     }
 
     pub(super) fn encode(&self, record: &mut Vec<u8>) {
@@ -107,6 +141,19 @@ impl Entry {
         put_string(record, &self.name);
         put_string(record, &self.mime);
     }
+}
+
+fn read_range(file: &mut File, start: u64, len: u64) -> io::Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(start))?;
+    let mut data = Vec::new();
+    file.take(len).read_to_end(&mut data)?;
+    if data.len() as u64 != len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "file changed while being read",
+        ));
+    }
+    Ok(data)
 }
 
 struct Handles {
@@ -144,6 +191,13 @@ pub(crate) fn released_box(base: *mut c_void) {
 pub(super) fn collect_released() {
     let mut handles = HANDLES.lock().unwrap();
     for token in std::mem::take(&mut handles.released) {
+        handles.files.remove(&token);
+    }
+}
+
+pub(super) fn discard_entries(tokens: Vec<u64>) {
+    let mut handles = HANDLES.lock().unwrap();
+    for token in tokens {
         handles.files.remove(&token);
     }
 }
@@ -195,6 +249,16 @@ pub(super) fn mint_entries(entries: Vec<Entry>, record: &mut Vec<u8>) -> Option<
     Some(handles)
 }
 
+pub(super) fn folder_selection(path: Option<PathBuf>) -> (Vec<u8>, Vec<u64>) {
+    if let Some(entry) = path.and_then(|path| Entry::for_folder(path).ok()) {
+        let mut record = vec![1, 0, 0, 0, 0, 0, 0, 0];
+        if let Some(handles) = mint_entries(vec![entry], &mut record) {
+            return (record, handles);
+        }
+    }
+    (vec![0, 0, 0, 0, 1, 0, 0, 0], Vec::new())
+}
+
 enum Operation {
     Read(u8, u64),
     Digest,
@@ -229,7 +293,11 @@ impl FileTask {
 
     pub(super) fn run(self, stop: &AtomicBool) -> Vec<u8> {
         if let Operation::Url = self.operation {
-            if self.start != 0 || self.len != self.entry.size {
+            if self.start != 0
+                || self.len != self.entry.size
+                || self.entry.folder.is_some()
+                || self.entry.folder_file.is_some()
+            {
                 return vec![13, 3];
             }
             return tagged(19, file_url(&self.entry.path).as_bytes());
@@ -300,6 +368,10 @@ pub(super) fn save_to(token: u64, start: u64, len: u64, destination: PathBuf) ->
 fn write_range(entry: Entry, start: u64, len: u64, destination: PathBuf) -> Result<()> {
     if !start.checked_add(len).is_some_and(|end| end <= entry.size) {
         return Err("save range is outside the file".into());
+    }
+    if entry.folder_file.is_some() {
+        let bytes = entry.read_range(start, len).map_err(file_error)?;
+        return std::fs::write(destination, bytes).map_err(file_error);
     }
     let mut input = File::open(&entry.path).map_err(file_error)?;
     input.seek(SeekFrom::Start(start)).map_err(file_error)?;
