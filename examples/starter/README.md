@@ -5,7 +5,7 @@ Add a title, then select a row and use the toolbar to mark it read or remove it.
 - `src/` connects Win32 controls to Roc Signals.
 - `logic/` is a Roc package with the reading-list decisions shared by the app and fuzz target.
 - `assets/` holds the bitmap shown in the app.
-- `windows.json` sets the MSI identity, product version, and publisher.
+- `windows.json` sets the MSI identity, version and publisher, plus the name and icon shown in Windows.
 - `tests/specs/` contains a Win32 behaviour test and a recording demo in `.scm` files.
 - `tests/fuzz/` checks reading-list invariants over generated titles.
 
