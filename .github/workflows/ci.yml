@@ -30,7 +30,7 @@ jobs:
   check:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.task == 'build' && 45 || 30 }}
     strategy:
       fail-fast: false
       matrix:
@@ -75,15 +75,12 @@ jobs:
       - name: Probe Windows UI Automation
         if: ${{ !cancelled() && runner.os == 'Windows' && inputs.accessibility && steps.build.conclusion == 'success' }}
         run: blueprint run test-accessibility -- -FreshStarter -BuildProfile size
-      - name: Build the documentation
-        if: runner.os == 'macOS'
-        run: blueprint run docs
 
   stage-windows:
     name: Stage Windows validation artifacts
     if: inputs.windows_arm || inputs.standalone
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
     outputs:
       arm_artifact: ${{ steps.upload-arm.outputs.artifact-id }}
       preview_artifact: ${{ steps.upload-preview.outputs.artifact-id }}
@@ -104,13 +101,6 @@ jobs:
       - name: Bundle the Windows platform
         id: bundle
         run: roc scripts/build.roc -- bundle
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        id: upload-arm
-        if: inputs.windows_arm
-        with:
-          name: windows-link-inputs
-          path: platform/targets/
-          if-no-files-found: error
       - name: Stage the standalone release preview
         id: preview
         if: ${{ !cancelled() && inputs.standalone && steps.bundle.conclusion == 'success' }}
@@ -127,6 +117,43 @@ jobs:
         with:
           name: windows-release-preview
           path: dist/release-preview/
+          if-no-files-found: error
+      - name: Build native ARM64 scenarios and accessibility apps
+        id: arm
+        if: ${{ !cancelled() && inputs.windows_arm && steps.bundle.conclusion == 'success' }}
+        shell: bash
+        env:
+          ACCESSIBILITY: ${{ inputs.accessibility }}
+        run: |
+          staging="$RUNNER_TEMP/windows-arm64-validation"
+          # Counter currently has a demo and no test-mode scenario.
+          for app in examples/{starter,todos,workers,files,http} tests/native-input; do
+            (cd "$app" && roc ../../cli/windows.roc -- test --stage-native --target arm64mingw)
+            mkdir -p "$staging/scenarios/$app"
+            cp -R "$app/build/spec-executables/arm64mingw/." "$staging/scenarios/$app/"
+          done
+
+          if [[ "$ACCESSIBILITY" == true ]]; then
+            compiler=$(command -v roc)
+            launcher="$PWD/cli/windows.roc"
+            for app in examples/{starter,counter,todos,workers,files,http} tests/accessibility/progress; do
+              (cd "$app" && "$compiler" "$launcher" -- build --target arm64mingw --profile size)
+              destination="$staging/accessibility/${app##*/}"
+              mkdir -p "$destination"
+              cp -R "$app/build/arm64mingw/." "$destination/"
+            done
+            generated="$RUNNER_TEMP/reading-list"
+            "$compiler" "$launcher" -- init --platform platform/main.roc "$generated"
+            (cd "$generated" && "$compiler" windows.roc -- build --target arm64mingw --profile size)
+            mkdir -p "$staging/accessibility/fresh-starter"
+            cp -R "$generated/build/arm64mingw/." "$staging/accessibility/fresh-starter/"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload-arm
+        if: ${{ !cancelled() && steps.arm.conclusion == 'success' }}
+        with:
+          name: windows-arm64-validation
+          path: ${{ runner.temp }}/windows-arm64-validation/
           if-no-files-found: error
 
   windows-arm:
@@ -145,38 +172,16 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          name: windows-link-inputs
-          path: platform/targets/
-      - name: Install the pinned Windows x64 Roc compiler for emulation
-        shell: pwsh
-        run: |
-          function Get-VerifiedFile($Url, $Path, $Sha256) {
-            Invoke-WebRequest -Uri $Url -OutFile $Path
-            if ((Get-FileHash -Algorithm SHA256 $Path).Hash -ne $Sha256) {
-              throw "Download digest mismatch for $Url"
-            }
-          }
-          $tools = Join-Path $env:RUNNER_TEMP "roc-windows-tools"
-          New-Item -ItemType Directory -Path $tools | Out-Null
-          $archive = Join-Path $tools "roc.zip"
-          Get-VerifiedFile `
-            "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-11-26-890d6c8/roc_nightly-windows_x86_64-2026-11-26-890d6c8.zip" `
-            $archive "7d2d3a1b48acb2f889f5c3eb1b0ec6a6e5c075cff25ea9c89bcf8b2820105648"
-          Expand-Archive -LiteralPath $archive -DestinationPath $tools
-          $roc = Get-ChildItem $tools -Recurse -File -Filter roc.exe | Select-Object -First 1
-          if (!$roc) { throw "The pinned compiler archive did not contain roc.exe" }
-          $roc.DirectoryName | Add-Content -Path $env:GITHUB_PATH
-          "ROC_WINDOWS_ROC=$($roc.FullName)" | Add-Content -Path $env:GITHUB_ENV
-          & $roc.FullName version
-      # Run the task script with the verified compiler. Blueprint's embedded
-      # compiler setup stalled under x64 emulation before the tasks began.
+          name: windows-arm64-validation
+          path: ${{ runner.temp }}/windows-arm64-validation
       - name: Run native Windows scenarios
         if: matrix.suite == 'scenarios'
-        # Roc expects run on x64 and macOS. The emulated interpreter stalled here.
-        run: roc scripts/build.roc -- test-native --target arm64mingw --skip-expects
+        shell: pwsh
+        run: tests/run-staged-scenarios.ps1 -Directory "$env:RUNNER_TEMP/windows-arm64-validation/scenarios"
       - name: Probe Windows UI Automation
         if: matrix.suite == 'accessibility'
-        run: roc scripts/build.roc -- test-accessibility -Target arm64mingw -FreshStarter -BuildProfile size
+        shell: powershell
+        run: tests/accessibility/run.ps1 -Target arm64mingw -FreshStarter -BuiltApps "$env:RUNNER_TEMP/windows-arm64-validation/accessibility"
 
   windows-standalone:
     name: Windows x64 standalone Reading List

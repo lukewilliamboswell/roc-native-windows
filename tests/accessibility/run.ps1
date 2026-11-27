@@ -5,6 +5,7 @@ param(
     [ValidateSet("counter", "starter", "todos", "files", "http", "workers", "progress")] [string[]] $Example,
     [string] $Starter,
     [switch] $FreshStarter,
+    [string] $BuiltApps,
     [int] $AppPid,
     [string] $Check
 )
@@ -39,17 +40,24 @@ if (-not $Example) {
     $Example = @("counter", "starter", "todos", "files", "http", "workers", "progress")
 }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
+if ($BuiltApps) {
+    if ($Starter) { throw "-Starter and -BuiltApps cannot be combined." }
+    $BuiltApps = (Resolve-Path -LiteralPath $BuiltApps).Path
+}
 $env:ROC_WINDOWS_ROC = $Roc
 $windows = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 Write-Output "Windows build $($windows.CurrentBuild).$($windows.UBR), app target $Target"
 
-function Invoke-ExampleProbe($name, $directory, $tool, $label) {
+function Invoke-ExampleProbe($name, $directory, $tool, $label, $builtDirectory) {
     Push-Location $directory
     try {
-        & $Roc $tool -- build --target $Target --profile $BuildProfile
-        if ($LASTEXITCODE -ne 0) { throw "Could not build $label for $Target." }
-        $exe = @(Get-ChildItem -File "build/$Target" -Filter "*.exe")
-        if ($exe.Count -ne 1) { throw "Expected exactly one built executable for $label in build/$Target." }
+        if (-not $builtDirectory) {
+            & $Roc $tool -- build --target $Target --profile $BuildProfile
+            if ($LASTEXITCODE -ne 0) { throw "Could not build $label for $Target." }
+            $builtDirectory = "build/$Target"
+        }
+        $exe = @(Get-ChildItem -LiteralPath $builtDirectory -File -Filter "*.exe")
+        if ($exe.Count -ne 1) { throw "Expected exactly one built executable for $label in $builtDirectory." }
         $app = Start-Process -FilePath $exe[0].FullName -WorkingDirectory $directory -PassThru
         $probe = $null
         try {
@@ -83,7 +91,10 @@ $launcher = Join-Path $repo "cli/windows.roc"
 $failures = @()
 foreach ($name in $Example) {
     try {
-        if ($Starter -and $name -eq "starter") {
+        if ($BuiltApps) {
+            $directory = Join-Path $BuiltApps $name
+            Invoke-ExampleProbe $name $directory $null $name $directory
+        } elseif ($Starter -and $name -eq "starter") {
             $directory = (Resolve-Path $Starter).Path
             Invoke-ExampleProbe $name $directory (Join-Path $directory "windows.roc") "supplied starter"
         } elseif ($name -eq "progress") {
@@ -100,14 +111,19 @@ if ($FreshStarter) {
     $scratch = Join-Path $repo "build/accessibility-$([Guid]::NewGuid().ToString('N'))"
     $directory = Join-Path $scratch "reading-list"
     try {
-        Push-Location $repo
-        try {
-            & $Roc $launcher -- init --platform platform/main.roc $directory
-            if ($LASTEXITCODE -ne 0) { throw "Could not initialize the fresh Reading List project." }
-        } finally {
-            Pop-Location
+        if ($BuiltApps) {
+            $directory = Join-Path $BuiltApps "fresh-starter"
+            Invoke-ExampleProbe "starter" $directory $null "fresh starter" $directory
+        } else {
+            Push-Location $repo
+            try {
+                & $Roc $launcher -- init --platform platform/main.roc $directory
+                if ($LASTEXITCODE -ne 0) { throw "Could not initialize the fresh Reading List project." }
+            } finally {
+                Pop-Location
+            }
+            Invoke-ExampleProbe "starter" $directory (Join-Path $directory "windows.roc") "fresh starter"
         }
-        Invoke-ExampleProbe "starter" $directory (Join-Path $directory "windows.roc") "fresh starter"
     } catch {
         $failures += "fresh starter ($Target): $_"
     } finally {

@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Preview')] [string] $ReleaseDirectory,
     [Parameter(Mandatory, ParameterSetName = 'Published')] [uri] $ReleaseUrl,
     [string] $Roc = "roc",
-    [switch] $TestInstaller
+    [switch] $TestInstaller,
+    [string] $ArmInstallersDirectory
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,52 +14,22 @@ $scratch = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath
 $project = Join-Path $scratch.FullName 'reading-list'
 $server = $null
 
-function Invoke-Installer($operation, $msi, $log, $installDirectory) {
-    $arguments = @($operation, ('"{0}"' -f $msi), '/qn', '/norestart', '/l*v', ('"{0}"' -f $log))
-    if ($installDirectory) { $arguments += ('INSTALLDIR="{0}"' -f $installDirectory) }
-    $process = Start-Process msiexec.exe -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
-    if ($process.ExitCode -ne 0) {
-        if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 100 | Write-Host }
-        throw "Windows Installer $operation exited with code $($process.ExitCode)."
-    }
-}
-
-function Test-ReadingListInstaller {
-    $installDirectory = Join-Path $scratch.FullName 'installed'
+function New-ReadingListInstallers($target, $destination) {
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    $destination = (Resolve-Path -LiteralPath $destination).Path
     $identity = "com.example.reading-list.$([Guid]::NewGuid().ToString('N'))"
-    $localMsi = Join-Path $project 'dist/reading-list-x64mingw.msi'
-    $installedMsi = $null
     Push-Location -LiteralPath $project
     try {
         foreach ($version in @('1.0.0', '1.0.1')) {
-            & $compiler windows.roc -- package --target x64mingw --profile size --id $identity --app-version $version
-            if ($LASTEXITCODE -ne 0) { throw "Could not package Reading List $version." }
-            $msi = Join-Path $scratch.FullName "reading-list-$version.msi"
-            Move-Item -LiteralPath $localMsi -Destination $msi
-            Invoke-Installer '/i' $msi (Join-Path $scratch.FullName "install-$version.log") $installDirectory
-            $installedMsi = $msi
-            $installedExe = Join-Path $installDirectory 'reading-list.exe'
-            $expected = Get-FileHash -LiteralPath 'build/x64mingw/reading-list.exe'
-            $actual = Get-FileHash -LiteralPath $installedExe
-            if ($actual.Hash -ne $expected.Hash) { throw "Installed Reading List $version differs from the built executable." }
-        }
-        $app = Start-Process -FilePath $installedExe -WorkingDirectory $installDirectory -PassThru
-        try {
-            if (!$app.WaitForInputIdle(10000) -or $app.HasExited) { throw 'Installed Reading List failed to start.' }
-        } finally {
-            if (!$app.HasExited -and (!$app.CloseMainWindow() -or !$app.WaitForExit(2000))) {
-                $app.Kill()
-                [void] $app.WaitForExit(2000)
-            }
+            & $compiler windows.roc -- package --target $target --profile size --id $identity --app-version $version
+            if ($LASTEXITCODE -ne 0) { throw "Could not package Reading List $version for $target." }
+            Move-Item -LiteralPath "dist/reading-list-$target.msi" -Destination (Join-Path $destination "reading-list-$target-$version.msi")
+            (Get-FileHash -LiteralPath "build/$target/reading-list.exe").Hash |
+                Set-Content -LiteralPath (Join-Path $destination "reading-list-$target-$version.exe.sha256") -Encoding Ascii
         }
     } finally {
         Pop-Location
-        if ($installedMsi) {
-            Invoke-Installer '/x' $installedMsi (Join-Path $scratch.FullName 'uninstall.log')
-        }
     }
-    if (Test-Path -LiteralPath $installedExe) { throw 'Uninstall left the Reading List executable in place.' }
-    Write-Output 'PASS Reading List MSI install, upgrade, launch, and uninstall.'
 }
 
 $originalCache = $env:ROC_CACHE_DIR
@@ -107,7 +78,12 @@ try {
         Pop-Location
     }
     & (Join-Path $PSScriptRoot 'run.ps1') -Roc $compiler -Target x64mingw -Example starter -Starter $project
-    if ($TestInstaller) { Test-ReadingListInstaller }
+    if ($TestInstaller) {
+        $installers = Join-Path $scratch.FullName 'x64-installers'
+        New-ReadingListInstallers x64mingw $installers
+        & (Join-Path $PSScriptRoot 'installer.ps1') -PackageDirectory $installers -Target x64mingw
+    }
+    if ($ArmInstallersDirectory) { New-ReadingListInstallers arm64mingw $ArmInstallersDirectory }
 } finally {
     $env:ROC_CACHE_DIR = $originalCache
     if ($server -and !$server.HasExited) {

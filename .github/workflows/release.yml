@@ -5,6 +5,8 @@ on:
     paths:
       - .github/workflows/release.yml
       - scripts/release.roc
+      - scripts/release_evidence.py
+      - tests/accessibility/installer.ps1
       - tests/accessibility/standalone.ps1
   workflow_dispatch:
     inputs:
@@ -22,7 +24,7 @@ permissions:
 
 concurrency:
   group: windows-release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RELEASE_VERSION: ${{ inputs.version || '0.0.1' }}
@@ -68,7 +70,7 @@ jobs:
           if-no-files-found: error
 
   smoke:
-    name: Verify generated app and installer
+    name: Verify the generated app and x64 installer
     needs: stage
     runs-on: windows-2025
     timeout-minutes: 40
@@ -87,12 +89,37 @@ jobs:
           path: ${{ runner.temp }}/windows-release-preview
       - name: Bootstrap, test, and package Reading List
         shell: pwsh
-        run: tests/accessibility/standalone.ps1 -ReleaseDirectory "$env:RUNNER_TEMP/windows-release-preview" -TestInstaller
+        run: |
+          tests/accessibility/standalone.ps1 `
+            -ReleaseDirectory "$env:RUNNER_TEMP/windows-release-preview" `
+            -TestInstaller -ArmInstallersDirectory "$env:RUNNER_TEMP/arm-installers"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: arm-installers
+          path: ${{ runner.temp }}/arm-installers/
+          if-no-files-found: error
+
+  install-arm:
+    name: Verify the ARM64 installer
+    needs: smoke
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: arm-installers
+          path: ${{ runner.temp }}/arm-installers
+      - name: Install, launch, upgrade, and uninstall Reading List
+        shell: pwsh
+        run: tests/accessibility/installer.ps1 -PackageDirectory "$env:RUNNER_TEMP/arm-installers" -Target arm64mingw
 
   publish:
     name: Publish the GitHub release
     if: inputs.publish && github.ref == 'refs/heads/main' && github.repository == 'lukewilliamboswell/roc-native-windows'
-    needs: smoke
+    needs: install-arm
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -112,6 +139,8 @@ jobs:
         run: |
           gh release create "$RELEASE_VERSION" release/* --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --title "$RELEASE_VERSION" --generate-notes --draft
+          gh release download "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/verified"
+          diff --recursive release "$RUNNER_TEMP/verified"
           gh release edit "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
 
   verify:

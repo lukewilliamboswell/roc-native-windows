@@ -44,7 +44,7 @@ asset_manifest = "assets.json"
 
 AssetCatalog : Dict(Str, Str)
 
-TestOptions : { check : Bool, failure_screenshot : Bool, skip_expects : Bool, target : Str }
+TestOptions : { check : Bool, failure_screenshot : Bool, skip_expects : Bool, stage_native : Bool, target : Str }
 
 RecordFormat : [Gif, Png]
 
@@ -169,6 +169,7 @@ test_command =
 			check: Opt.flag({ short: "", long: "check", help: "Check source, expects and spec syntax without launching the app." }),
 			failure_screenshot: Opt.flag({ short: "", long: "screenshot-on-failure", help: "Capture the failed step's window under build/specs/ on Windows." }),
 			skip_expects: Opt.flag({ short: "", long: "skip-expects", help: "Skip Roc expects while still checking source and Win32 specs." }),
+			stage_native: Opt.flag({ short: "", long: "stage-native", help: "Build the scenario executable and write its plans for a separate Windows test runner. Requires --target." }),
 			target: target_option,
 		}.Cli,
 		{ name: "test", description: "Run Roc expects and the app's Win32 behaviour specs.", mapper: |options| Test(options) },
@@ -376,6 +377,9 @@ check_exit = |status, step|
 
 test! : TestOptions => Try({}, _)
 test! = |options| {
+	if options.stage_native and (options.check or options.target.is_empty()) {
+		return Err(ScenarioStageUsage)
+	}
 	catalog = asset_catalog!()?
 	entries = collect_assets!("assets", catalog)?
 	for entry in entries {
@@ -409,6 +413,17 @@ test! = |options| {
 	tests = $scenarios.keep_if(|scenario| scenario.mode == TestMode)
 	own = windows_target!()
 	if (tests.is_empty()) return Ok({})
+	if options.stage_native {
+		built = build_with_metadata!(options.target, settings, ScenarioRunner)?
+		plans = Path.utf8("${built.dir}/plans")
+		Path.create_all!(plans)?
+		for scenario in tests {
+			name = scenario_filename(scenario.path)
+			if (!valid_asset_name(name)) return Err(SpecProblem(scenario.path, "Expected a Windows-safe scenario file name"))
+			Path.write_bytes!(plans.join("${name}.plan"), spec_encode(scenario))?
+		}
+		return Stdout.line!("Staged ${tests.len().to_str()} Win32 scenarios in ${built.dir}.")
+	}
 	if options.check or own.is_empty() {
 		return Stdout.line!("${tests.len().to_str()} Win32 scenarios require a native test run on Windows.")
 	}
@@ -459,10 +474,12 @@ read_scenario! = |path| {
 	spec_parse(path, source).map_err(|issue| SpecProblem("${path}:${issue.pos.line.to_str()}:${issue.pos.column.to_str()}", issue.message))
 }
 
+scenario_filename = |path| path.replace_each("\\", "/").split_on("/").last() ?? ""
+
 run_scenario! : Path.Path, Scenario, Str, Bool => Try(Str, Str)
 run_scenario! = |program, scenario, record_format, failure_screenshot| {
 	ensure_dir!("build/specs") ? |issue| "Could not prepare build/specs: ${Str.inspect(issue)}"
-	name = Path.filename(Path.utf8(scenario.path)).map_ok(Path.display) ?? "scenario"
+	name = scenario_filename(scenario.path)
 	stem = name.drop_suffix(".scm")
 	prefix = if (valid_asset_name(stem)) stem else "scenario"
 	directory = Env.create_temp_dir_in!(Path.utf8("build/specs"), "${prefix}-") ? |issue| "Could not create an artifact directory: ${Str.inspect(issue)}"
@@ -2045,6 +2062,7 @@ explain = |problem|
 		MissingEntry => "Expected src/main.roc or main.roc in the current directory."
 		SpecProblem(location, detail) => "${location}: ${detail}"
 		SpecSuiteFailed(count) => "${count.to_str()} native scenarios failed."
+		ScenarioStageUsage => "Use --stage-native with --target and without --check."
 		RecordRequiresWindows => "Recording requires a Windows x64 or ARM64 machine."
 		MissingFuzz => "Expected a roc-fuzz app at tests/fuzz/main.roc."
 		FuzzHost => "The bundled roc-fuzz suite runs on Apple Silicon macOS or x64 Linux."
@@ -2133,11 +2151,12 @@ expect parse_text(["run", "--target=x64mingw"]) == Ok(Run({ target: "x64mingw", 
 expect parse_text(["dev"]) == Ok(Dev(""))
 expect parse_text(["dev", "--target=arm64mingw"]) == Ok(Dev("arm64mingw"))
 expect parse_text(["build", "--profile=dev"]).is_err()
-expect parse_text(["test"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, skip_expects: Bool.False, target: "" }))
-expect parse_text(["test", "--check"]) == Ok(Test({ check: Bool.True, failure_screenshot: Bool.False, skip_expects: Bool.False, target: "" }))
-expect parse_text(["test", "--target", "arm64mingw", "--skip-expects"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, skip_expects: Bool.True, target: "arm64mingw" }))
+expect parse_text(["test"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, skip_expects: Bool.False, stage_native: Bool.False, target: "" }))
+expect parse_text(["test", "--check"]) == Ok(Test({ check: Bool.True, failure_screenshot: Bool.False, skip_expects: Bool.False, stage_native: Bool.False, target: "" }))
+expect parse_text(["test", "--target", "arm64mingw", "--skip-expects"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, skip_expects: Bool.True, stage_native: Bool.False, target: "arm64mingw" }))
+expect parse_text(["test", "--target", "arm64mingw", "--stage-native"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, skip_expects: Bool.False, stage_native: Bool.True, target: "arm64mingw" }))
 expect parse_text(["record", "tests/specs/demo.scm", "--format", "png"]) == Ok(Record("tests/specs/demo.scm", Png, ""))
-expect parse_text(["test", "--target", "arm64mingw", "--screenshot-on-failure"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.True, skip_expects: Bool.False, target: "arm64mingw" }))
+expect parse_text(["test", "--target", "arm64mingw", "--screenshot-on-failure"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.True, skip_expects: Bool.False, stage_native: Bool.False, target: "arm64mingw" }))
 expect parse_text(["record", "--target", "arm64mingw", "tests/specs/demo.scm"]) == Ok(Record("tests/specs/demo.scm", Gif, "arm64mingw"))
 expect parse_text(["help"]) == Ok(Help)
 expect parse_text([]) == Ok(Help)
