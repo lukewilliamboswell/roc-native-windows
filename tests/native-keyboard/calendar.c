@@ -32,6 +32,14 @@ static int has_caption(HWND window, const WCHAR *caption) {
     return wcscmp(text, caption) == 0;
 }
 
+static int wait_for_focus_caption(HWND window, const WCHAR *caption) {
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        if (has_caption(focus(window), caption)) return 1;
+        Sleep(50);
+    }
+    return 0;
+}
+
 static HWND picker(void) {
     return FindWindowW(L"#32770", L"Choose date for New due date");
 }
@@ -54,7 +62,7 @@ static int verify(HWND owner, HWND choose) {
     key(VK_RETURN, 0);
     HWND calendar = picker();
     if (!calendar || GetWindow(calendar, GW_OWNER) != owner || IsWindowEnabled(owner)) return 5;
-    if (!has_caption(focus(calendar), L"31")) return 6;
+    if (!wait_for_focus_caption(calendar, L"31")) return 6;
     key(VK_NEXT, 0);
     if (!has_caption(focus(calendar), L"29")) return 7;
     key(VK_RIGHT, 0);
