@@ -42,7 +42,7 @@ view = || {
 			Selected(key) => state.items.find_first(|item| item.title == key).map_err(|_| NoTitle)
 		},
 	)
-	Ui.vstack(
+	content = Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
 			Ui.hstack(
@@ -52,7 +52,6 @@ view = || {
 					Ui.text("Reading list"),
 				],
 			),
-			Ui.text(items.map(|list| "${ReadingList.remaining(list).to_str()} unread")),
 			Ui.hstack(
 				{},
 				[
@@ -135,6 +134,9 @@ view = || {
 			),
 		],
 	)
+	visible_count = visible_items.map(|list| "${list.len().to_str()} visible")
+	unread_count = items.map(|list| "${ReadingList.remaining(list).to_str()} unread")
+	Ui.window({ status_bar: StatusBar({ text: visible_count, trailing: [{ text: unread_count }] }) }, content)
 }
 
 change : ReadingList.Action -> Engine.Write(_)

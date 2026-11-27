@@ -7,4 +7,5 @@ src/main.roc
 tests/fuzz/main.roc
 tests/specs/demo.scm
 tests/specs/reading-list.scm
+tests/specs/status-narrow.scm
 windows.json
