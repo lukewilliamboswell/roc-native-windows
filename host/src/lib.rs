@@ -12,6 +12,8 @@ mod civil;
 #[cfg(any(test, windows))]
 mod clipboard;
 #[cfg(windows)]
+mod command_icon;
+#[cfg(windows)]
 mod effects;
 #[cfg(windows)]
 mod grid;

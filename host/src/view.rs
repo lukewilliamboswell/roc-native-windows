@@ -1,6 +1,7 @@
 use crate::Result;
 use crate::choice::Choices;
 use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
+use crate::command_icon::ButtonIcon;
 use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
 use crate::progress::{Progress, native::ProgressBar};
@@ -219,6 +220,7 @@ struct View {
     grid: Option<Grid>,
     progress: ProgressBar,
     toolbar: Option<Toolbar>,
+    button_icon: ButtonIcon,
 }
 
 #[derive(Default)]
@@ -229,6 +231,7 @@ struct Props {
     enabled: bool,
     check_state: u32,
     window_default: bool,
+    command_icon: String,
     editable: bool,
     ellipsize: bool,
     civil: Option<CivilValue>,
@@ -292,6 +295,7 @@ impl View {
             progress: ProgressBar::default(),
             grid,
             toolbar,
+            button_icon: ButtonIcon::default(),
         };
         if let Some(mode) = kind.civil() {
             civil::native::initialize(handle, mode)?;
@@ -908,8 +912,15 @@ impl Surface {
         // SAFETY: WM_DPICHANGED names our live root HWND.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let font = make_font(dpi)?;
-        for view in self.views.values_mut() {
+        for (&key, view) in &mut self.views {
             view.font(font);
+            if let Some(toolbar) = &mut view.toolbar {
+                toolbar.sync(view.handle, tree, key, &self.assets, dpi)?;
+            }
+            if view.kind == Control::Button {
+                view.button_icon
+                    .sync(view.handle, &self.assets, &view.props.command_icon, dpi);
+            }
             if let Some(report) = &mut view.list_view {
                 report.measure(view.handle, font, dpi)?;
             }
@@ -1026,6 +1037,7 @@ impl Surface {
                             u32::from(node.attr("checked").is_some_and(enabled_flag))
                         },
                         window_default: node.attr("window-default").is_some_and(enabled_flag),
+                        command_icon: node.attr("command-icon").unwrap_or("").into(),
                         editable: node.attr("editable").is_some_and(enabled_flag),
                         ellipsize: node.attr("ellipsize-end").is_some_and(enabled_flag),
                     },
@@ -1047,7 +1059,15 @@ impl Surface {
                     return Ok(());
                 }
                 if let Some(toolbar) = &mut view.toolbar {
-                    return toolbar.sync(view.handle, tree, key);
+                    return toolbar.sync(view.handle, tree, key, &self.assets, self.dpi);
+                }
+                if kind == Control::Button {
+                    view.button_icon.sync(
+                        view.handle,
+                        &self.assets,
+                        &view.props.command_icon,
+                        self.dpi,
+                    );
                 }
                 if let Some(grid) = &mut view.grid {
                     return grid.sync(
@@ -1436,7 +1456,8 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             wrap_height(dc, &view.props.caption, max_width).max(dip(20)),
         ),
         Control::Button | Control::FileButton | Control::FolderButton => (
-            (text_width(dc, &view.props.caption) + dip(30)).max(dip(80)),
+            (text_width(dc, &view.props.caption) + dip(30) + view.button_icon.width(dpi))
+                .max(dip(80)),
             dip(30),
         ),
         Control::Checkbox | Control::AggregateCheckbox => {
@@ -1715,6 +1736,18 @@ fn wrap_height(dc: HDC, text: &str, width: i32) -> i32 {
 }
 
 fn resolve_bitmap(root: &Path, name: &str) -> Result<PathBuf> {
+    resolve_asset(root, name, "bmp", "BMP")
+}
+
+pub(crate) fn resolve_asset(
+    root: &Path,
+    name: &str,
+    extension: &str,
+    format_name: &str,
+) -> Result<PathBuf> {
+    if name.contains('\0') {
+        return Err("asset path contains a NUL".into());
+    }
     let path = Path::new(name);
     if path
         .components()
@@ -1722,9 +1755,11 @@ fn resolve_bitmap(root: &Path, name: &str) -> Result<PathBuf> {
         || !path
             .extension()
             .and_then(OsStr::to_str)
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("bmp"))
+            .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
     {
-        return Err(format!("asset must be a BMP path under assets: {name}"));
+        return Err(format!(
+            "asset must be a {format_name} path under assets: {name}"
+        ));
     }
     let root = root
         .canonicalize()

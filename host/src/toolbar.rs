@@ -7,6 +7,7 @@ struct Item {
     key: Option<String>,
     title: String,
     enabled: bool,
+    icon: String,
 }
 
 #[derive(Clone, Debug)]
@@ -55,10 +56,12 @@ impl Commands {
 #[cfg(windows)]
 mod native {
     use super::{Commands, Entry, Item, Key, Result};
+    use crate::command_icon::Images;
     use crate::view::{scale, wide};
     use crate::window::enabled_flag;
     use crate::wire::{Kind, Tree};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
     use std::ptr::null_mut;
     use windows_sys::Win32::Foundation::{HWND, RECT, SIZE};
     use windows_sys::Win32::UI::Controls::*;
@@ -70,6 +73,57 @@ mod native {
     #[derive(Default)]
     pub(crate) struct Toolbar {
         commands: Commands,
+        icons: ToolbarIcons,
+    }
+
+    #[derive(Default)]
+    struct ToolbarIcons {
+        names: BTreeSet<String>,
+        dpi: u32,
+        indices: BTreeMap<String, i32>,
+        list: Option<Images>,
+    }
+
+    impl ToolbarIcons {
+        fn sync(&mut self, hwnd: HWND, entries: &[Entry], assets: &Path, dpi: u32) -> bool {
+            let names = entries
+                .iter()
+                .map(|entry| &entry.item.icon)
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if names == self.names && (names.is_empty() || dpi == self.dpi) {
+                return false;
+            }
+            let mut indices = BTreeMap::new();
+            let list = (!names.is_empty())
+                .then(|| Images::new(dpi, names.len() as i32))
+                .flatten()
+                .filter(|list| {
+                    for name in &names {
+                        if let Some(index) = list.add(assets, name, dpi) {
+                            indices.insert(name.clone(), index);
+                        }
+                    }
+                    !indices.is_empty()
+                });
+            if let Some(list) = &list {
+                let edge = scale(dpi, 16).max(1) as isize;
+                send(hwnd, TB_SETBITMAPSIZE, 0, edge | (edge << 16));
+                send(hwnd, TB_SETIMAGELIST, 0, list.handle());
+            } else {
+                send(hwnd, TB_SETIMAGELIST, 0, 0);
+            }
+            self.names = names;
+            self.dpi = dpi;
+            self.indices = indices;
+            self.list = list;
+            true
+        }
+
+        fn index(&self, name: &str) -> i32 {
+            self.indices.get(name).copied().unwrap_or(I_IMAGENONE)
+        }
     }
 
     impl Toolbar {
@@ -84,7 +138,14 @@ mod native {
             send(hwnd, TB_SETMAXTEXTROWS, 1, 0);
         }
 
-        pub(crate) fn sync(&mut self, hwnd: HWND, tree: &Tree, key: Key) -> Result<()> {
+        pub(crate) fn sync(
+            &mut self,
+            hwnd: HWND,
+            tree: &Tree,
+            key: Key,
+            assets: &Path,
+            dpi: u32,
+        ) -> Result<()> {
             let desired = self.commands.project(read(tree, key)?)?;
             let mut live: Vec<_> = self.commands.mounted.iter().map(|entry| entry.id).collect();
             let hot = self
@@ -92,7 +153,8 @@ mod native {
                 .mounted
                 .get(send(hwnd, TB_GETHOTITEM, 0, 0) as usize)
                 .map(|entry| entry.id);
-            let mut changed = false;
+            let images_changed = self.icons.sync(hwnd, &desired, assets, dpi);
+            let mut changed = images_changed;
             for index in (0..live.len()).rev() {
                 if !desired.iter().any(|entry| entry.id == live[index]) {
                     checked(
@@ -124,6 +186,16 @@ mod native {
                         title(hwnd, entry.id, &entry.item.title)?;
                         changed = true;
                     }
+                    if entry.item.key.is_some()
+                        && (images_changed || old.item.icon != entry.item.icon)
+                    {
+                        let image = self.icons.index(&entry.item.icon);
+                        checked(
+                            send(hwnd, TB_CHANGEBITMAP, usize::from(entry.id), image as isize),
+                            "update a toolbar icon",
+                        )?;
+                        changed = true;
+                    }
                     if old.item.enabled != entry.item.enabled {
                         checked(
                             send(
@@ -136,7 +208,7 @@ mod native {
                         )?;
                     }
                 } else {
-                    insert(hwnd, index, entry)?;
+                    insert(hwnd, index, entry, self.icons.index(&entry.item.icon))?;
                     live.insert(index, entry.id);
                     changed = true;
                 }
@@ -207,37 +279,53 @@ mod native {
 
     fn read(tree: &Tree, root: Key) -> Result<Vec<Item>> {
         let mut commands = BTreeSet::new();
-        tree.node(root).children.iter().filter_map(|&key| {
+        let mut items = Vec::new();
+        for &key in &tree.node(root).children {
             let child = tree.node(key);
-            let Kind::Element(tag) = &child.kind else { return None };
-            Some(match tag.as_str() {
-                "ui-toolbar-separator" => Ok(Item { node: key, key: None, title: String::new(), enabled: false }),
+            let Kind::Element(tag) = &child.kind else {
+                continue;
+            };
+            let item = match tag.as_str() {
+                "ui-toolbar-separator" => Item {
+                    node: key,
+                    key: None,
+                    title: String::new(),
+                    enabled: false,
+                    icon: String::new(),
+                },
                 "ui-toolbar-button" => {
                     let logical = child.attr("command-key").unwrap_or("");
                     let title = tree.caption(key);
                     if logical.is_empty() || logical.contains('\0') || !commands.insert(logical) {
-                        return Some(Err(format!("toolbar keys must be nonempty, unique and contain no NUL: {logical:?}")));
+                        return Err(format!(
+                            "toolbar keys must be nonempty, unique and contain no NUL: {logical:?}"
+                        ));
                     }
                     if title.is_empty() || title.contains('\0') {
-                        return Some(Err(format!("toolbar command {logical:?} needs a nonempty title without NUL")));
+                        return Err(format!(
+                            "toolbar command {logical:?} needs a nonempty title without NUL"
+                        ));
                     }
-                    Ok(Item {
+                    Item {
                         node: key,
                         key: Some(logical.to_owned()),
                         title,
                         enabled: child.attr("enabled").is_none_or(enabled_flag),
-                    })
+                        icon: child.attr("command-icon").unwrap_or("").into(),
+                    }
                 }
-                _ => Err(format!("{tag} is not a toolbar item")),
-            })
-        }).collect()
+                _ => return Err(format!("{tag} is not a toolbar item")),
+            };
+            items.push(item);
+        }
+        Ok(items)
     }
 
-    fn insert(hwnd: HWND, index: usize, entry: &Entry) -> Result<()> {
+    fn insert(hwnd: HWND, index: usize, entry: &Entry, image: i32) -> Result<()> {
         let separator = entry.item.key.is_none();
         let text = wide(&entry.item.title);
         let mut button = TBBUTTON {
-            iBitmap: if separator { 0 } else { I_IMAGENONE },
+            iBitmap: if separator { 0 } else { image },
             idCommand: i32::from(entry.id),
             fsState: if entry.item.enabled {
                 TBSTATE_ENABLED as u8
@@ -307,6 +395,7 @@ mod tests {
             key: Some("mark".into()),
             title: title.into(),
             enabled,
+            icon: String::new(),
         }
     }
 

@@ -67,11 +67,15 @@ Ui := [].{
 			[Engine.text_s(value)],
 		)
 
+	## An optional ICO asset beside a command's text.
+	CommandIcon := [NoIcon, IconAsset(Str)]
+
 	## A button's action and enabled state.
 	ButtonProps(ctx) := {
 		on_press : HandlerOf(ctx, Engine.Click),
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
 		enter_action : [Standard, WindowDefault] ?? Standard,
+		icon : Signal(ctx, CommandIcon) ?? Engine.const(NoIcon),
 	}
 
 	## A push button.
@@ -82,6 +86,7 @@ Ui := [].{
 			[
 				Engine.attr_s("enabled", props.enabled.map(bool_word)),
 				Engine.attr("window-default", bool_word(props.enter_action == WindowDefault)),
+				Engine.attr_s("command-icon", props.icon.map(command_icon_path)),
 				Engine.on_click(props.on_press),
 			],
 			[Engine.text_s(title)],
@@ -95,6 +100,7 @@ Ui := [].{
 		key : Str,
 		on_press : HandlerOf(ctx, Engine.Click),
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+		icon : Signal(ctx, CommandIcon) ?? Engine.const(NoIcon),
 	}
 
 	ToolbarItem(ctx) := [ToolbarCommand(Elem(ctx)), ToolbarSeparator]
@@ -107,6 +113,7 @@ Ui := [].{
 			[
 				Engine.attr("command-key", props.key),
 				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.attr_s("command-icon", props.icon.map(command_icon_path)),
 				Engine.on_click(props.on_press),
 			],
 			[Engine.text_s(title)],
@@ -815,3 +822,9 @@ progress_word = |state|
 		Determinate({ total: 0, .. }) => "idle"
 		Determinate({ completed, total }) => "${completed.min(total).to_str()}/${total.to_str()}"
 	}
+
+command_icon_path : Ui.CommandIcon -> Str
+command_icon_path = |icon| match icon {
+	NoIcon => ""
+	IconAsset(path) => path
+}

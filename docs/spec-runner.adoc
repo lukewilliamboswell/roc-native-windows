@@ -15,7 +15,7 @@ label. This scenario adds and checks one item in the Starter app.
     (fill (text-field "Title") "Roc guide")
     (click (button "Add"))
     (expect-row-selected (list-view "Titles") "Roc guide")
-    (click (button "Mark read"))
+    (click (toolbar-button "Mark read"))
     (expect-visible (text "0 unread"))))
 ----
 

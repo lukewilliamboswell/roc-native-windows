@@ -136,6 +136,14 @@ Use Tab to reach the toolbar, arrow keys to move between commands, and Enter
 or Space to activate a command. Commands wrap when the window narrows. Use
 short captions that fit at the smallest supported window width.
 
+Both push buttons and toolbar commands can display an ICO beside the
+caption. Pass an icon signal such as
+`icon: Engine.const(Ui.CommandIcon.IconAsset("reading-list.ico"))`.
+Paths are relative to `assets/` and can include subdirectories.
+The default `NoIcon` omits the image. A missing or unreadable icon
+leaves the command caption and action available.
+Windows displays the image at the appropriate size for the window DPI.
+
 [#list-view]
 == Report lists
 
