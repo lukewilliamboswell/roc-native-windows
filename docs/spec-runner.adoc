@@ -24,7 +24,14 @@ and validate test and demo syntax. On a Windows desktop, use
 `roc windows.roc -- test` to build the app and run each test against
 a fresh process. Each failure names the spec and step. The CLI must match
 the runner protocol in the platform bundle. On Windows on Arm, an x64 Roc
-process can test an ARM64 build with `test --target arm64mingw`.
+process can test an ARM64 build with `test --target arm64mingw`. Add
+`--skip-expects` when Roc expects run on another machine. Source checks and
+the Win32 scenarios still run. Hosted Windows ARM64 uses this option.
+
+Keyboard and mouse actions use the named controls on the scenario's UI
+thread. Scenario windows ignore queued desktop keyboard and mouse messages,
+including while shown for recording. Use a normal app build for manual
+keyboard traversal and physical mouse capture checks.
 
 Selectors look up `button`, `checkbox`, `text-field`, `text-area`, `text`,
 `file-button`, `folder-button`, `file-drop-target`, `image`, `combo-box`, `list-box`, `radio-group`, `list-view`,

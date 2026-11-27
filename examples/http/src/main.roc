@@ -34,11 +34,17 @@ store = Engine.store(
 cells = store.cells()
 
 HttpStyle := {
-	page : Win.Ui.StackProps ?? { padding: 16, spacing: 12 },
-	header : Win.Ui.StackProps ?? { spacing: 12 },
-	title : Win.Ui.TextProps ?? { style: Title },
-	response_panel : Win.Ui.PanelProps ?? { border: Outline, width: Fill },
-	response_status : Win.Ui.TextProps ?? { style: Heading },
+	appearance : Win.Ui.AppearanceProps ?? { accent: CustomAccent({ red: 127, green: 46, blue: 84 }) },
+	page : Win.Ui.StackProps ?? { padding: 14, spacing: 10 },
+	header : Win.Ui.StackProps ?? { spacing: 10 },
+	title : Win.Ui.TextProps ?? { style: Title, tone: AccentText },
+	request_panel : Win.Ui.PanelProps ?? { surface: AccentTint, border: Outline, width: Fill, padding: 10 },
+	request : Win.Ui.StackProps ?? { spacing: 6 },
+	request_actions : Win.Ui.StackProps ?? { spacing: 8, stack_below: 260 },
+	request_progress : Win.Ui.PanelProps ?? { surface: AccentTint, width: Fill, padding: 0 },
+	response_panel : Win.Ui.PanelProps ?? { border: Outline, width: Fill, padding: 12 },
+	response : Win.Ui.StackProps ?? { spacing: 8 },
+	response_status : Win.Ui.TextProps ?? { style: Heading, tone: AccentText },
 	response_body : Win.Ui.TextProps ?? {
 		style: Monospace,
 		font: PackagedFont({ asset: Win.asset("response-font"), family: "IBM Plex Mono" }),
@@ -73,61 +79,72 @@ view = || {
 					Win.Ui.text_with("HTTP", design.title),
 				],
 			),
-			Win.Ui.hstack(
-				{},
-				[
-					Win.Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
-					Win.Ui.button(
-						"Fetch",
-						{
-							enter_action: WindowDefault,
-							enabled: start.map(|r| !r.url.is_empty()),
-							on_press: Engine.handle_by(
-								start,
-								|r, _| [
-									cells.request.set(r),
-									cells.status.set("Fetching…"),
-									cells.body.set(""),
-									cells.reference_for.set(r.serial),
-									cells.reference.set(AwaitingReference),
-									cells.completed.set(""),
-								],
-							),
-						},
-					),
-					Win.Ui.button(
-						"Cancel",
-						{
-							enabled: request.map(|r| r.phase != Idle),
-							on_press: Engine.handle(
-								|_| [
-									cells.request.update(|r| { ..r, phase: Idle }),
-									cells.reference_for.set(0),
-									cells.status.set("Cancelled."),
-								],
-							),
-						},
-					),
-				],
-			),
-			Win.Ui.progress_bar(progress, { label: "Request progress" }),
 			Win.Ui.panel(
-				design.response_panel,
+				design.request_panel,
 				Win.Ui.vstack(
-					{},
+					design.request,
 					[
-						Win.Ui.status_text(cells.status.signal(), { text: design.response_status }),
-						Win.Ui.text_with(cells.body.signal(), design.response_body),
+						Win.Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
+						Win.Ui.hstack(
+							design.request_actions,
+							[
+								Win.Ui.button(
+									"Fetch",
+									{
+										enter_action: WindowDefault,
+										enabled: start.map(|r| !r.url.is_empty()),
+										on_press: Engine.handle_by(
+											start,
+											|r, _| [
+												cells.request.set(r),
+												cells.status.set("Fetching…"),
+												cells.body.set(""),
+												cells.reference_for.set(r.serial),
+												cells.reference.set(AwaitingReference),
+												cells.completed.set(""),
+											],
+										),
+									},
+								),
+								Win.Ui.button(
+									"Cancel",
+									{
+										enabled: request.map(|r| r.phase != Idle),
+										on_press: Engine.handle(
+											|_| [
+												cells.request.update(|r| { ..r, phase: Idle }),
+												cells.reference_for.set(0),
+												cells.status.set("Cancelled."),
+											],
+										),
+									},
+								),
+								Win.Ui.panel(
+									design.request_progress,
+									Win.Ui.progress_bar(progress, { label: "Request progress" }),
+								),
+							],
+						),
 					],
 				),
 			),
-			Win.Ui.copy_button(
-				"Copy request details",
-				{
-					enabled: details.map(|value| !value.is_empty()),
-					text: details,
-					on_result: Engine.handle(|_| []),
-				},
+			Win.Ui.panel(
+				design.response_panel,
+				Win.Ui.vstack(
+					design.response,
+					[
+						Win.Ui.status_text(cells.status.signal(), { text: design.response_status }),
+						Win.Ui.text_with(cells.body.signal(), design.response_body),
+						Win.Ui.copy_button(
+							"Copy request details",
+							{
+								enabled: details.map(|value| !value.is_empty()),
+								text: details,
+								on_result: Engine.handle(|_| []),
+							},
+						),
+					],
+				),
 			),
 			Engine.watch_latest(
 				request,
@@ -166,7 +183,7 @@ view = || {
 			),
 		],
 	)
-	Win.Ui.window({ taskbar_progress: progress }, content)
+	Win.Ui.window({ appearance: design.appearance, taskbar_progress: progress }, content)
 }
 
 answered : Request, Try(Engine.Response, Engine.HttpFailure) -> List(Engine.Write(_))

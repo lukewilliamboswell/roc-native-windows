@@ -14,6 +14,10 @@ on:
         description: Run native scenarios on Windows on Arm
         type: boolean
         default: false
+      standalone:
+        description: Validate Reading List generated from a staged release
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -26,7 +30,7 @@ jobs:
   check:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.runner == 'windows-2025' && 30 || 45 }}
     strategy:
       fail-fast: false
       matrix:
@@ -39,7 +43,8 @@ jobs:
             task: build
           - name: Windows x64 behavior
             runner: windows-2025
-            task: build
+            # The native and UI Automation suites build their own executables.
+            task: bundle
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -64,61 +69,146 @@ jobs:
       - name: Run Windows host unit tests
         if: runner.os == 'Windows'
         run: cargo test --locked --manifest-path host/Cargo.toml
+      - name: Run Windows installer tests
+        if: runner.os == 'Windows'
+        run: cargo test --locked --manifest-path packaging/Cargo.toml
       - name: Run native Windows scenarios
         if: ${{ !cancelled() && runner.os == 'Windows' && steps.build.conclusion == 'success' }}
         run: blueprint run test-native -- --target x64mingw
       - name: Probe Windows UI Automation
         if: ${{ !cancelled() && runner.os == 'Windows' && inputs.accessibility && steps.build.conclusion == 'success' }}
-        run: blueprint run test-accessibility -- -FreshStarter
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: runner.os == 'macOS' && inputs.windows_arm
+        run: blueprint run test-accessibility -- -FreshStarter -BuildProfile size
+
+  stage-windows:
+    name: Stage Windows validation artifacts
+    if: inputs.windows_arm || inputs.standalone
+    runs-on: macos-15
+    timeout-minutes: 45
+    outputs:
+      arm_artifact: ${{ steps.upload-arm.outputs.artifact-id }}
+      preview_artifact: ${{ steps.upload-preview.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          name: windows-link-inputs
-          path: platform/targets/
+          persist-credentials: false
+      - uses: roc-lang/setup-roc@dd81390553b0a1236aedb61cdd4c0ed7cf7eaec4
+        with:
+          version: nightly
+          nightly-tag: nightly-2026-11-26-890d6c8
+          cache: 'false'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Install the repository Rust toolchain
+        run: rustup show
+      - name: Bundle the Windows platform
+        id: bundle
+        run: roc scripts/build.roc -- bundle
+      - name: Stage the standalone release preview
+        id: preview
+        if: ${{ !cancelled() && inputs.standalone && steps.bundle.conclusion == 'success' }}
+        shell: bash
+        run: |
+          rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          shopt -s nullglob
+          bundles=(dist/platform/*.tar.zst)
+          test "${#bundles[@]}" -eq 1
+          roc scripts/release.roc -- --local 0.1.0 "${bundles[0]}" dist/release-preview
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload-preview
+        if: ${{ !cancelled() && inputs.standalone && steps.preview.conclusion == 'success' }}
+        with:
+          name: windows-release-preview
+          path: dist/release-preview/
           if-no-files-found: error
-      - name: Build the documentation
-        if: runner.os == 'macOS'
-        run: blueprint run docs
+      - name: Build native ARM64 scenarios and accessibility apps
+        id: arm
+        if: ${{ !cancelled() && inputs.windows_arm && steps.bundle.conclusion == 'success' }}
+        shell: bash
+        env:
+          ACCESSIBILITY: ${{ inputs.accessibility }}
+        run: |
+          staging="$RUNNER_TEMP/windows-arm64-validation"
+          # Counter currently has a demo and no test-mode scenario.
+          for app in examples/{starter,todos,workers,files,http} tests/native-input; do
+            (cd "$app" && roc ../../cli/windows.roc -- test --stage-native --target arm64mingw)
+            mkdir -p "$staging/scenarios/$app"
+            cp -R "$app/build/spec-executables/arm64mingw/." "$staging/scenarios/$app/"
+          done
+
+          if [[ "$ACCESSIBILITY" == true ]]; then
+            compiler=$(command -v roc)
+            launcher="$PWD/cli/windows.roc"
+            for app in examples/{starter,counter,todos,workers,files,http} tests/accessibility/progress; do
+              (cd "$app" && "$compiler" "$launcher" -- build --target arm64mingw --profile size)
+              destination="$staging/accessibility/${app##*/}"
+              mkdir -p "$destination"
+              cp -R "$app/build/arm64mingw/." "$destination/"
+            done
+            generated="$RUNNER_TEMP/reading-list"
+            "$compiler" "$launcher" -- init --platform platform/main.roc "$generated"
+            (cd "$generated" && "$compiler" windows.roc -- build --target arm64mingw --profile size)
+            mkdir -p "$staging/accessibility/fresh-starter"
+            cp -R "$generated/build/arm64mingw/." "$staging/accessibility/fresh-starter/"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        id: upload-arm
+        if: ${{ !cancelled() && steps.arm.conclusion == 'success' }}
+        with:
+          name: windows-arm64-validation
+          path: ${{ runner.temp }}/windows-arm64-validation/
+          if-no-files-found: error
 
   windows-arm:
-    name: Windows ARM64 behavior
-    needs: check
-    if: ${{ !cancelled() && inputs.windows_arm }}
+    name: Windows ARM64 ${{ matrix.suite }}
+    needs: stage-windows
+    if: ${{ !cancelled() && inputs.windows_arm && needs.stage-windows.outputs.arm_artifact != '' }}
     runs-on: windows-11-arm
-    timeout-minutes: 15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(inputs.accessibility && '["scenarios", "accessibility"]' || '["scenarios"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          name: windows-link-inputs
-          path: platform/targets/
-      - name: Install the pinned Windows x64 tools for emulation
-        shell: pwsh
-        run: |
-          function Get-VerifiedFile($Url, $Path, $Sha256) {
-            Invoke-WebRequest -Uri $Url -OutFile $Path
-            if ((Get-FileHash -Algorithm SHA256 $Path).Hash -ne $Sha256) {
-              throw "Download digest mismatch for $Url"
-            }
-          }
-          $tools = Join-Path $env:RUNNER_TEMP "roc-windows-tools"
-          New-Item -ItemType Directory -Path $tools | Out-Null
-          Get-VerifiedFile `
-            "https://github.com/lukewilliamboswell/roc-blueprint/releases/download/0.13.0/blueprint-x86_64-windows.exe" `
-            (Join-Path $tools "blueprint.exe") `
-            "2fd36dc148fec0e21962e9508ca6f6f41f901e2a7f8d2e441bfb54d0ce599653"
-          $archive = Join-Path $tools "roc.zip"
-          Get-VerifiedFile `
-            "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-11-26-890d6c8/roc_nightly-windows_x86_64-2026-11-26-890d6c8.zip" `
-            $archive "7d2d3a1b48acb2f889f5c3eb1b0ec6a6e5c075cff25ea9c89bcf8b2820105648"
-          Expand-Archive -LiteralPath $archive -DestinationPath $tools
-          $roc = Get-ChildItem $tools -Recurse -File -Filter roc.exe | Select-Object -First 1
-          if (!$roc) { throw "The pinned compiler archive did not contain roc.exe" }
-          $tools, $roc.DirectoryName | Add-Content -Path $env:GITHUB_PATH
+          name: windows-arm64-validation
+          path: ${{ runner.temp }}/windows-arm64-validation
       - name: Run native Windows scenarios
-        run: blueprint run test-native -- --target arm64mingw
+        if: matrix.suite == 'scenarios'
+        shell: pwsh
+        run: tests/run-staged-scenarios.ps1 -Directory "$env:RUNNER_TEMP/windows-arm64-validation/scenarios"
+      - name: Prepare the hosted ARM64 desktop
+        if: matrix.suite == 'accessibility'
+        shell: powershell
+        run: tests/accessibility/prepare-hosted-desktop.ps1
       - name: Probe Windows UI Automation
-        if: ${{ !cancelled() && inputs.accessibility }}
-        run: blueprint run test-accessibility -- -Target arm64mingw -FreshStarter
+        if: matrix.suite == 'accessibility'
+        shell: powershell
+        run: tests/accessibility/run.ps1 -Target arm64mingw -FreshStarter -BuiltApps "$env:RUNNER_TEMP/windows-arm64-validation/accessibility"
+
+  windows-standalone:
+    name: Windows x64 standalone Reading List
+    needs: stage-windows
+    if: ${{ !cancelled() && inputs.standalone && needs.stage-windows.outputs.preview_artifact != '' }}
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: roc-lang/setup-roc@dd81390553b0a1236aedb61cdd4c0ed7cf7eaec4
+        with:
+          version: nightly
+          nightly-tag: nightly-2026-11-26-890d6c8
+          cache: 'false'
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: windows-release-preview
+          path: ${{ runner.temp }}/windows-release-preview
+      - name: Verify the standalone-generated app
+        shell: pwsh
+        run: tests/accessibility/standalone.ps1 -ReleaseDirectory "$env:RUNNER_TEMP/windows-release-preview"

@@ -31,7 +31,7 @@ use windows_sys::Win32::UI::Controls::{
     TCN_SELCHANGE, TVN_ITEMEXPANDEDW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetActiveWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2,
+    GetActiveWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_F4,
     VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
@@ -1246,6 +1246,16 @@ fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
         if app.surface.blocked(id) || app.calendars.contains_key(&id) {
             return Ok((owner, false, true));
         }
+        if message.message == WM_SYSKEYDOWN
+            && message.wParam as u16 == VK_F4
+            && message.lParam & (1 << 29) != 0
+            && app.surface.is_fullscreen(id)
+        {
+            if message.lParam & (1 << 30) == 0 {
+                app.request_close(id)?;
+            }
+            return Ok((owner, false, true));
+        }
         if app.surface_key(message)? {
             return Ok((owner, false, true));
         }
@@ -1362,6 +1372,16 @@ pub(crate) unsafe extern "system" fn window_proc(
     // SAFETY: The OS calls this on its window's UI thread with documented
     // WPARAM/LPARAM payloads. Nested callbacks skip app state if busy.
     unsafe {
+        if message == WM_MOUSEACTIVATE
+            && APP.with(|state| {
+                state.try_borrow().is_ok_and(|app| {
+                    app.as_ref()
+                        .is_some_and(|app| app.driven && app.surface.for_handle(hwnd).is_some())
+                })
+            })
+        {
+            return MA_NOACTIVATEANDEAT as LRESULT;
+        }
         let theme_change = matches!(
             message,
             WM_THEMECHANGED | WM_SYSCOLORCHANGE | WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED

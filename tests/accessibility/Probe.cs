@@ -1,5 +1,7 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -14,6 +16,14 @@ public static class RocWindowsAccessibility
     {
         Require(Thread.CurrentThread.GetApartmentState() == ApartmentState.MTA,
                 "The UI Automation client requires an MTA thread.");
+        using (var client = Process.GetCurrentProcess())
+        {
+            ushort native;
+            var appMachine = ProcessMachine(process, out native);
+            var clientMachine = ProcessMachine(client, out native);
+            Console.WriteLine("OS {0}, app {1}, UI Automation client {2}, session {3}",
+                MachineName(native), MachineName(appMachine), MachineName(clientMachine), client.SessionId);
+        }
         var window = WaitFor("visible app window", () =>
         {
             process.Refresh();
@@ -24,17 +34,86 @@ public static class RocWindowsAccessibility
                 ? element : null;
         });
 
+        if (example == "starter" || example == "todos" || example == "http" || example == "workers")
+            EnsureForeground(window);
+
         switch (example)
         {
             case "counter": Counter(window); break;
             case "starter": Starter(window); break;
-            case "todos": Todos(window, process.Id); break;
+            case "todos": Todos(window); break;
             case "files": Files(window); break;
             case "http": Http(window); break;
+            case "progress": Progress(window); break;
             case "workers": Workers(window); break;
             default: throw new ArgumentOutOfRangeException("example");
         }
     }
+
+    private static ushort ProcessMachine(Process process, out ushort nativeMachine)
+    {
+        ushort machine;
+        if (!IsWow64Process2(process.Handle, out machine, out nativeMachine))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not query the process architecture.");
+        return machine == 0 ? nativeMachine : machine;
+    }
+
+    private static string MachineName(ushort machine)
+    {
+        switch (machine)
+        {
+            case 0x014c: return "x86";
+            case 0x8664: return "x64";
+            case 0xaa64: return "ARM64";
+            default: return "0x" + machine.ToString("x4");
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWow64Process2(IntPtr process, out ushort machine, out ushort nativeMachine);
+
+    private static void EnsureForeground(AutomationElement window)
+    {
+        var expected = new IntPtr(window.Current.NativeWindowHandle);
+        var appPid = window.Current.ProcessId;
+        Require(expected != IntPtr.Zero, "The app's UI Automation root has no native window handle.");
+        if (GetForegroundWindow() == expected) return;
+        var activated = SetForegroundWindow(expected);
+        WaitFor("the app owns the interactive desktop foreground", () =>
+            GetForegroundWindow() == expected ? window : null,
+            () => String.Format("Expected HWND 0x{0:x}, PID {1}. SetForegroundWindow returned {2}. {3}",
+                expected.ToInt64(), appPid, activated, ForegroundWindowDetails()));
+    }
+
+    private static string ForegroundWindowDetails()
+    {
+        var foreground = GetForegroundWindow();
+        uint pid;
+        GetWindowThreadProcessId(foreground, out pid);
+        string processName = "unavailable";
+        if (pid != 0)
+        {
+            try
+            {
+                using (var process = Process.GetProcessById((int)pid)) processName = process.ProcessName;
+            }
+            catch (ArgumentException) {}
+            catch (InvalidOperationException) {}
+            catch (Win32Exception) {}
+        }
+        return String.Format("Observed foreground HWND 0x{0:x}, PID {1} ({2}).", foreground.ToInt64(), pid, processName);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
 
     private static void Counter(AutomationElement root)
     {
@@ -49,8 +128,7 @@ public static class RocWindowsAccessibility
         var title = Find(root, "Title", ControlType.Edit);
         var label = title.GetCurrentPropertyValue(AutomationElement.LabeledByProperty) as AutomationElement;
         Require(label != null && label.Current.Name == "Title", "Title has no associated visible label.");
-        title.SetFocus();
-        WaitFor("Title keyboard focus", () => title.Current.HasKeyboardFocus ? title : null);
+        FocusControl(title);
         using (var change = new AutoResetEvent(false))
         {
             AutomationPropertyChangedEventHandler handler = (sender, args) =>
@@ -89,11 +167,14 @@ public static class RocWindowsAccessibility
             ". Status: " + Describe(root, ControlType.StatusBar);
         var unmark = Find(root, "Mark unread", commands, describe);
         Require(unmark.Current.IsEnabled, "Mark unread is disabled for the selected title.");
+        Require(selection.Current.IsSelected, "Marking the title lost the report selection.");
         Invoke(unmark);
-        Find(root, "Mark read", commands, describe);
+        mark = Find(root, "Mark read", commands, describe);
+        Require(mark.Current.IsEnabled, "Mark read did not remain enabled after unmarking the title.");
+        Require(selection.Current.IsSelected, "Unmarking the title lost the report selection.");
     }
 
-    private static void Todos(AutomationElement root, int pid)
+    private static void Todos(AutomationElement root)
     {
         var date = Find(root, "New due date", ControlType.Edit);
         var time = Find(root, "New due time", ControlType.Edit);
@@ -105,26 +186,70 @@ public static class RocWindowsAccessibility
             Require(field.Current.HelpText.Contains("Example"),
                     field.Current.Name + " has no format hint.");
         }
-        date.SetFocus();
-        SetValue(date, "invalid");
-        PostKey(date, 0x0d); // Enter validates the draft in the app's message loop.
-        WaitFor("date validation is exposed on the edit", () =>
-            date.Current.HelpText.Contains("Enter a valid date") ? date : null);
-        PostKey(date, 0x1b); // Escape restores the committed value and hint.
-        WaitFor("date validation clears on Escape", () =>
-            !date.Current.HelpText.Contains("Enter a valid date") ? date : null);
-        SetValue(Find(root, "New to-do", ControlType.Edit), "Accessibility task");
-        Invoke(Find(root, "Add", ControlType.Button));
+        var dateHint = date.Current.HelpText;
+        var timeHint = time.Current.HelpText;
+        CheckCivilValidation(date, "1900-02-29", "Enter a valid date.", dateHint);
+        SetValue(date, "2000-02-29");
+        PostKey(date, 0x0d);
+        WaitFor("valid date enables the time field", () => time.Current.IsEnabled ? time : null);
+        CheckCivilValidation(time, "24:01", "Enter a valid time.", timeHint);
+        SetValue(time, "23:15");
+        PostKey(time, 0x0d);
+        WaitFor("valid time is committed", () => time.Current.HelpText == timeHint && Value(time) != ""
+            ? time : null);
+        FocusControl(date);
+        SetValue(date, "");
+        PostKey(date, 0x0d);
+        WaitFor("clearing the date clears the time and restores both hints", () =>
+            date.Current.HelpText == dateHint && time.Current.HelpText == timeHint &&
+            Value(date) == "" && Value(time) == "" && !time.Current.IsEnabled ? date : null);
+        var chooser = Find(root, "Choose date", ControlType.Button);
+        FocusControl(chooser);
+        PostKey(chooser, 0x0d);
+        var calendar = WaitFor("owned date chooser", () => ActivePopup(root, "Choose date for New due date"));
+        Find(calendar, "Cancel", ControlType.Button);
+        PostKey(calendar, 0x1b);
+        WaitFor("Escape closes the date chooser", () => ActivePopup(root) == null ? root : null);
+        WaitFor("focus returns from the date chooser", () =>
+            chooser.Current.HasKeyboardFocus ? chooser : null);
+
+        var draft = Find(root, "New to-do", ControlType.Edit);
+        var add = Find(root, "Add", ControlType.Button);
+        foreach (var name in new[] { "Accessibility task", "Second task" })
+        {
+            SetValue(draft, name);
+            WaitFor("Add enables for " + name, () => add.Current.IsEnabled ? add : null);
+            Invoke(add);
+            Find(root, name, ControlType.CheckBox);
+        }
+        var task = Find(root, "Accessibility task", ControlType.CheckBox);
+        Pattern<TogglePattern>(task, TogglePattern.Pattern).Toggle();
+        var all = Find(root, "Complete all visible tasks", ControlType.CheckBox);
+        var aggregate = Pattern<TogglePattern>(all, TogglePattern.Pattern);
+        WaitFor("aggregate checkbox reports a mixed state", () =>
+            aggregate.Current.ToggleState == ToggleState.Indeterminate ? all : null);
         var opener = Find(root, "Notes for Accessibility task", ControlType.Button);
-        opener.SetFocus();
+        FocusControl(opener);
         Invoke(opener);
-        var dialog = WaitFor("owned Notes window", () => TopLevel(pid, "Notes for Accessibility task"));
+        var dialog = WaitFor("owned Notes window", () => ActivePopup(root, "Notes for Accessibility task"));
         var notes = Find(dialog, "Notes", ControlType.Document, ControlType.Edit);
         Pattern<TextPattern>(notes, TextPattern.Pattern);
         Invoke(Find(dialog, "Cancel", ControlType.Button));
         WaitFor("focus restored to the Notes opener", () =>
-            TopLevel(pid, "Notes for Accessibility task") == null && opener.Current.HasKeyboardFocus
+            ActivePopup(root) == null && opener.Current.HasKeyboardFocus
             ? opener : null);
+    }
+
+    private static void CheckCivilValidation(AutomationElement field, string invalid, string error, string hint)
+    {
+        FocusControl(field);
+        SetValue(field, invalid);
+        PostKey(field, 0x0d);
+        WaitFor(error + " is exposed on the edit", () =>
+            field.Current.HelpText == error + " " + hint ? field : null);
+        PostKey(field, 0x1b);
+        WaitFor("Escape restores the hint on " + field.Current.Name, () =>
+            field.Current.HelpText == hint && Value(field) == "" ? field : null);
     }
 
     private static void Files(AutomationElement root)
@@ -132,22 +257,98 @@ public static class RocWindowsAccessibility
         Find(root, "Picked files", ControlType.List);
         var tabs = Find(root, "File details", ControlType.Tab);
         var fingerprint = Find(tabs, "Fingerprint", ControlType.TabItem);
-        Pattern<SelectionItemPattern>(fingerprint, SelectionItemPattern.Pattern).Select();
+        SelectTab(fingerprint);
         var copy = Find(root, "Copy SHA-256", ControlType.Button);
         Require(!copy.Current.IsEnabled, "Copy SHA-256 should be disabled without a file.");
         var image = Find(root, "A document in a folder", ControlType.Image);
         Require(image.Current.IsControlElement && image.Current.IsContentElement &&
                 !image.Current.IsKeyboardFocusable, "The informative image has incorrect view membership or focusability.");
+
+        var fixture = Path.GetFullPath(Path.Combine("tests", "fixtures", "hello.txt"));
+        Require(File.Exists(fixture), "The Files probe could not find " + fixture + ".");
+        Invoke(Find(root, "Choose Files\u2026", ControlType.Button));
+        var dialog = WaitFor("native file picker", () => ActivePopup(root));
+        var fileName = FindById(dialog, "1148", "file picker name field");
+        if (fileName.Current.ControlType != ControlType.Edit)
+            fileName = fileName.FindFirst(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+        Require(fileName != null, "The file picker did not expose an editable file name.");
+        SetValue(fileName, fixture);
+        Require(Value(fileName) == fixture, "The file picker did not retain the fixture path.");
+        // IDOK is the common item dialog's standard confirmation command.
+        var popupHandle = new IntPtr(dialog.Current.NativeWindowHandle);
+        Require(PostMessage(popupHandle, 0x0111, new UIntPtr(1), IntPtr.Zero),
+                "Could not confirm the file picker.");
+        WaitFor("confirmed file picker closes", () => ActivePopup(root) == null ? root : null);
+        WaitFor("fingerprint enables Copy SHA-256", () => copy.Current.IsEnabled ? copy : null,
+            () => "Text: " + Describe(root, ControlType.Text) + ". Buttons: " + Describe(root, ControlType.Button));
+
+        SelectTab(Find(tabs, "Preview", ControlType.TabItem));
+        var contents = Find(root, "Contents", ControlType.Document, ControlType.Edit);
+        var preview = Pattern<TextPattern>(contents, TextPattern.Pattern);
+        WaitFor("read-only preview contains fixture text", () =>
+            preview.DocumentRange.GetText(-1).Contains("from a fixture") ? contents : null);
+        var readOnly = preview.DocumentRange.GetAttributeValue(TextPattern.IsReadOnlyAttribute);
+        Require(Equals(readOnly, true), "The fixture preview is editable.");
+
+        var groupByType = Find(root, "Group by file type", ControlType.CheckBox);
+        Pattern<TogglePattern>(groupByType, TogglePattern.Pattern).Toggle();
+        var tree = Find(root, "Picked files", ControlType.Tree);
+        var group = Find(tree, ".txt (1)", ControlType.TreeItem);
+        var expansion = Pattern<ExpandCollapsePattern>(group, ExpandCollapsePattern.Pattern);
+        WaitFor("selected file's group starts expanded", () =>
+            expansion.Current.ExpandCollapseState == ExpandCollapseState.Expanded ? group : null);
+        expansion.Collapse();
+        WaitFor("file group is collapsed", () =>
+            expansion.Current.ExpandCollapseState == ExpandCollapseState.Collapsed ? group : null);
+        expansion.Expand();
+        WaitFor("file group is expanded again", () =>
+            expansion.Current.ExpandCollapseState == ExpandCollapseState.Expanded ? group : null);
+        Find(group, "hello.txt", ControlType.TreeItem);
+
+        SelectTab(fingerprint);
+        var restoredCopy = Find(root, "Copy SHA-256", ControlType.Button);
+        WaitFor("Copy SHA-256 stays enabled after returning to the fingerprint tab", () =>
+            restoredCopy.Current.IsEnabled ? restoredCopy : null);
+        Pattern<InvokePattern>(restoredCopy, InvokePattern.Pattern);
     }
+
+    private static void SelectTab(AutomationElement tab)
+    {
+        var selection = Pattern<SelectionItemPattern>(tab, SelectionItemPattern.Pattern);
+        selection.Select();
+        WaitFor(tab.Current.Name + " tab is selected", () => selection.Current.IsSelected ? tab : null);
+    }
+
+    private static AutomationElement FindById(AutomationElement parent, string id, string checkpoint)
+    {
+        var condition = new PropertyCondition(AutomationElement.AutomationIdProperty, id);
+        return WaitFor(checkpoint, () => parent.FindFirst(TreeScope.Descendants, condition));
+    }
+
+    private static AutomationElement ActivePopup(AutomationElement root, string caption = null)
+    {
+        // Windows can place owned dialogs under their owner in the UI Automation tree.
+        var owner = new IntPtr(root.Current.NativeWindowHandle);
+        var popup = GetLastActivePopup(owner);
+        if (popup == owner || popup == IntPtr.Zero) return null;
+        var element = AutomationElement.FromHandle(popup);
+        return element.Current.ProcessId == root.Current.ProcessId && !element.Current.IsOffscreen &&
+            (caption == null || element.Current.Name == caption) ? element : null;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetLastActivePopup(IntPtr window);
 
     private static void Http(AutomationElement root)
     {
         using (var response = new LoopbackResponse())
+        using (var pending = new AutoResetEvent(false))
         using (var changed = new AutoResetEvent(false))
         {
             var url = Find(root, "URL", ControlType.Edit);
             SetValue(url, response.Url);
-            url.SetFocus();
+            FocusControl(url);
             var live = AutomationElementIdentifiers.LiveRegionChangedEvent;
             Require(live != null, "This UI Automation client does not support LiveRegionChanged.");
             int completed = 0;
@@ -156,7 +357,10 @@ public static class RocWindowsAccessibility
                 try
                 {
                     var item = source as AutomationElement;
-                    if (item != null && item.Current.Name.StartsWith("HTTP 200"))
+                    if (item == null) return;
+                    var name = item.Current.Name;
+                    if (name.StartsWith("Fetching", StringComparison.Ordinal)) pending.Set();
+                    if (name.StartsWith("HTTP 200", StringComparison.Ordinal))
                     {
                         Interlocked.Increment(ref completed);
                         changed.Set();
@@ -171,16 +375,45 @@ public static class RocWindowsAccessibility
                 var fetch = Find(root, "Fetch", ControlType.Button);
                 Invoke(fetch);
                 Require(response.RequestReceived.WaitOne(4000), "The HTTP request did not reach loopback.");
+                Require(pending.WaitOne(4000), "HTTP pending status did not raise a live-region event.");
+                var animations = ClientAnimationsEnabled();
+                var progress = Find(root, animations ? "Request progress" : "Request progress (busy)",
+                    animations ? ControlType.ProgressBar : ControlType.Text);
+                Require(!progress.Current.IsOffscreen, "The request progress indicator is offscreen.");
                 var focused = AutomationElement.FocusedElement;
+                Require(focused != null && focused.Current.ProcessId == root.Current.ProcessId,
+                        "The app lost keyboard focus before request completion. " + ForegroundWindowDetails());
                 response.Complete.Set();
                 Require(changed.WaitOne(8000), "HTTP completion did not raise a live-region event.");
                 Require(!changed.WaitOne(350) && completed == 1, "HTTP completion was announced more than once.");
-                Require(focused != null && Automation.Compare(focused, AutomationElement.FocusedElement),
+                Require(Automation.Compare(focused, AutomationElement.FocusedElement),
                         "Status feedback moved focus from the control that held it during the request.");
             }
             finally { Automation.RemoveAutomationEventHandler(live, root, handler); }
         }
     }
+
+    private static void Progress(AutomationElement root)
+    {
+        var progress = Find(root, "Transfer progress", ControlType.ProgressBar);
+        var range = Pattern<RangeValuePattern>(progress, RangeValuePattern.Pattern).Current;
+        Require(range.IsReadOnly, "Transfer progress is writable through UI Automation.");
+        Require(range.Maximum > range.Minimum &&
+                Math.Abs((range.Value - range.Minimum) / (range.Maximum - range.Minimum) - 0.25) < 0.001,
+                "Transfer progress does not expose the expected quarter-complete value.");
+    }
+
+    private static bool ClientAnimationsEnabled()
+    {
+        bool enabled;
+        Require(SystemParametersInfo(0x1042, 0, out enabled, 0), "Could not read the Windows client animation setting.");
+        return enabled;
+    }
+
+    [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SystemParametersInfo(uint action, uint parameter,
+        [MarshalAs(UnmanagedType.Bool)] out bool value, uint flags);
 
     private static void Workers(AutomationElement root)
     {
@@ -195,6 +428,24 @@ public static class RocWindowsAccessibility
         var table = Pattern<TableItemPattern>(cell, TableItemPattern.Pattern);
         Require(ColumnHeaders(table).Any(item => item.Current.Name == "Counted"),
                 "Counted cell has no Counted header.");
+        var labelsCell = GridItem(data, 1, 2);
+        var labelsItem = Pattern<GridItemPattern>(labelsCell, GridItemPattern.Pattern);
+        var labelsRow = TreeWalker.RawViewWalker.GetParent(labelsCell);
+        Require(labelsItem.Current.Row == 1, "The Labels cell did not expose its initial row index.");
+        Require(labelsRow != null && labelsRow.Current.Name == "Labels",
+                "The parent of the Labels cell should be the Labels row.");
+        int[] labelsCellId = labelsCell.GetRuntimeId();
+        int[] labelsRowId = labelsRow.GetRuntimeId();
+
+        var selection = Pattern<SelectionPattern>(grid, SelectionPattern.Pattern);
+        var paperSelection = Pattern<SelectionItemPattern>(cell, SelectionItemPattern.Pattern);
+        var labelsSelection = Pattern<SelectionItemPattern>(labelsCell, SelectionItemPattern.Pattern);
+        paperSelection.Select();
+        WaitFor("Paper Counted cell is selected", () =>
+            SelectionMatches(selection, cell) ? grid : null, () =>
+                "Paper selected: " + paperSelection.Current.IsSelected +
+                ". Selection count: " + selection.Current.GetSelection().Length);
+
         int[] identity = cell.GetRuntimeId();
         SetValue(cell, "7");
         WaitFor("Counted committed from UI Automation", () => Value(GridItem(data, 0, 2)) == "7" ? grid : null);
@@ -205,7 +456,7 @@ public static class RocWindowsAccessibility
         Require(Value(sameCell) == "7" && identity.SequenceEqual(sameCell.GetRuntimeId()),
                 "Rejected edit changed the committed value or live cell identity.");
         sameCell.SetFocus();
-        WaitFor("Counted cell takes focus", () => CurrentFocus(sameCell));
+        WaitFor("Counted cell takes focus", () => CurrentFocus(sameCell), ForegroundWindowDetails);
         PostKey(grid, 0x71); // F2 enters a native EDIT.
         var editor = WaitFor("native Counted editor takes focus", () =>
         {
@@ -213,25 +464,58 @@ public static class RocWindowsAccessibility
             return focused != null && focused.Current.ControlType == ControlType.Edit &&
                    focused.Current.ProcessId == root.Current.ProcessId &&
                    focused.Current.Name == "Counted" ? focused : null;
+        }, () =>
+        {
+            var focus = AutomationElement.FocusedElement;
+            var edit = root.FindFirst(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit));
+            var focused = focus == null ? "none" : String.Format("'{0}' ({1}, has focus {2})",
+                focus.Current.Name, focus.Current.ControlType.ProgrammaticName, focus.Current.HasKeyboardFocus);
+            var editorState = edit == null ? "none" : String.Format("'{0}' (has focus {1}, HWND {2})",
+                edit.Current.Name, edit.Current.HasKeyboardFocus, edit.Current.NativeWindowHandle);
+            return "Focused element: " + focused + ". Native editor: " + editorState;
         });
         var parent = TreeWalker.RawViewWalker.GetParent(editor);
         Require(parent != null && Automation.Compare(parent, sameCell),
                 "The focused EDIT is missing from the Counted cell's fragment.");
         Require(Value(editor) == "7" && editor.Current.HelpText.Contains("whole number"),
                 "The EDIT did not expose its draft and the cell's validation.");
-        Pattern<TextPattern>(editor, TextPattern.Pattern);
+        var editorText = Pattern<TextPattern>(editor, TextPattern.Pattern);
+        Require(editorText.DocumentRange.GetText(-1) == "7", "The editor's TextPattern did not return the draft.");
         SetValue(editor, "9");
         Require(Value(editor) == "9" && Value(sameCell) == "7",
                 "The EDIT and the committed cell must expose their own values.");
         PostKey(editor, 0x1b); // Escape cancels the draft and refocuses the cell.
         WaitFor("Counted cell regains focus", () => CurrentFocus(sameCell));
         Require(Value(sameCell) == "7", "Escape committed the editor draft.");
+        labelsSelection.AddToSelection();
+        WaitFor("Paper and Labels Counted cells are selected", () =>
+            SelectionMatches(selection, cell, labelsCell) ? grid : null, () =>
+                String.Format("Paper selected: {0}. Labels selected: {1}. Selection count: {2}.",
+                    paperSelection.Current.IsSelected, labelsSelection.Current.IsSelected,
+                    selection.Current.GetSelection().Length));
         Invoke(Find(root, "Reverse order", ControlType.Button));
-        WaitFor("old cell retired after sort and paging", () =>
+        WaitFor("Labels moved to row 3 after reversal", () =>
+            Value(GridItem(data, 2, 0)) == "Labels" ? grid : null);
+        var movedCell = GridItem(data, 2, 2);
+        var movedRow = TreeWalker.RawViewWalker.GetParent(movedCell);
+        Require(labelsItem.Current.Row == 2 && labelsCellId.SequenceEqual(movedCell.GetRuntimeId()),
+                "Sorting changed the identity of a surviving cell or left its row index stale.");
+        Require(movedRow != null && movedRow.Current.Name == "Labels" &&
+                labelsRowId.SequenceEqual(movedRow.GetRuntimeId()),
+                "Sorting changed the identity of a surviving row.");
+        WaitFor("Paper cell retired after leaving the mounted page", () =>
         {
             try { cell.GetCurrentPropertyValue(AutomationElement.NameProperty); return null; }
             catch (ElementNotAvailableException) { return grid; }
         });
+    }
+
+    private static bool SelectionMatches(SelectionPattern selection, params AutomationElement[] expected)
+    {
+        var selected = selection.Current.GetSelection();
+        return selected != null && selected.Length == expected.Length &&
+            expected.All(item => selected.Any(actual => Automation.Compare(item, actual)));
     }
 
     private static AutomationElement GridItem(GridPattern grid, int row, int column)
@@ -259,24 +543,24 @@ public static class RocWindowsAccessibility
         return focused != null && Automation.Compare(focused, expected) ? focused : null;
     }
 
+    private static void FocusControl(AutomationElement control)
+    {
+        control.SetFocus();
+        WaitFor(control.Current.Name + " takes keyboard focus", () =>
+            control.Current.HasKeyboardFocus ? control : null, ForegroundWindowDetails);
+    }
+
     private static void PostKey(AutomationElement target, int key)
     {
         var hwnd = new IntPtr(target.Current.NativeWindowHandle);
+        var name = target.Current.Name;
         Require(hwnd != IntPtr.Zero && PostMessage(hwnd, 0x100, new UIntPtr((uint)key), new IntPtr(1)),
-                "Could not post a native key to " + target.Current.Name + ".");
+                "Could not post a native key to " + name + ".");
     }
 
     [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool PostMessage(IntPtr window, uint message, UIntPtr key, IntPtr flags);
-
-    private static AutomationElement TopLevel(int process, string caption)
-    {
-        var condition = new AndCondition(
-            new PropertyCondition(AutomationElement.ProcessIdProperty, process),
-            new PropertyCondition(AutomationElement.NameProperty, caption));
-        return AutomationElement.RootElement.FindFirst(TreeScope.Children, condition);
-    }
 
     private static AutomationElement Find(AutomationElement parent, string name, params ControlType[] types)
     {

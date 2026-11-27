@@ -1,0 +1,61 @@
+name: Documentation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the manual
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: lukewilliamboswell/roc-automation/actions/setup-blueprint@ca31a848926b19ec2aed867c481ef691b55aaeb8
+        with:
+          cache: 'true'
+          cache-workload: docs
+      - id: renderer
+        uses: lukewilliamboswell/roc-automation/actions/blueprint-tool@ca31a848926b19ec2aed867c481ef691b55aaeb8
+        with:
+          task: docs-path
+          label: Locked documentation renderer
+      - id: docs
+        uses: lukewilliamboswell/roc-automation/actions/build-docs@ca31a848926b19ec2aed867c481ef691b55aaeb8
+        with:
+          renderer-binary: ${{ steps.renderer.outputs.binary }}
+          pdf-filename: roc-native-windows.pdf
+          docs-version: ${{ github.event_name == 'pull_request' && format('PR {0}', github.event.number) || github.ref_name }}
+          site-url: https://lukewilliamboswell.github.io/roc-native-windows/
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: ${{ steps.docs.outputs.site-directory }}
+
+  deploy:
+    name: Publish the manual
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

@@ -9,6 +9,54 @@ enum Title {
     Text(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum StartupPosition {
+    #[default]
+    System,
+    Centered,
+    At(i32, i32),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum StartupState {
+    #[default]
+    Normal,
+    Minimized,
+    Maximized,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Startup {
+    position: StartupPosition,
+    state: StartupState,
+}
+
+impl Startup {
+    fn read(position: Option<&str>, state: Option<&str>) -> Result<Self> {
+        let position = match position {
+            None | Some("system") => StartupPosition::System,
+            Some("centered") => StartupPosition::Centered,
+            Some(point) => {
+                let invalid = || "invalid startup window position".to_owned();
+                let (x, y) = point.split_once(',').ok_or_else(invalid)?;
+                StartupPosition::At(
+                    x.parse().map_err(|_| invalid())?,
+                    y.parse().map_err(|_| invalid())?,
+                )
+            }
+        };
+        let state = match state {
+            None | Some("normal") => StartupState::Normal,
+            Some("minimized") => StartupState::Minimized,
+            Some("maximized") => StartupState::Maximized,
+            Some("fullscreen") => StartupState::Fullscreen,
+            Some(_) => return Err("invalid startup window state".into()),
+        };
+        Ok(Self { position, state })
+    }
+}
+
 #[derive(Clone)]
 struct Declaration {
     id: Key,
@@ -17,6 +65,7 @@ struct Declaration {
     owner: Option<Key>,
     title: Title,
     request: Option<Key>,
+    startup: Startup,
 }
 
 struct WindowPlan {
@@ -87,6 +136,10 @@ impl WindowPlan {
             .map(|key| close_request(tree, key, managed))
             .transpose()?
             .flatten();
+        let startup = Startup::read(
+            wrapper.and_then(|key| tree.node(key).attr("startup-position")),
+            wrapper.and_then(|key| tree.node(key).attr("startup-state")),
+        )?;
         self.declarations.push(Declaration {
             id,
             wrapper,
@@ -94,6 +147,7 @@ impl WindowPlan {
             owner: None,
             title,
             request,
+            startup,
         });
         Ok(())
     }
@@ -138,6 +192,7 @@ impl WindowPlan {
                     owner: Some(owner),
                     title,
                     request,
+                    startup: Startup::default(),
                 });
                 self.scopes.insert(key, key);
                 return self.visit(tree, body, key, true, dialogs);
@@ -163,7 +218,7 @@ fn close_request(tree: &Tree, key: Key, required: bool) -> Result<Option<Key>> {
 
 #[cfg(windows)]
 mod native {
-    use super::{Declaration, Title, WindowPlan};
+    use super::{Declaration, Startup, StartupPosition, StartupState, Title, WindowPlan};
     use crate::Result;
     use crate::display_preferences::DisplayPreferences;
     use crate::modal::{self, Modal};
@@ -176,10 +231,176 @@ mod native {
     use crate::wire::{Key, ROOT, Tree};
     use std::collections::{BTreeMap, BTreeSet};
     use std::ops::{Deref, DerefMut};
-    use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DestroyWindow, GA_ROOT, GetAncestor, IsWindow, SW_SHOWNORMAL, ShowWindow,
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{HWND, POINT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DestroyWindow, GA_ROOT, GWL_STYLE, GetAncestor, GetWindowLongPtrW, GetWindowRect, IsWindow,
+        SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    };
+
+    fn place_startup(hwnd: HWND, startup: Startup) -> Result<()> {
+        if startup.position == StartupPosition::System && startup.state != StartupState::Fullscreen
+        {
+            return Ok(());
+        }
+        // SAFETY: The validated HWND belongs to this thread and has yet to be shown.
+        unsafe {
+            let monitor = match startup.position {
+                StartupPosition::At(x, y) => {
+                    MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST)
+                }
+                _ => MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+            };
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..MONITORINFO::default()
+            };
+            if GetMonitorInfoW(monitor, &mut info) == 0 {
+                return Err("could not read the startup window's monitor".into());
+            }
+            let mut bounds = info.rcMonitor;
+            let mut flags = SWP_NOACTIVATE | SWP_NOZORDER;
+            if startup.state == StartupState::Fullscreen {
+                let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+                if SetWindowLongPtrW(
+                    hwnd,
+                    GWL_STYLE,
+                    ((style & !WS_OVERLAPPEDWINDOW) | WS_POPUP) as i32 as isize,
+                ) == 0
+                {
+                    return Err("could not set the startup window's fullscreen style".into());
+                }
+                flags |= SWP_FRAMECHANGED;
+            } else {
+                if GetWindowRect(hwnd, &mut bounds) == 0 {
+                    return Err("could not measure the startup window".into());
+                }
+                let work = info.rcWork;
+                let wide = work.right - work.left;
+                let high = work.bottom - work.top;
+                let width = (bounds.right - bounds.left).min(wide);
+                let height = (bounds.bottom - bounds.top).min(high);
+                let (x, y) = match startup.position {
+                    StartupPosition::At(x, y) => (x, y),
+                    _ => (
+                        work.left + (wide - width) / 2,
+                        work.top + (high - height) / 2,
+                    ),
+                };
+                bounds.left = x.clamp(work.left, work.right - width);
+                bounds.top = y.clamp(work.top, work.bottom - height);
+                bounds.right = bounds.left + width;
+                bounds.bottom = bounds.top + height;
+            }
+            if SetWindowPos(
+                hwnd,
+                null_mut(),
+                bounds.left,
+                bounds.top,
+                bounds.right - bounds.left,
+                bounds.bottom - bounds.top,
+                flags,
+            ) == 0
+            {
+                return Err("could not place the startup window".into());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn startup_placement_respects_work_area_and_fullscreen_bounds() {
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, IsWindowVisible};
+        use windows_sys::core::w;
+
+        // SAFETY: The test creates and checks a hidden HWND on this thread.
+        unsafe {
+            let window = OwnedWindow(CreateWindowExW(
+                0,
+                w!("STATIC"),
+                w!(""),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                360,
+                280,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            ));
+            let hwnd = window.0;
+            assert!(!hwnd.is_null());
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..MONITORINFO::default()
+            };
+            assert_ne!(GetMonitorInfoW(monitor, &mut info), 0);
+            let work = info.rcWork;
+            let full = info.rcMonitor;
+            let rect = || {
+                let mut bounds = RECT::default();
+                assert_ne!(GetWindowRect(hwnd, &mut bounds), 0);
+                (bounds.left, bounds.top, bounds.right, bounds.bottom)
+            };
+            let initial = rect();
+            place_startup(hwnd, Startup::default()).unwrap();
+            assert_eq!(rect(), initial);
+
+            place_startup(
+                hwnd,
+                Startup {
+                    position: StartupPosition::Centered,
+                    ..Startup::default()
+                },
+            )
+            .unwrap();
+            let width = 360.min(work.right - work.left);
+            let height = 280.min(work.bottom - work.top);
+            let x = work.left + (work.right - work.left - width) / 2;
+            let y = work.top + (work.bottom - work.top - height) / 2;
+            assert_eq!(rect(), (x, y, x + width, y + height));
+
+            place_startup(
+                hwnd,
+                Startup {
+                    position: StartupPosition::At(work.right - 1, work.bottom - 1),
+                    ..Startup::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                rect(),
+                (
+                    work.right - width,
+                    work.bottom - height,
+                    work.right,
+                    work.bottom
+                )
+            );
+
+            place_startup(
+                hwnd,
+                Startup {
+                    state: StartupState::Fullscreen,
+                    ..Startup::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(rect(), (full.left, full.top, full.right, full.bottom));
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+            assert_ne!(style & WS_POPUP, 0);
+            assert_eq!(style & WS_OVERLAPPEDWINDOW, 0);
+            assert_eq!(IsWindowVisible(hwnd), 0);
+        }
+    }
 
     pub(crate) struct OwnedWindow(pub(crate) HWND);
     impl Drop for OwnedWindow {
@@ -360,6 +581,9 @@ mod native {
                         create_window(&title)?
                     };
                     let hwnd = window.0;
+                    if wanted.owner.is_none() && !self.driven {
+                        place_startup(hwnd, wanted.startup)?;
+                    }
                     let surface = Surface::new(hwnd, self.preferences, self.font_registry.clone())?;
                     let icons = wanted.owner.is_none().then(|| WindowIcons::new(hwnd));
                     let taskbar = if !self.driven && wanted.owner.is_none() {
@@ -431,7 +655,16 @@ mod native {
                     self.mounted.get_mut(&id).unwrap().modal = Some(guard);
                 } else if !self.driven {
                     // SAFETY: The validated surface already owns all its native children.
-                    unsafe { ShowWindow(hwnd, SW_SHOWNORMAL) };
+                    let show = match entry.declaration.startup.state {
+                        StartupState::Minimized => SW_SHOWMINNOACTIVE,
+                        StartupState::Maximized => SW_SHOWMAXIMIZED,
+                        StartupState::Normal | StartupState::Fullscreen => SW_SHOWNORMAL,
+                    };
+                    unsafe { ShowWindow(hwnd, show) };
+                    if show == SW_SHOWMAXIMIZED {
+                        // The synchronous WM_SIZE is suppressed while the registry is borrowed.
+                        self.mounted.get_mut(&id).unwrap().surface.arrange(tree)?;
+                    }
                 }
             }
             self.refresh_automation_interaction();
@@ -543,6 +776,15 @@ mod native {
             self.mounted
                 .get(&id)
                 .is_some_and(|entry| entry.declaration.owner.is_some())
+        }
+
+        pub(crate) fn is_fullscreen(&self, id: Key) -> bool {
+            self.mounted.get(&id).is_some_and(|entry| {
+                // SAFETY: The registry owns this live HWND on the UI thread.
+                entry.declaration.owner.is_none()
+                    && unsafe { GetWindowLongPtrW(entry.window.0, GWL_STYLE) } as u32 & WS_POPUP
+                        != 0
+            })
         }
 
         pub(crate) fn poll(&mut self) {
@@ -726,6 +968,31 @@ mod tests {
         element(&mut tree, 2, 1, "ui-window-content");
         assert!(WindowPlan::read(&tree, None).is_ok());
         element(&mut tree, 3, 0, "ui-text");
+        assert!(WindowPlan::read(&tree, None).is_err());
+    }
+
+    #[test]
+    fn startup_options_are_validated_at_the_window_boundary() {
+        let mut tree = Tree::new();
+        element(&mut tree, 1, 0, "ui-window");
+        element(&mut tree, 2, 1, "ui-window-content");
+        let read = |tree: &Tree| WindowPlan::read(tree, None).unwrap().declarations[0].startup;
+        assert_eq!(read(&tree), Startup::default());
+
+        attr(&mut tree, 1, "startup-position", "-720,18");
+        attr(&mut tree, 1, "startup-state", "maximized");
+        assert_eq!(
+            read(&tree),
+            Startup {
+                position: StartupPosition::At(-720, 18),
+                state: StartupState::Maximized
+            }
+        );
+
+        attr(&mut tree, 1, "startup-position", "2147483648,18");
+        assert!(WindowPlan::read(&tree, None).is_err());
+        attr(&mut tree, 1, "startup-position", "centered");
+        attr(&mut tree, 1, "startup-state", "unknown");
         assert!(WindowPlan::read(&tree, None).is_err());
     }
 

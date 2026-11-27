@@ -99,107 +99,115 @@ view = || {
 		design.page,
 		[
 			Win.Ui.hstack(
-				design.commands,
+				design.header,
 				[
-					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Decorative, width: 28, height: 28 }),
+					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Decorative, width: 32, height: 32 }),
 					Win.Ui.text_with("Stock count reconciliation", design.title),
 				],
 			),
 			Win.Ui.text_with("Edit a Counted cell with Enter or F2. Hold Shift and use the arrows to select a range for Ctrl+V.", design.metadata),
-			Win.Ui.hstack(
-				design.commands,
-				[
-					Win.Ui.button("Reverse order", { on_press: Engine.handle(|_| [cells.reverse.update(|reverse| !reverse)]) }),
-					Win.Ui.button(
-						cells.mismatches.signal().map(|only| if (only) "All items" else "Mismatches only"),
-						{ on_press: Engine.handle(|_| [cells.mismatches.update(|only| !only), cells.second_page.set(Bool.False)]) },
-					),
-					Win.Ui.button(
-						page.map(|second| if (second) "First page" else "Next page"),
-						{
-							enabled: cells.mismatches.signal().map(|only| !only),
-							on_press: Engine.handle(|_| [cells.second_page.update(|second| !second)]),
-						},
-					),
-				],
-			),
-			Win.Ui.data_grid(
-				{
-					label: "Stock counts",
-					columns: [
-						{ key: "item", heading: "Item", width: Fixed(140) },
-						{ key: "expected", heading: "Expected", width: Fixed(90) },
-						{ key: "counted", heading: "Counted", width: Fixed(90) },
-					],
-					visible_rows: 3,
-					on_paste: Handle(
-						Engine.handle_by(
-							paste_context,
-							|state, result| {
-								updates = match result {
-									Ok(batch) => paste_updates(state.table, state.query, state.page, batch)
-									Err(problem) => Err(paste_error(problem))
-								}
-								match updates {
-									Ok(table) => [cells.counts.set(table), cells.status.set("Pasted counts into the mounted grid.")]
-									Err(message) => [cells.status.set(message)]
-								}
-							},
+			Win.Ui.panel(
+				design.grid_panel,
+				Win.Ui.vstack(
+					design.commands,
+					[
+						Win.Ui.hstack(
+							design.commands,
+							[
+								Win.Ui.button("Reverse order", { on_press: Engine.handle(|_| [cells.reverse.update(|reverse| !reverse)]) }),
+								Win.Ui.button(
+									cells.mismatches.signal().map(|only| if (only) "All items" else "Mismatches only"),
+									{ on_press: Engine.handle(|_| [cells.mismatches.update(|only| !only), cells.second_page.set(Bool.False)]) },
+								),
+								Win.Ui.button(
+									page.map(|second| if (second) "First page" else "Next page"),
+									{
+										enabled: cells.mismatches.signal().map(|only| !only),
+										on_press: Engine.handle(|_| [cells.second_page.update(|second| !second)]),
+									},
+								),
+							],
 						),
-					),
-				},
-				Engine.table_view(
-					cells.counts,
-					{ query, plan, window },
-					|_, row| {
-						value = row.signal()
-						Win.Ui.grid_row([
-							Win.Ui.grid_cell(value.map(|item| item.name), { column: "item" }),
-							Win.Ui.grid_cell(value.map(|item| item.expected.to_str()), { column: "expected" }),
-							Win.Ui.grid_cell(
-								value.map(|item| item.counted.to_str()),
-								{
-									column: "counted",
-									editor: TextEditor(row.set_value(Stock.recount)),
-									feedback: value.map(|item| item.feedback),
+						Win.Ui.data_grid(
+							{
+								label: "Stock counts",
+								columns: [
+									{ key: "item", heading: "Product", width: Fixed(160) },
+									{ key: "expected", heading: "Expected", width: Fixed(106) },
+									{ key: "counted", heading: "Counted", width: Fixed(106) },
+								],
+								visible_rows: 3,
+								on_paste: Handle(
+									Engine.handle_by(
+										paste_context,
+										|state, result| {
+											updates = match result {
+												Ok(batch) => paste_updates(state.table, state.query, state.page, batch)
+												Err(problem) => Err(paste_error(problem))
+											}
+											match updates {
+												Ok(table) => [cells.counts.set(table), cells.status.set("Pasted counts into the mounted grid.")]
+												Err(message) => [cells.status.set(message)]
+											}
+										},
+									),
+								),
+							},
+							Engine.table_view(
+								cells.counts,
+								{ query, plan, window },
+								|_, row| {
+									value = row.signal()
+									Win.Ui.grid_row([
+										Win.Ui.grid_cell(value.map(|item| item.name), { column: "item" }),
+										Win.Ui.grid_cell(value.map(|item| item.expected.to_str()), { column: "expected" }),
+										Win.Ui.grid_cell(
+											value.map(|item| item.counted.to_str()),
+											{
+												column: "counted",
+												editor: TextEditor(row.set_value(Stock.recount)),
+												feedback: value.map(|item| item.feedback),
+											},
+										),
+									])
 								},
 							),
-						])
-					},
+						),
+					],
 				),
-			),
-			Win.Ui.hstack(
-				design.commands,
-				[
-					Win.Ui.button(
-						"Reconcile",
-						{
-							on_press: Engine.handle_by(
-								cells.counts.signal(),
-								|table, _| {
-									snapshot = table.fold([], |counts, _, item| counts.append(Stock.count(item)))
-									[
-										cells.job.update(|before| { serial: before.serial + 1, running: Bool.True, counts: snapshot }),
-										cells.status.set("Reconciling submitted counts…"),
-									]
-								},
-							),
-						},
-					),
-					Win.Ui.button(
-						"Cancel",
-						{
-							enabled: job.map(|run| run.running),
-							on_press: Engine.handle(|_| [cells.job.update(|run| { ..run, running: Bool.False }), cells.status.set("Reconciliation cancelled.")]),
-						},
-					),
-				],
 			),
 			Win.Ui.panel(
 				design.results_panel,
 				Win.Ui.vstack(
 					design.results,
 					[
+						Win.Ui.hstack(
+							design.commands,
+							[
+								Win.Ui.button(
+									"Reconcile",
+									{
+										on_press: Engine.handle_by(
+											cells.counts.signal(),
+											|table, _| {
+												snapshot = table.fold([], |counts, _, item| counts.append(Stock.count(item)))
+												[
+													cells.job.update(|before| { serial: before.serial + 1, running: Bool.True, counts: snapshot }),
+													cells.status.set("Reconciling submitted counts…"),
+												]
+											},
+										),
+									},
+								),
+								Win.Ui.button(
+									"Cancel",
+									{
+										enabled: job.map(|run| run.running),
+										on_press: Engine.handle(|_| [cells.job.update(|run| { ..run, running: Bool.False }), cells.status.set("Reconciliation cancelled.")]),
+									},
+								),
+							],
+						),
 						Win.Ui.status_text(cells.status.signal(), { text: design.summary }),
 						variance_meter(design, cells.variance.signal()),
 					],

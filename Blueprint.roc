@@ -46,4 +46,5 @@ config = [
 	Task("release", [Use("release"), Run(["roc-stable", "scripts/release.roc", "--"])]),
 	Task("serve", [Use("release"), Run(["roc-stable", "scripts/serve.roc", "--"])]),
 	Task("docs", [Use("docs"), Run(["roc-docs", "build", "--workspace", ".", "--pdf-filename", "roc-native-windows.pdf"])]),
+	Task("docs-path", [Use("docs"), Run(["sh", "-c", "realpath \"$(command -v roc-docs)\""])]),
 ]

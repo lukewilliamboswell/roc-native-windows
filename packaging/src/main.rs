@@ -1,6 +1,7 @@
 //! Build an MSI from a staged app. This tool runs on the packaging machine.
 
 mod pe;
+mod table_order;
 
 use embala_msi::{FileSpec, MsiArch, MsiSpec};
 use msi::{Column, Delete, Expr, Insert, Select, Update, Value};
@@ -82,6 +83,9 @@ fn build(spec: &MsiSpec, output: &Path) -> Result<()> {
     package.summary_info_mut().set_page_count(500);
     configure_install(&mut package, &spec.identifier)?;
     package.flush()?;
+    let tables = table_order::schema(&package);
+    drop(package);
+    table_order::restore(output, &tables)?;
     Ok(())
 }
 
@@ -368,6 +372,26 @@ mod tests {
     use msi::{Package, Select};
     use std::io::{Cursor, Read};
 
+    #[cfg(windows)]
+    fn assert_windows_installer_opens_database(path: &Path) {
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "msi")]
+        unsafe extern "system" {
+            fn MsiOpenDatabaseW(path: *const u16, mode: *const u16, handle: *mut u32) -> u32;
+            fn MsiCloseHandle(handle: u32) -> u32;
+        }
+
+        let path: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut handle = 0;
+        // SAFETY: The path is NUL terminated, the null mode requests
+        // read-only access, and the result is written into a valid handle.
+        let result = unsafe { MsiOpenDatabaseW(path.as_ptr(), std::ptr::null(), &mut handle) };
+        assert_eq!(result, 0, "Windows Installer rejected the MSI database");
+        // SAFETY: The successful call returned an open database handle.
+        assert_eq!(unsafe { MsiCloseHandle(handle) }, 0);
+    }
+
     #[test]
     fn installers_embed_assets_and_use_distinct_package_codes() {
         let dir = std::env::temp_dir().join(format!(
@@ -411,6 +435,8 @@ mod tests {
             .unwrap();
             let output = dir.join(format!("{}.msi", arch.template()));
             build(&input, &output).unwrap();
+            #[cfg(windows)]
+            assert_windows_installer_opens_database(&output);
             let first = fs::read(&output).unwrap();
             build(&input, &output).unwrap();
             assert_eq!(first, fs::read(&output).unwrap());

@@ -1,9 +1,11 @@
 param(
     [string] $Roc = "roc",
     [ValidateSet("x64mingw", "arm64mingw")] [string] $Target,
-    [ValidateSet("counter", "starter", "todos", "files", "http", "workers")] [string[]] $Example,
+    [ValidateSet("speed", "size")] [string] $BuildProfile = "speed",
+    [ValidateSet("counter", "starter", "todos", "files", "http", "workers", "progress")] [string[]] $Example,
     [string] $Starter,
     [switch] $FreshStarter,
+    [string] $BuiltApps,
     [int] $AppPid,
     [string] $Check
 )
@@ -35,28 +37,34 @@ if (-not $Target) {
     $Target = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") { "arm64mingw" } else { "x64mingw" }
 }
 if (-not $Example) {
-    $Example = @("counter", "starter", "todos", "files", "http", "workers")
+    $Example = @("counter", "starter", "todos", "files", "http", "workers", "progress")
 }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
+if ($BuiltApps) {
+    if ($Starter) { throw "-Starter and -BuiltApps cannot be combined." }
+    $BuiltApps = (Resolve-Path -LiteralPath $BuiltApps).Path
+}
 $env:ROC_WINDOWS_ROC = $Roc
 $windows = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-$architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-Write-Output "Windows build $($windows.CurrentBuild).$($windows.UBR), OS $architecture, PowerShell $env:PROCESSOR_ARCHITECTURE, app target $Target"
+Write-Output "Windows build $($windows.CurrentBuild).$($windows.UBR), app target $Target"
 
-function Invoke-ExampleProbe($name, $directory, $tool, $label) {
-    Push-Location $directory
+function Invoke-ExampleProbe($name, $directory, $tool, $label, $builtDirectory) {
+    Push-Location -LiteralPath $directory
     try {
-        & $Roc $tool -- build --target $Target
-        if ($LASTEXITCODE -ne 0) { throw "Could not build $label for $Target." }
-        $exe = @(Get-ChildItem -File "build/$Target" -Filter "*.exe")
-        if ($exe.Count -ne 1) { throw "Expected exactly one built executable for $label in build/$Target." }
+        if (-not $builtDirectory) {
+            & $Roc $tool -- build --target $Target --profile $BuildProfile
+            if ($LASTEXITCODE -ne 0) { throw "Could not build $label for $Target." }
+            $builtDirectory = "build/$Target"
+        }
+        $exe = @(Get-ChildItem -LiteralPath $builtDirectory -File -Filter "*.exe")
+        if ($exe.Count -ne 1) { throw "Expected exactly one built executable for $label in $builtDirectory." }
         $app = Start-Process -FilePath $exe[0].FullName -WorkingDirectory $directory -PassThru
         $probe = $null
         try {
             $probe = Start-Process -FilePath "powershell.exe" -ArgumentList @(
                 "-NoProfile", "-Mta", "-File", ('"' + $PSCommandPath + '"'),
                 "-AppPid", $app.Id, "-Check", $name
-            ) -NoNewWindow -PassThru
+            ) -WorkingDirectory $directory -NoNewWindow -PassThru
             [void] $probe.Handle
             if (-not $probe.WaitForExit(45000)) { throw "$label UI Automation client exceeded 45 seconds." }
             if ($probe.ExitCode -ne 0) { throw "$label UI Automation client exited with code $($probe.ExitCode)." }
@@ -87,7 +95,10 @@ foreach ($name in $Example) {
             $directory = (Resolve-Path $Starter).Path
             Invoke-ExampleProbe $name $directory (Join-Path $directory "windows.roc") "supplied starter"
         } else {
-            Invoke-ExampleProbe $name (Join-Path $repo "examples/$name") $launcher $name
+            $directory = if ($name -eq "progress") { Join-Path $PSScriptRoot "progress" } else { Join-Path $repo "examples/$name" }
+            $label = if ($name -eq "progress") { "determinate progress fixture" } else { $name }
+            $builtDirectory = if ($BuiltApps) { Join-Path $BuiltApps $name }
+            Invoke-ExampleProbe $name $directory $launcher $label $builtDirectory
         }
     } catch {
         $failures += "$name ($Target): $_"
@@ -98,14 +109,19 @@ if ($FreshStarter) {
     $scratch = Join-Path $repo "build/accessibility-$([Guid]::NewGuid().ToString('N'))"
     $directory = Join-Path $scratch "reading-list"
     try {
-        Push-Location $repo
-        try {
-            & $Roc $launcher -- init --platform platform/main.roc $directory
-            if ($LASTEXITCODE -ne 0) { throw "Could not initialize the fresh Reading List project." }
-        } finally {
-            Pop-Location
+        if ($BuiltApps) {
+            $directory = Join-Path $BuiltApps "fresh-starter"
+            Invoke-ExampleProbe "starter" $directory $null "fresh starter" $directory
+        } else {
+            Push-Location $repo
+            try {
+                & $Roc $launcher -- init --platform platform/main.roc $directory
+                if ($LASTEXITCODE -ne 0) { throw "Could not initialize the fresh Reading List project." }
+            } finally {
+                Pop-Location
+            }
+            Invoke-ExampleProbe "starter" $directory (Join-Path $directory "windows.roc") "fresh starter"
         }
-        Invoke-ExampleProbe "starter" $directory (Join-Path $directory "windows.roc") "fresh starter"
     } catch {
         $failures += "fresh starter ($Target): $_"
     } finally {

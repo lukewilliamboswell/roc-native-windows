@@ -10,10 +10,11 @@ native = Win.Features.use([Win.Features.image_codecs!])
 
 CounterStyle := {
 	appearance : Win.Ui.AppearanceProps ?? { accent: CustomAccent({ red: 33, green: 100, blue: 146 }) },
-	page : Win.Ui.StackProps ?? { padding: 16 },
-	row : Win.Ui.StackProps ?? { spacing: 12 },
-	title : Win.Ui.TextProps ?? { style: Heading },
-	readout_panel : Win.Ui.PanelProps ?? { surface: AccentTint, width: Fill, padding: 24 },
+	page : Win.Ui.StackProps ?? { padding: 20, spacing: 12 },
+	header : Win.Ui.StackProps ?? { spacing: 12 },
+	commands : Win.Ui.StackProps ?? { spacing: 8, stack_below: 284 },
+	title : Win.Ui.TextProps ?? { style: Title },
+	readout_panel : Win.Ui.PanelProps ?? { surface: AccentTint, border: Outline, width: Fill, padding: 32 },
 	readout : Win.Ui.TextProps ?? {
 		style: Display,
 		tone: AccentText,
@@ -35,7 +36,7 @@ view = |count| {
 			design.page,
 			[
 				Win.Ui.hstack(
-					design.row,
+					design.header,
 					[
 						Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Decorative, width: 32, height: 32 }),
 						Win.Ui.text_with("Counter", design.title),
@@ -46,7 +47,7 @@ view = |count| {
 					Win.Ui.text_with(count.signal().map(|value| "Count: ${value.to_str()}"), design.readout),
 				),
 				Win.Ui.hstack(
-					design.row,
+					design.commands,
 					[
 						Win.Ui.button("Decrease", { on_press: count.update(|value| value - 1) }),
 						Win.Ui.button("Reset", { on_press: count.update(|_| 0) }),

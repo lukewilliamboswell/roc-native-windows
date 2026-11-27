@@ -69,6 +69,7 @@ view = || Win.Ui.windows(
 			entry = row.item()
 			Win.Ui.window(
 				{
+					appearance: { accent: CustomAccent({ red: 151, green: 80, blue: 22 }) },
 					title: entry.map(
 						|window| match window.file {
 							None => Title("Files")
@@ -162,14 +163,12 @@ main_inspector = || {
 		),
 	)
 	details = Win.Ui.vstack(
-		{},
+		{ spacing: 8 },
 		[
-			Win.Ui.text_with(display.map(|state| state.name), { style: Heading, overflow: EllipsizeEnd }),
-			Win.Ui.text_with(display.map(|state| state.size), { style: Caption, tone: SecondaryText }),
 			Engine.when(
-				display.map(|state| !state.status.is_empty()),
-				|| Win.Ui.text(display.map(|state| state.status)),
-				|| Win.Ui.vstack({}, []),
+				display.map(|state| state.name.is_empty()),
+				|| Win.Ui.text_with(display.map(|state| state.status), { tone: SecondaryText }),
+				|| file_heading(display.map(|state| state.name), display.map(|state| state.size)),
 			),
 			inspection_tabs(
 				detail,
@@ -209,13 +208,13 @@ main_inspector = || {
 		],
 	)
 	Win.Ui.vstack(
-		{ padding: 16, spacing: 12 },
+		{ padding: 16, spacing: 10 },
 		[
 			Win.Ui.hstack(
 				{ spacing: 12 },
 				[
 					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Described({ label: "A document in a folder" }), width: 36, height: 36, fit: Contain }),
-					Win.Ui.text_with("Files", { style: Title }),
+					Win.Ui.text_with("Files", { style: Title, tone: AccentText }),
 				],
 			),
 			Win.Ui.hstack(
@@ -256,7 +255,7 @@ main_inspector = || {
 				{ stack_below: 552, spacing: 12 },
 				[
 					Win.Ui.panel({ width: Fill, padding: 0 }, queue_pane),
-					Win.Ui.panel({ width: Fill, padding: 10 }, details),
+					Win.Ui.panel({ border: Outline, width: Fill, padding: 6 }, details),
 				],
 			),
 			Engine.watch_latest(
@@ -310,14 +309,19 @@ comparison = |entry| Engine.state(
 		Win.Ui.vstack(
 			{ padding: 16, spacing: 12 },
 			[
-				Win.Ui.text_with(
+				file_heading(
 					window.map(
 						|value| match value.file {
 							None => ""
 							Selected(file) => file.name()
 						},
 					),
-					{ style: Title, overflow: EllipsizeEnd },
+					window.map(
+						|value| match value.file {
+							None => ""
+							Selected(file) => "${file.size().to_str()} bytes"
+						},
+					),
 				),
 				inspection_tabs(
 					detail,
@@ -362,6 +366,18 @@ comparison = |entry| Engine.state(
 			],
 		)
 	},
+)
+
+file_heading : Signal(ctx, Str), Signal(ctx, Str) -> Elem(ctx)
+file_heading = |name, size| Win.Ui.panel(
+	{ surface: AccentTint, width: Fill, padding: 6 },
+	Win.Ui.vstack(
+		{ spacing: 2 },
+		[
+			Win.Ui.text_with(name, { style: Heading, tone: AccentText, overflow: EllipsizeEnd }),
+			Win.Ui.text_with(size, { style: Caption, tone: SecondaryText }),
+		],
+	),
 )
 
 is_photo : Selection -> Bool

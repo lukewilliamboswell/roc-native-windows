@@ -259,7 +259,7 @@ pub(crate) enum Operation {
     Select,
     ChangeSelection(SelectionChange),
     Reveal,
-    Focus,
+    Focus(Option<u64>),
     FocusEditor(u64),
     Scroll([i32; 2]),
 }
@@ -347,7 +347,7 @@ impl State {
     fn action(&mut self, item: Item, operation: Operation) -> windows::core::Result<()> {
         let snapshot = self.snapshot(item)?;
         let key = match item {
-            Item::Grid if matches!(operation, Operation::Focus | Operation::Scroll(_)) => {
+            Item::Grid if matches!(operation, Operation::Focus(_) | Operation::Scroll(_)) => {
                 snapshot.active.ok_or_else(unsupported)?
             }
             Item::Cell(key) | Item::Editor { cell: key, .. } => key,
@@ -705,7 +705,12 @@ impl IRawElementProviderFragment_Impl for Provider_Impl {
         self.with(|_| Ok(null_mut()))
     }
     fn SetFocus(&self) -> windows::core::Result<()> {
-        self.action(Operation::Focus)
+        let mut state = self.state.lock().unwrap();
+        let editor = state
+            .snapshot(self.item)?
+            .editor
+            .map(|editor| editor.generation);
+        state.action(self.item, Operation::Focus(editor))
     }
     fn FragmentRoot(&self) -> windows::core::Result<IRawElementProviderFragmentRoot> {
         self.with(|_| self.other(Item::Grid).cast())

@@ -46,11 +46,14 @@ interactive Windows desktop for capture. Check focus, DPI, Narrator,
 file dialogs, networking and workers. Install, start, upgrade and uninstall
 the MSI on a clean machine. Cross-builds and Wine compatibility checks
 provide separate evidence from native Windows runs. Hosted CI runs the
-source checks and docs build on macOS, cross-builds on Linux, and checks
-the Win32 behavior scenarios on Windows x64. Run the interactive desktop
+source checks on macOS, cross-builds on Linux, and checks the Win32
+behavior scenarios on Windows x64. Run the interactive desktop
 checks below for Narrator, input focus, and display settings.
 The workflow's manual options run the external UI Automation probe and
-native ARM64 scenarios when those runners are available.
+native ARM64 scenarios. The macOS runner stages ARM64 apps and scenario
+plans so the ARM64 runners can execute them directly. The `standalone`
+option stages a local release preview on macOS and verifies a Reading List
+project generated from that preview on Windows x64 with a fresh Roc cache.
 
 Run xref:accessibility.adoc#verify-uia[the accessibility probe and desktop
 walkthroughs] before recording accessibility verification for a release.
@@ -154,6 +157,57 @@ Before publication, validate one exact set of versioned release assets.
 Collect the native Windows run results, dependency license texts, SBOMs,
 and provenance alongside the installer and bootstrap checks.
 
+[#windows-diagnostics]
+== Diagnose a local Windows build
+
+Use the example's `build/x64mingw/` or `build/arm64mingw/` executable from
+the commit under test. Save traces and local tools under the ignored
+repository-root `build/windows-diagnostics/` directory.
+
+* For a UI Automation failure, open the example and use Live Inspect in
+  https://accessibilityinsights.io/downloads/[Accessibility Insights for Windows].
+  Inspect the control's name, relationships, patterns, and events around the
+  failing action. Compare them with the out-of-process probe and the
+  xref:accessibility.adoc#verify-uia[keyboard and Narrator walkthrough].
+* For an automated accessibility scan, extract the portable CLI ZIP from
+  the https://github.com/microsoft/axe-windows/releases/tag/v2.4.2[Axe.Windows
+  release]. Open the example on the interactive desktop at the same privilege
+  level as the scanner. From the repository root, run the following with the
+  extracted CLI on `PATH` or use its full path. Replace `1234` with the app's PID.
++
+[source,powershell]
+----
+New-Item -ItemType Directory -Force build/windows-diagnostics/axe-windows
+AxeWindowsCLI.exe --processid 1234 --outputdirectory build/windows-diagnostics/axe-windows --alwayssavetestfile
+----
++
+Each scan checks the app's current UI Automation tree. Use the native probe and
+desktop walkthrough for workflow transitions, keyboard focus, and Narrator
+feedback. Open the `.a11ytest` report in Accessibility Insights for Windows
+to inspect individual findings.
+* For a slow or unresponsive app, use `wpr -profiles` to find a recording
+  profile. From an elevated PowerShell, check `wpr -status`, then start a CPU
+  recording with `wpr -start CPU -filemode`. Reproduce the action once and
+  use `wpr -stop build/windows-diagnostics/workers.etl`. Open the trace in
+  WPA and filter to the app's process. WPA is available through the
+  https://learn.microsoft.com/en-us/windows-hardware/test/wpt/[Windows Performance Toolkit].
+* For suspected Win32 heap, handle, or lock misuse, use the Windows SDK's
+  https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/application-verifier-testing-applications[Application Verifier].
+  Give a copy of the app a unique executable name, enable its Basics tests,
+  and launch it under a debugger. Delete the settings for that name when
+  finished with `appverif -delete settings -for workers-verifier.exe`.
+* For image metadata and hashes, extract
+  https://learn.microsoft.com/sysinternals/downloads/sigcheck[Sigcheck].
+  From the repository root, run `sigcheck64 -a -h -r examples/workers/build/x64mingw/workers.exe`
+  with the tool on `PATH`, or use its extracted path. Use `sigcheck64a` on
+  Windows on Arm. Compare the SHA-256 with the executable being debugged.
+* For file, registry, and DLL activity, extract
+  https://learn.microsoft.com/sysinternals/downloads/procmon[Process Monitor].
+  Stop capture while setting an include filter on the executable's process
+  name. Start capture, reproduce the operation, then stop and save the events
+  as a `.PML` file. Check the filtered trace before sharing it because paths
+  and process details can contain local information.
+
 [#review-host-authority]
 == Review each feature's security model
 
@@ -236,7 +290,10 @@ bindings using the vendored `host/glue/RustGlue.roc`, runs Roc expects and
 spec validation, and cross-builds the examples. `build` writes the example executables under
 `examples/<name>/build/<target>/`. `bundle` writes the Windows platform
 bundle to `dist/platform/`. `docs` renders the manual website, Markdown,
-and PDF under `.docs-out/`.
+and PDF under `.docs-out/` on macOS or Linux using the locked `roc-docs`
+utility from roc-automation. The Documentation workflow builds the same
+manual for pull requests and publishes the main branch to
+https://lukewilliamboswell.github.io/roc-native-windows/[GitHub Pages].
 
 The platform examples depend on the local platform through relative
 paths. Keep compiler pins in `scripts/`, keep generated ABI changes
@@ -258,6 +315,12 @@ roc ../../cli/windows.roc -- package --target x64mingw
 [#stage-a-release]
 == Stage a release
 
+The Release Windows platform workflow stages the public assets and a loopback
+preview, then uses the preview to bootstrap Reading List and test MSI
+installation, upgrade, launch, and removal on Windows x64 and ARM64. Run it
+on `main` with `publish` enabled to attest the staged files, verify the GitHub
+draft assets, and publish. The final job bootstraps from the public URLs.
+
 On Apple Silicon macOS, add the Intel macOS and Linux musl Rust targets
 for the release packagers. Build the platform bundle and pass its
 generated path, the release version and the public asset base URL.
@@ -266,7 +329,7 @@ generated path, the release version and the public asset base URL.
 ----
 rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 blueprint run bundle
-blueprint run release -- 0.1.0 dist/platform/HASH.tar.zst "$RELEASE_BASE_URL" dist/release
+blueprint run release -- 0.0.1 dist/platform/HASH.tar.zst "$RELEASE_BASE_URL" dist/release
 ----
 
 The output directory must be new. Every attachment includes the version.
@@ -279,7 +342,7 @@ Stage and serve the files to test a local HTTP URL.
 
 [source,sh]
 ----
-blueprint run release -- --local 0.1.0 dist/platform/HASH.tar.zst dist/release-preview
+blueprint run release -- --local 0.0.1 dist/platform/HASH.tar.zst dist/release-preview
 blueprint run serve -- dist/release-preview
 ----
 
@@ -288,7 +351,7 @@ The preview server uses Basic CLI's TCP support and binds to
 pass the matching loopback URL to the release task when staging the files.
 
 In another terminal, set `TOOL_BUNDLE` to the generated
-`windows-0_1_0-HASH.tar.zst` filename and use a fresh directory and cache
+`windows-0_0_1-HASH.tar.zst` filename and use a fresh directory and cache
 to check the first-user path.
 
 [source,sh]

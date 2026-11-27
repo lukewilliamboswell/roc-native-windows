@@ -20,6 +20,13 @@ Ui := [].{
 		taskbar_progress : Signal(ctx, Progress) ?? Engine.const(Idle),
 		title : Signal(ctx, WindowTitle) ?? Engine.const(AppTitle),
 		close : [UseDefaultClose, Handle(HandlerOf(ctx, {}))] ?? UseDefaultClose,
+		startup : WindowStartup ?? {},
+	}
+
+	## Apply placement once when a top-level window opens. At uses virtual-screen pixels.
+	WindowStartup := {
+		position : [SystemPosition, Centered, At({ x : I32, y : I32 })] ?? SystemPosition,
+		state : [Normal, Minimized, Maximized, Fullscreen] ?? Normal,
 	}
 
 	Rgb := { red : U8, green : U8, blue : U8 }
@@ -53,6 +60,23 @@ Ui := [].{
 			Engine.attr("accent", accent_color(props.appearance)),
 			Engine.attr_s("taskbar-progress", props.taskbar_progress.map(progress_word)),
 			Engine.attr_s("window-title", props.title.map(window_title)),
+			Engine.attr(
+				"startup-position",
+				match props.startup.position {
+					SystemPosition => "system"
+					Centered => "centered"
+					At({ x, y }) => "${x.to_str()},${y.to_str()}"
+				},
+			),
+			Engine.attr(
+				"startup-state",
+				match props.startup.state {
+					Normal => "normal"
+					Minimized => "minimized"
+					Maximized => "maximized"
+					Fullscreen => "fullscreen"
+				},
+			),
 		]
 		listeners = match props.close {
 			UseDefaultClose => attrs
