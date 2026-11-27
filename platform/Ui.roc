@@ -834,7 +834,7 @@ Ui := [].{
 	asset_image = |path, props|
 		Engine.element(
 			"ui-asset-image",
-			[Engine.attr_s("asset", path)].concat(image_attributes(props)),
+			[Engine.attr_s("asset", path)].concat(image_attributes(props.label, props.width, props.height, props.fit == Contain)),
 			[],
 		)
 
@@ -869,13 +869,21 @@ Ui := [].{
 	decode_image = |file| Engine.ask_of(DecodeImage.{}, file)
 
 	ImageSource : [NoImage, RasterImage(Raster)]
-	ImageProps : AssetImageProps
+	ImageProps(ctx) := {
+		label : Str,
+		width : U32,
+		height : U32,
+		fit : [Stretch, Contain] ?? Stretch,
+		input : SurfaceInput(ctx) ?? ReadOnly,
+	}
 
 	## Show immutable app-produced or decoded raster data.
-	image : Signal(ctx, ImageSource), ImageProps -> Elem(ctx)
-	image = |source, props| Ui.with_raster_binding(source, |bind, attachment|
-		Engine.element("ui-image", image_attributes(props).append(bind), [attachment]),
-	)
+	image : Signal(ctx, ImageSource), ImageProps(ctx) -> Elem(ctx)
+	image = |source, props| {
+		raster_input = Ui.with_raster_binding(source, |bind, attachment| Engine.element("ui-image-raster", [bind], [attachment]))
+		attrs = image_attributes(props.label, props.width, props.height, props.fit == Contain)
+		Engine.element("ui-image", attrs.concat(Ui.surface_input(props.input)), [raster_input])
+	}
 
 	## The input identity crosses as a private typed port attachment.
 	with_raster_binding : Signal(ctx, ImageSource), (Engine.Attr(Engine.In(ctx, U64)), Elem(Engine.In(ctx, U64)) -> Elem(Engine.In(ctx, U64))) -> Elem(ctx)
@@ -895,12 +903,12 @@ Ui := [].{
 
 }
 
-image_attributes : Ui.AssetImageProps -> List(Engine.Attr(ctx))
-image_attributes = |props| [
-	Engine.attr("label", props.label),
-	Engine.attr("width", props.width.to_str()),
-	Engine.attr("height", props.height.to_str()),
-	Engine.attr("fit", if (props.fit == Contain) "contain" else "stretch"),
+image_attributes : Str, U32, U32, Bool -> List(Engine.Attr(ctx))
+image_attributes = |label, width, height, contain| [
+	Engine.attr("label", label),
+	Engine.attr("width", width.to_str()),
+	Engine.attr("height", height.to_str()),
+	Engine.attr("fit", if (contain) "contain" else "stretch"),
 ]
 
 RasterAttachment : { binding : U64, bytes : ImageWire.Bytes, files : List(Engine.File), height : U32, width : U32 }

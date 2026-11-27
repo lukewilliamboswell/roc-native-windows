@@ -76,7 +76,7 @@ impl Control {
     fn from_tag(tag: &str) -> Result<Option<Self>> {
         let control = match tag {
             "" | "ui-vstack" | "ui-hstack" | "ui-window-content" | "ui-dialog-content"
-            | "ui-tab-panel" => {
+            | "ui-tab-panel" | "ui-image-raster" => {
                 return Ok(None);
             }
             "ui-window" => return Err("Ui.window must be the single outermost element".into()),
@@ -1411,7 +1411,7 @@ impl Surface {
             .as_ref()
             .map_or(HWND_TOP, |status| status.handle);
         for item in placement {
-            let pixels = self.raster(item.key);
+            let pixels = self.picture_pixels(tree, item.key);
             let view = self.views.get_mut(&item.key).unwrap();
             let y = item.y - self.scroll_position;
             let visible = view.kind != Control::ProgressBar || view.progress.visible();
@@ -1482,6 +1482,17 @@ impl Surface {
             };
         }
         Ok(())
+    }
+
+    fn picture_pixels(&self, tree: &Tree, key: Key) -> Option<Arc<Pixels>> {
+        let node = tree.node(key);
+        match &node.kind {
+            Kind::Element(tag) if tag == "ui-asset-image" => self.raster(key),
+            Kind::Element(tag) if tag == "ui-image" => {
+                node.children.iter().find_map(|&child| self.raster(child))
+            }
+            _ => None,
+        }
     }
 
     /// Measure and place from the same tree so the command order also sets

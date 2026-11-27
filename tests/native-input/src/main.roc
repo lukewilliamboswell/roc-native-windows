@@ -81,16 +81,10 @@ uncaptured_view = || bitmap(
 	}),
 )
 
-bitmap = |label, input| Engine.element(
-	"ui-asset-image",
-	[
-		Engine.attr("asset", "marker.bmp"),
-		Engine.attr("label", label),
-		Engine.attr("width", "101"),
-		Engine.attr("height", "103"),
-	].concat(Ui.surface_input(input)),
-	[],
-)
+bitmap = |label, input| {
+	raster = Ui.raster({ width: 1, height: 1, rgba: [48, 98, 144, 255] })
+	Ui.image(Engine.const(raster.map_ok(|value| RasterImage(value)) ?? NoImage), { label, width: 101, height: 103, input })
+}
 
 uncaptured_move : Engine.Pointer -> List(Engine.Write(_))
 uncaptured_move = |event| match event.at {
