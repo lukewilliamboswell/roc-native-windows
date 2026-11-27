@@ -166,8 +166,12 @@ assemble! = |staging, version, base, archive, archive_name, out, packagers| {
 	roc = Env.var_str!("ROC_WINDOWS_ROC") ?? "roc"
 	step!(cmd(roc, ["fmt", entry]), "format the release launcher")?
 	step!(cmd(roc, ["test", entry]), "check the release launcher")?
-	copy!(entry, "${assets}/${launcher_name}")?
 	launcher = Path.read_utf8!(Path.utf8(entry)) ? |error| "Could not read the stamped launcher: ${Str.inspect(error)}"
+	# Keep this bound aligned with the launcher download in cli/windows.roc.
+	if launcher.count_utf8_bytes() > 1024 * 1024 {
+		return Err("The generated windows.roc exceeds 1 MiB. Reduce the embedded scaffold before staging the release.")
+	}
+	copy!(entry, "${assets}/${launcher_name}")?
 	digest = Crypto.SHA256.hash(launcher.to_utf8()).to_hex()
 	tool_source = Str.join_with(launcher.split_on("\n").map(|line| if (line == "release_launcher_sha256 = \"\"") "release_launcher_sha256 = \"${digest}\"" else line), "\n")
 	if (!tool_source.contains(digest)) return Err("Could not stamp the launcher checksum into the tool bundle")
