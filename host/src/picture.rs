@@ -1,7 +1,7 @@
 //! Paint the same alpha-composited pixels on screen and into runner captures.
 
 use crate::Result;
-use crate::raster::{Pixels, destination};
+use crate::raster::{Pixels, byte_count, destination};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -10,14 +10,23 @@ use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWi
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const SUBCLASS: usize = 0x52415354;
+const WORKER_SCALE_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) struct Resize {
+    pub(crate) source: Arc<Pixels>,
+    pub(crate) size: (u32, u32),
+}
 
 pub(crate) struct Picture {
     hwnd: HWND,
     state: Box<Paint>,
+    desired: Option<(u32, u32)>,
+    resize: Option<Resize>,
 }
 
 #[derive(Default)]
 struct Paint {
+    source: Option<Arc<Pixels>>,
     image: Option<Bitmap>,
     contain: bool,
     background: Option<COLORREF>,
@@ -43,38 +52,96 @@ impl Picture {
         {
             return Err("could not mount image painting".into());
         }
-        Ok(Self { hwnd, state })
+        Ok(Self {
+            hwnd,
+            state,
+            desired: None,
+            resize: None,
+        })
     }
 
-    pub(crate) fn update(&mut self, pixels: Option<Arc<Pixels>>, contain: bool) -> Result<()> {
-        let unchanged = match (&self.state.image, &pixels) {
-            (None, None) => true,
-            (Some(current), Some(next)) => Arc::ptr_eq(&current.pixels, next),
-            _ => false,
+    pub(crate) fn update(
+        &mut self,
+        pixels: Option<Arc<Pixels>>,
+        contain: bool,
+        bounds: (i32, i32),
+    ) -> Result<()> {
+        let changed = match (&self.state.source, &pixels) {
+            (None, None) => false,
+            (Some(current), Some(next)) => !Arc::ptr_eq(current, next),
+            _ => true,
         };
-        if unchanged && self.state.contain == contain {
+        if changed {
+            self.state.source = pixels;
+            self.state.image = None;
+        }
+        if changed || self.state.contain != contain {
+            self.state.contain = contain;
+            self.invalidate();
+        }
+        let Some(source) = &self.state.source else {
+            self.desired = None;
+            self.resize = None;
             return Ok(());
-        }
-        if !unchanged {
-            self.state.image = pixels.map(Bitmap::new).transpose()?;
-        }
-        self.state.contain = contain;
-        // SAFETY: This is the owned image window on the UI thread.
-        unsafe {
-            InvalidateRect(self.hwnd, null(), 0);
+        };
+        let desired = worker_size(source, bounds, contain);
+        if changed || self.desired != desired {
+            self.desired = desired;
+            self.resize = desired.map(|size| Resize {
+                source: source.clone(),
+                size,
+            });
+            if desired.is_none() {
+                self.state.image = Some(Bitmap::new(source.clone())?);
+                self.invalidate();
+            }
         }
         Ok(())
+    }
+
+    pub(crate) fn take_resize(&mut self) -> Option<Resize> {
+        self.resize.take()
+    }
+
+    pub(crate) fn accept_resize(&mut self, source: Arc<Pixels>, image: Arc<Pixels>) -> Result<()> {
+        if self.desired == Some((image.width, image.height))
+            && self
+                .state
+                .source
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &source))
+        {
+            self.state.image = Some(Bitmap::new(image)?);
+            self.invalidate();
+        }
+        Ok(())
+    }
+
+    fn invalidate(&self) {
+        // SAFETY: This is the owned image window on the UI thread.
+        unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
 
     pub(crate) fn set_background(&mut self, color: COLORREF) {
         if self.state.background != Some(color) {
             self.state.background = Some(color);
-            // SAFETY: This is the owned image window on the UI thread.
-            unsafe {
-                InvalidateRect(self.hwnd, null(), 0);
-            }
+            self.invalidate();
         }
     }
+}
+
+fn worker_size(source: &Pixels, (width, height): (i32, i32), contain: bool) -> Option<(u32, u32)> {
+    if source.bgra.len() < WORKER_SCALE_BYTES || width <= 0 || height <= 0 {
+        return None;
+    }
+    let (_, _, width, height) = destination(width, height, (source.width, source.height), contain);
+    let (width, height) = (width as u32, height as u32);
+    let size = if byte_count(width, height).is_some() {
+        (width, height)
+    } else {
+        (width.min(2048), height.min(2048))
+    };
+    (size != (source.width, source.height)).then_some(size)
 }
 
 impl Drop for Picture {
@@ -175,11 +242,13 @@ unsafe fn paint_image(hwnd: HWND, dc: HDC, state: &Paint, fill: bool) {
                 FillRect(dc, &bounds, GetSysColorBrush(COLOR_WINDOW));
             }
         }
-        let Some(image) = &state.image else { return };
+        let (Some(image), Some(original)) = (&state.image, &state.source) else {
+            return;
+        };
         let (x, y, width, height) = destination(
             bounds.right,
             bounds.bottom,
-            (image.pixels.width, image.pixels.height),
+            (original.width, original.height),
             state.contain,
         );
         if width <= 0 || height <= 0 {
@@ -212,5 +281,27 @@ unsafe fn paint_image(hwnd: HWND, dc: HDC, state: &Paint, fill: bool) {
             SelectObject(source, previous);
         }
         DeleteDC(source);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_images_resample_to_physical_bounds_and_fit() {
+        let pixels = Pixels {
+            width: 2048,
+            height: 512,
+            bgra: vec![0; 2048 * 512 * 4],
+        };
+        assert_eq!(worker_size(&pixels, (180, 80), true), Some((180, 45)));
+        assert_eq!(worker_size(&pixels, (360, 160), true), Some((360, 90)));
+        assert_eq!(worker_size(&pixels, (360, 160), false), Some((360, 160)));
+        assert_eq!(worker_size(&pixels, (2048, 512), false), None);
+        assert_eq!(
+            worker_size(&pixels, (16000, 16000), false),
+            Some((2048, 2048))
+        );
     }
 }

@@ -324,7 +324,10 @@ impl ShaderView {
             eprintln!("roc-native-windows shader fallback: {error}");
         }
         let frame = display.pixels().cloned();
-        let display = if let Err(error) = self.picture.update(frame, false) {
+        let size = frame
+            .as_ref()
+            .map_or((0, 0), |frame| (frame.width as i32, frame.height as i32));
+        let display = if let Err(error) = self.picture.update(frame, false, size) {
             Display::Failed(error, None)
         } else {
             display

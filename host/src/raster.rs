@@ -40,6 +40,48 @@ impl Pixels {
             bgra: rgba,
         })
     }
+
+    pub(crate) fn resize(&self, width: u32, height: u32) -> Result<Self> {
+        let size = byte_count(width, height).ok_or("display raster exceeds the pixel limit")?;
+        let columns = (0..width)
+            .map(|x| sample_axis(x, width, self.width))
+            .collect::<Vec<_>>();
+        let mut bgra = Vec::with_capacity(size);
+        let row = (self.width * 4) as usize;
+        for y in 0..height {
+            let (top, bottom, fy) = sample_axis(y, height, self.height);
+            for &(left, right, fx) in &columns {
+                let tl = top * row + left * 4;
+                let tr = top * row + right * 4;
+                let bl = bottom * row + left * 4;
+                let br = bottom * row + right * 4;
+                for channel in 0..4 {
+                    let pixel = |offset| u32::from(self.bgra[offset + channel]);
+                    let upper = pixel(tl) * (256 - fx) + pixel(tr) * fx;
+                    let lower = pixel(bl) * (256 - fx) + pixel(br) * fx;
+                    bgra.push(((upper * (256 - fy) + lower * fy + 32768) >> 16) as u8);
+                }
+            }
+        }
+        Ok(Self {
+            width,
+            height,
+            bgra,
+        })
+    }
+}
+
+// Interpolate at pixel centers in premultiplied space, clamping the outer edges.
+fn sample_axis(i: u32, output: u32, input: u32) -> (usize, usize, u32) {
+    let position = ((u64::from(2 * i + 1) * u64::from(input) * 128 / u64::from(output)) as i32
+        - 128)
+        .clamp(0, ((input - 1) * 256) as i32) as u32;
+    let start = position / 256;
+    (
+        start as usize,
+        (start + 1).min(input - 1) as usize,
+        position % 256,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -394,6 +436,18 @@ mod tests {
         let jpeg = b"\xff\xd8\xff\xe1\x00\x1eExif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\xff\xd9";
         assert_eq!(jpeg_orientation(jpeg), 6);
         assert_eq!(jpeg_orientation(&jpeg[..12]), 1);
+    }
+
+    #[test]
+    fn resampling_keeps_translucent_edges_premultiplied() {
+        let source = Pixels::from_rgba(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 0]).unwrap();
+        assert_eq!(source.resize(1, 1).unwrap().bgra, [0, 0, 128, 128]);
+        assert_eq!(
+            source.resize(3, 1).unwrap().bgra,
+            [0, 0, 255, 255, 0, 0, 128, 128, 0, 0, 0, 0]
+        );
+        assert!(source.resize(0, 1).is_err());
+        assert_eq!(sample_axis(8191, 8192, 8192), (8191, 8191, 0));
     }
 
     #[cfg(windows)]

@@ -4,7 +4,7 @@ use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
 use crate::command_icon::ButtonIcon;
 use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
-use crate::picture::Picture;
+use crate::picture::{Picture, Resize};
 use crate::progress::{Progress, native::ProgressBar};
 use crate::raster::Pixels;
 use crate::shader::{Inputs as ShaderInputs, ShaderView};
@@ -555,6 +555,31 @@ impl Surface {
         } else {
             self.raster_inputs.remove(&key);
         }
+    }
+
+    pub(crate) fn image_resizes(&mut self) -> impl Iterator<Item = (Key, Resize)> + '_ {
+        self.views.iter_mut().filter_map(|(&key, view)| {
+            view.picture
+                .as_mut()?
+                .take_resize()
+                .map(|resize| (key, resize))
+        })
+    }
+
+    pub(crate) fn accept_image_resize(
+        &mut self,
+        key: Key,
+        source: Arc<Pixels>,
+        image: Arc<Pixels>,
+    ) -> Result<()> {
+        if let Some(picture) = self
+            .views
+            .get_mut(&key)
+            .and_then(|view| view.picture.as_mut())
+        {
+            picture.accept_resize(source, image)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn key(&self, handle: HWND) -> Option<Key> {
@@ -1470,13 +1495,6 @@ impl Surface {
                 );
                 after = view.label;
             }
-            if let Some(picture) = &mut view.picture {
-                let contain = tree.node(item.key).attr("fit") == Some("contain");
-                picture.update(pixels, contain)?;
-            }
-            if let Some(shader) = &mut view.shader {
-                shader.set_size(item.width, item.height);
-            }
             if !view.label.is_null() && view.props.label.is_empty() {
                 // SAFETY: The label belongs to this thread and is optional.
                 unsafe { ShowWindow(view.label, SW_HIDE) };
@@ -1489,6 +1507,13 @@ impl Surface {
                 } else {
                     0
                 };
+            if let Some(picture) = &mut view.picture {
+                let contain = tree.node(item.key).attr("fit") == Some("contain");
+                picture.update(pixels, contain, (item.width, control_height))?;
+            }
+            if let Some(shader) = &mut view.shader {
+                shader.set_size(item.width, control_height);
+            }
             if view.kind == Control::ComboBox {
                 let dropdown_height = control_height + scale(self.dpi, 200);
                 let placement = (after, item.x, control_y, item.width, dropdown_height);

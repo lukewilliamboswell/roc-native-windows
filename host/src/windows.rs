@@ -476,6 +476,10 @@ mod native {
             Some(&mut self.mounted.get_mut(&id)?.surface)
         }
 
+        pub(crate) fn surfaces_mut(&mut self) -> impl Iterator<Item = &mut Surface> {
+            self.mounted.values_mut().map(|entry| &mut entry.surface)
+        }
+
         pub(crate) fn is_dialog(&self, id: Key) -> bool {
             self.mounted
                 .get(&id)

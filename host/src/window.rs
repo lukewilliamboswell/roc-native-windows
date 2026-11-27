@@ -159,8 +159,20 @@ impl App {
         }
         self.surface.poll();
         self.effects.poll();
-        let images = self.rasters.poll()?;
+        let (images, resized) = self.rasters.poll()?;
         self.publish_rasters(images)?;
+        for update in resized {
+            if let Some(owner) = self.surface.for_key(update.key)
+                && let Some(surface) = self.surface.at_mut(owner)
+            {
+                surface.accept_image_resize(update.key, update.source, update.image)?;
+            }
+        }
+        for surface in self.surface.surfaces_mut() {
+            for (key, resize) in surface.image_resizes() {
+                self.rasters.resize(key, resize)?;
+            }
+        }
         if let Some(generation) = self.opportunity.take() {
             let mut payload = vec![255];
             payload.extend_from_slice(&generation.to_le_bytes());
