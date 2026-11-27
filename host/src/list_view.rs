@@ -200,7 +200,7 @@ fn retained_rows<'a>(old: &'a [Row], new: &[Row]) -> BTreeMap<&'a str, &'a Row> 
 mod native {
     use super::{Change, Report, Result, Row, changes};
     use crate::view::{scale, text_width, wide};
-    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::{GetDC, HFONT, ReleaseDC, SelectObject};
     use windows_sys::Win32::UI::Controls::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, SendMessageW};
@@ -388,6 +388,19 @@ mod native {
 
         pub(crate) fn has_column(&self, key: &str) -> bool {
             self.items.columns.iter().any(|column| column.key == key)
+        }
+
+        pub(crate) fn hit_row(&self, hwnd: HWND, point: POINT) -> Option<&str> {
+            let mut hit = LVHITTESTINFO {
+                pt: point,
+                ..LVHITTESTINFO::default()
+            };
+            self.row_at(send(hwnd, LVM_SUBITEMHITTEST, 0, addr_of(&mut hit)) as i32)
+        }
+
+        pub(crate) fn focused_or_selected(&self, hwnd: HWND) -> Option<&str> {
+            self.row_at(next(hwnd, LVNI_FOCUSED))
+                .or_else(|| self.selection(hwnd))
         }
 
         pub(crate) fn selection(&self, hwnd: HWND) -> Option<&str> {

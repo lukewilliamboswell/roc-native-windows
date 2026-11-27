@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Time::{
 };
 use windows_sys::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
-    LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK, LVN_ITEMACTIVATE, LVN_ITEMCHANGED, NMHDR,
+    LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK, LVN_ITEMCHANGED, NM_DBLCLK, NM_RETURN, NMHDR,
     NMITEMACTIVATE, NMLISTVIEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -283,12 +283,12 @@ impl App {
         let Some(key) = self.surface.key(header.hwndFrom) else {
             return Ok(());
         };
-        let Some((_, report)) = self.surface.report(key) else {
+        let Some((hwnd, report)) = self.surface.report(key) else {
             return Ok(());
         };
         if !matches!(
             header.code,
-            LVN_ITEMCHANGED | LVN_ITEMACTIVATE | LVN_COLUMNCLICK
+            LVN_ITEMCHANGED | NM_DBLCLK | NM_RETURN | LVN_COLUMNCLICK
         ) {
             return Ok(());
         }
@@ -303,10 +303,18 @@ impl App {
                     self.report_selection.insert(key);
                 }
             }
-            LVN_ITEMACTIVATE => {
-                // SAFETY: This ListView notification provides NMITEMACTIVATE.
+            NM_DBLCLK => {
+                // SAFETY: ListView double-click notifications provide NMITEMACTIVATE.
                 let details = unsafe { &*(address as *const NMITEMACTIVATE) };
-                if let Some(row) = report.row_at(details.iItem) {
+                if let Some(row) = report
+                    .row_at(details.iItem)
+                    .or_else(|| report.hit_row(hwnd, details.ptAction))
+                {
+                    self.report_actions.push_back((key, "activate", row.into()));
+                }
+            }
+            NM_RETURN => {
+                if let Some(row) = report.focused_or_selected(hwnd) {
                     self.report_actions.push_back((key, "activate", row.into()));
                 }
             }
@@ -589,6 +597,7 @@ fn run() -> Result<()> {
                         continue;
                     }
                     if !(WM_KEYFIRST..=WM_KEYLAST).contains(&message.message)
+                        || report_receives_enter(&message)
                         || IsDialogMessageW(window, &message) == 0
                     {
                         TranslateMessage(&message);
@@ -606,6 +615,20 @@ fn run() -> Result<()> {
         }
         Ok(())
     }
+}
+
+/// Dialog navigation handles Enter itself. A report needs the original key
+/// message so it can send its documented NM_RETURN notification.
+fn report_receives_enter(message: &MSG) -> bool {
+    message.message == WM_KEYDOWN
+        && message.wParam == usize::from(VK_RETURN)
+        && APP.with(|state| {
+            state.borrow().as_ref().is_some_and(|app| {
+                app.surface
+                    .key(message.hwnd)
+                    .is_some_and(|key| app.surface.report(key).is_some())
+            })
+        })
 }
 
 fn mount(window: HWND, options: Option<SpecOptions>) -> Result<()> {
