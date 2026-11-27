@@ -170,12 +170,23 @@ pub(crate) mod native {
             return Ok(());
         }
         let fields = system_time(value);
-        let (flag, fields) = match value {
-            Value::Unset => (GDT_NONE, 0),
-            _ => (GDT_VALID, &fields as *const SYSTEMTIME as LPARAM),
+        let flag = if value == Value::Unset {
+            GDT_NONE
+        } else {
+            GDT_VALID
         };
-        // SAFETY: A valid value supplies a live SYSTEMTIME, and GDT_NONE takes no pointer.
-        if unsafe { SendMessageW(hwnd, DTM_SETSYSTEMTIME, flag as usize, fields) } == 0 {
+        // DTM_SETSYSTEMTIME ignores the fields for GDT_NONE on Windows.
+        // A live pointer also works with Win32 implementations that require one.
+        // SAFETY: The SYSTEMTIME remains live for the synchronous message.
+        let applied = unsafe {
+            SendMessageW(
+                hwnd,
+                DTM_SETSYSTEMTIME,
+                flag as usize,
+                &fields as *const SYSTEMTIME as LPARAM,
+            )
+        };
+        if applied == 0 || read(hwnd, kind)? != value {
             return Err("the native picker rejected the controlled value".into());
         }
         Ok(())
