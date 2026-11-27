@@ -34,6 +34,7 @@ mod slider;
 mod spec_effects;
 #[cfg(any(test, windows))]
 mod spec_plan;
+#[cfg(any(test, windows))]
 mod style;
 #[cfg(any(test, windows))]
 mod surface_input;

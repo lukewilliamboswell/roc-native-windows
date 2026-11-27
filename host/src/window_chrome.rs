@@ -285,6 +285,7 @@ mod tests {
         add_element(&mut tree, 4, 3, "ui-status-part");
         let window = WindowDeclaration::read(&tree, Some(1), ROOT).unwrap();
         assert_eq!(window.content, tree.node(1).children[0]);
+        assert!(window.accent == Accent::default());
         let status = window.status.unwrap();
         assert_eq!(status.primary, "");
         assert_eq!(status.trailing, vec![("", 128)]);
