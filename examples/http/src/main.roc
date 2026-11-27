@@ -20,20 +20,33 @@ store = Engine.store(
 
 cells = store.cells()
 
+HttpStyle := {
+	page : Ui.StackProps ?? { padding: 16, spacing: 12 },
+	header : Ui.StackProps ?? { spacing: 12 },
+	title : Ui.TextProps ?? { style: Title },
+	response_panel : Ui.PanelProps ?? { border: Outline, width: Fill },
+	response_status : Ui.TextProps ?? { style: Heading },
+	response_body : Ui.TextProps ?? {
+		style: Monospace,
+		font: PackagedFont({ asset: "fonts/IBMPlexMono-Regular.ttf", family: "IBM Plex Mono" }),
+	},
+}
+
 view : () -> Elem(Engine.StoreRoot(_))
 view = || {
+	design = HttpStyle.{}
 	request = cells.request.signal()
 	progress = request.map(|pending| if (pending.active) Ui.Progress.Indeterminate else Ui.Progress.Idle)
 	url = cells.url.signal()
 	start = { url, previous: request }.Signal.map(|{ url: typed, previous }| { url: typed.trim(), serial: previous.serial + 1, active: Bool.True })
 	content = Ui.vstack(
-		{ padding: 16, spacing: 12 },
+		design.page,
 		[
 			Ui.hstack(
-				{ spacing: 12 },
+				design.header,
 				[
 					Ui.asset_image("http.bmp", { description: Decorative, width: 28, height: 28 }),
-					Ui.text_with("HTTP", { style: Title }),
+					Ui.text_with("HTTP", design.title),
 				],
 			),
 			Ui.hstack(
@@ -46,12 +59,12 @@ view = || {
 			),
 			Ui.progress_bar(progress, { label: "Request progress" }),
 			Ui.panel(
-				{ border: Outline, width: Fill },
+				design.response_panel,
 				Ui.vstack(
 					{},
 					[
-						Ui.status_text(cells.status.signal(), { text: { style: Heading } }),
-						Ui.text_with(cells.body.signal(), { style: Monospace }),
+						Ui.status_text(cells.status.signal(), { text: design.response_status }),
+						Ui.text_with(cells.body.signal(), design.response_body),
 					],
 				),
 			),
@@ -77,6 +90,6 @@ answered = |request, result| {
 }
 
 preview : Str -> Str
-preview = |body| Str.join_with(Str.from_utf8_lossy(body.to_utf8().take_first(200)).split_on("\n").map(|line| line.trim()), " ")
+preview = |body| Str.from_utf8_lossy(body.to_utf8().take_first(200))
 
-expect preview("a\n  b") == "a b"
+expect preview("a\n  b") == "a\n  b"
