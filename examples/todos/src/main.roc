@@ -143,23 +143,21 @@ notes_panel = || {
 			Editing(fields) => fields.draft
 		},
 	)
-	Engine.when(
-		is_open,
-		|| Ui.vstack(
+	Ui.dialog(
+		{ title, open: is_open, on_close_request: Engine.handle(|_| [cells.note_editor.set(Closed)]) },
+		Ui.vstack(
 			{},
 			[
-				Ui.text(title),
 				Ui.text_area(draft, { label: "Notes", rows: 4, mode: Editable(Engine.handle(write_note)) }),
 				Ui.hstack(
 					{},
 					[
-						Ui.button("Save notes", { on_press: Engine.handle_by(editor, |current, _| save_note(current)) }),
+						Ui.button("Save notes", { enter_action: WindowDefault, on_press: Engine.handle_by(editor, |current, _| save_note(current)) }),
 						Ui.button("Cancel", { on_press: Engine.handle(|_| [cells.note_editor.set(Closed)]) }),
 					],
 				),
 			],
 		),
-		|| Ui.vstack({}, []),
 	)
 }
 

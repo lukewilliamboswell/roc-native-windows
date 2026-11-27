@@ -2,7 +2,7 @@ app [main] { logic: "../logic/main.roc", pf: platform "../../../platform/main.ro
 
 import logic.Inspector
 import pf.Clipboard
-import pf.Engine exposing [Elem, File, Signal]
+import pf.Engine exposing [Elem, File, HandlerOf, Signal]
 import pf.Files
 import pf.Ui
 
@@ -14,6 +14,14 @@ Queued : { key : Str, file : File }
 Selection : [None, Selected(File)]
 
 PreviewBytes : [NoPreview, Loaded(List(U8))]
+
+WindowEntry := { key : Str, file : Selection }.{
+	# A session keeps the same file for the lifetime of its key.
+	is_eq : WindowEntry, WindowEntry -> Bool
+	is_eq = |first, second| first.key == second.key
+}
+
+main_window = WindowEntry.{ key: "main", file: None }
 
 FolderRequest := { sequence : U64, selected : [NoFolder, ReadFolder(Files.Folder)] }.{
 	is_eq : FolderRequest, FolderRequest -> Bool
@@ -39,19 +47,48 @@ store = Engine.store(
 		expanded: Engine.cell(Set.empty()),
 		folder: Engine.cell(no_folder),
 		pick_status: Engine.cell(""),
+		windows: Engine.cell([main_window]),
+		next_window: Engine.cell(1.U64),
 	}.Engine.Cells,
 )
 
 cells = store.cells()
 
 view : () -> Elem(Engine.StoreRoot(_))
-view = || {
+view = || Ui.windows(
+	Engine.each(cells.windows.signal(), |entry| entry.key, |row| {
+		entry = row.item()
+		Ui.window(
+			{
+				title: entry.map(|window| match window.file {
+					None => Title("Files")
+					Selected(file) => Title("Compare ${file.name()}")
+				}),
+				close: Handle(Engine.handle_by(row.key(), |key, _| close_window(key))),
+			},
+			Engine.when(row.key().map(|key| key == "main"), || main_inspector(), || comparison(entry)),
+		)
+	}),
+)
+
+close_window : Str -> List(Engine.Write(_))
+close_window = |key| {
+	remove = cells.windows.update(|windows| windows.keep_if(|window| window.key != key))
+	if key == "main" {
+		[remove].concat(reset(Clear))
+	} else {
+		[remove]
+	}
+}
+
+main_inspector = || {
 	queue = cells.queue.signal()
 	selected = cells.selected.signal()
 	format = cells.format.signal()
 	detail = cells.detail.signal()
 	on_files = Engine.handle_by(cells.next_key.signal(), receive)
 	selection = { queue, selected }.Signal.map(|{ queue: entries, selected: key }| active(entries, key))
+	comparison_input = { selection, windows: cells.windows.signal(), serial: cells.next_window.signal() }.Signal.map(|value| value)
 	group_selection = cells.group_selection.signal()
 	tree_selected = { selected, group_selection }.Signal.map(|value|
 		match value.group_selection {
@@ -129,46 +166,50 @@ view = || {
 			Ui.text(display.map(|state| state.size)),
 			Ui.text(display.map(|state| state.status)),
 			Ui.text(cells.pick_status.signal()),
-			Ui.tabs(
+			Ui.button(
+				"Open in New Window",
 				{
-					label: "File details",
-					tabs: [
-						Ui.Choice.{ key: "preview", label: "Preview" },
-						Ui.Choice.{ key: "fingerprint", label: "Fingerprint" },
-					],
-					selected: detail,
-					on_select: Engine.handle(|key| [cells.detail.set(key)]),
+					enabled: comparison_input.map(|current| match current.selection {
+						Selected(_) => current.windows.len() == 1
+						None => Bool.False
+					}),
+					on_press: Engine.handle_by(comparison_input, |current, _| match current.selection {
+						Selected(file) if current.windows.len() == 1 => [
+							cells.windows.update(|windows| windows.append(WindowEntry.{ key: current.serial.to_str(), file: Selected(file) })),
+							cells.next_window.set(current.serial + 1),
+						]
+						_ => []
+					}),
 				},
-				Engine.switch(detail, ["preview", "fingerprint"], |key|
-					if (key == "preview") {
-						Ui.vstack(
-							{},
-							[
-								Ui.radio_group({
-									label: "Preview format",
-									choices: [Ui.Choice.{ key: "text", label: "Text" }, Ui.Choice.{ key: "hex", label: "Hex" }],
-									selected: format,
-									on_select: Engine.handle(|format_key| [cells.format.set(format_key)]),
-								}),
-								Ui.text_area(preview, { label: "Contents" }),
-							],
-						)
-					} else {
-						Ui.vstack(
-							{},
-							[
-								Ui.text(display.map(|state| state.digest)),
-								Ui.button(
-									"Copy SHA-256",
-									{
-										enabled: checksum.map(|text| !text.is_empty()),
-										on_press: Engine.handle_by(checksum, |text, _| if (text.is_empty()) [] else [cells.copies.update(|outbox| outbox.post(text))]),
-									},
-								),
-								Ui.text(cells.copy_status.signal()),
-							],
-						)
-					},
+			),
+			inspection_tabs(
+				detail,
+				Engine.handle(|key| [cells.detail.set(key)]),
+				|| Ui.vstack(
+					{},
+					[
+						Ui.radio_group({
+							label: "Preview format",
+							choices: [Ui.Choice.{ key: "text", label: "Text" }, Ui.Choice.{ key: "hex", label: "Hex" }],
+							selected: format,
+							on_select: Engine.handle(|format_key| [cells.format.set(format_key)]),
+						}),
+						Ui.text_area(preview, { label: "Contents" }),
+					],
+				),
+				|| Ui.vstack(
+					{},
+					[
+						Ui.text(display.map(|state| state.digest)),
+						Ui.button(
+							"Copy SHA-256",
+							{
+								enabled: checksum.map(|text| !text.is_empty()),
+								on_press: Engine.handle_by(checksum, |text, _| if (text.is_empty()) [] else [cells.copies.update(|outbox| outbox.post(text))]),
+							},
+						),
+						Ui.text(cells.copy_status.signal()),
+					],
 				),
 			),
 			Engine.watch_latest(
@@ -186,14 +227,7 @@ view = || {
 			),
 			Engine.watch_latest(
 				selection,
-				|current| match current {
-					Selected(file) =>
-						match file.slice({ start: 0, len: file.size().min(Inspector.preview_limit) }) {
-							Ok(head) => [head.read_bytes({})]
-							Err(_) => []
-						}
-					None => []
-				},
+				preview_requests,
 				Engine.react(
 					|_, result| [
 						cells.preview_bytes.set(
@@ -208,14 +242,71 @@ view = || {
 			),
 			Engine.watch_latest(
 				selection,
-				|current| match current {
-					Selected(file) => [file.sha256()]
-					None => []
-				},
+				digest_requests,
 				Engine.react(|_, result| [change(Digest(result.map_err(Str.inspect)))]),
 			),
 		],
 	)
+}
+
+comparison = |entry| Engine.state(
+	{ detail: "preview", display: Inspector.idle },
+	|local| {
+		window = entry.lift()
+		current = local.signal()
+		detail = current.map(|state| state.detail)
+		Ui.vstack(
+			{ padding: 16, spacing: 12 },
+			[
+				Ui.text_with(window.map(|value| match value.file {
+					None => ""
+					Selected(file) => file.name()
+				}), { overflow: EllipsizeEnd }),
+				inspection_tabs(
+					detail,
+					local.set_value(|state, key| { ..state, detail: key }),
+					|| Ui.text_area(current.map(|state| state.display.preview), { label: "Contents" }),
+					|| Ui.text(current.map(|state| state.display.digest)),
+				),
+				Engine.watch_latest(window, |value| preview_requests(value.file), local.on_result(|state, _, result| {
+					..state,
+					display: Inspector.update(state.display, Preview(result.map_err(Str.inspect))),
+				})),
+				Engine.watch_latest(window, |value| digest_requests(value.file), local.on_result(|state, _, result| {
+					..state,
+					display: Inspector.update(state.display, Digest(result.map_err(Str.inspect))),
+				})),
+			],
+		)
+	},
+)
+
+inspection_tabs : Signal(ctx, Str), HandlerOf(ctx, Str), (() -> Elem(ctx)), (() -> Elem(ctx)) -> Elem(ctx)
+inspection_tabs = |detail, on_select, preview, fingerprint| Ui.tabs(
+	{
+		label: "File details",
+		tabs: [
+			Ui.Choice.{ key: "preview", label: "Preview" },
+			Ui.Choice.{ key: "fingerprint", label: "Fingerprint" },
+		],
+		selected: detail,
+		on_select,
+	},
+	Engine.switch(detail, ["preview", "fingerprint"], |key| if (key == "preview") preview() else fingerprint()),
+)
+
+preview_requests = |current| match current {
+	Selected(file) =>
+		match file.slice({ start: 0, len: file.size().min(Inspector.preview_limit) }) {
+			Ok(head) => [head.read_bytes({ max_bytes: Inspector.preview_limit })]
+			Err(_) => []
+		}
+	None => []
+}
+
+digest_requests = |current| match current {
+	Selected(file) => [file.sha256()]
+	None => []
 }
 
 file_type : File -> Str
