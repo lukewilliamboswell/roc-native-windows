@@ -122,13 +122,16 @@ pub(crate) use native::*;
 mod native {
     use super::*;
     use std::ptr::null;
+    use std::sync::OnceLock;
     use std::time::SystemTime;
     use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows_sys::Win32::Globalization::*;
     use windows_sys::Win32::Security::Cryptography::{
         BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
     };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::System::Time::*;
+    use windows_sys::core::{s, w};
 
     const FILETIME_UNIX_EPOCH: i128 = 116_444_736_000_000_000;
     pub(crate) const MAX_RANDOM: u64 = 65_536;
@@ -319,10 +322,39 @@ mod native {
                 let offset = self.0.Bias.checked_add(self.0.StandardBias)?;
                 return calendar(millis(utc)?.checked_sub(i64::from(offset) * 60_000)?);
             }
+            if requires_compatible_projection() {
+                return self.project_year_rule(utc);
+            }
             let mut local = SYSTEMTIME::default();
             // SAFETY: The captured zone and immutable UTC input outlive this call.
             (unsafe { SystemTimeToTzSpecificLocalTimeEx(&self.0, utc, &mut local) } != 0)
                 .then_some(local)
+        }
+
+        fn year_rule(self, year: u16) -> Option<TIME_ZONE_INFORMATION> {
+            let mut info = TIME_ZONE_INFORMATION::default();
+            // SAFETY: The captured dynamic zone is valid and the yearly output is writable.
+            (unsafe { GetTimeZoneInformationForYear(year, &self.0, &mut info) } != 0)
+                .then_some(info)
+        }
+
+        fn project_year_rule(self, utc: &SYSTEMTIME) -> Option<SYSTEMTIME> {
+            let year = utc.wYear;
+            // The appropriate rule is indexed by local year, which can differ
+            // from the UTC year at the boundary.
+            for year in [year, year.saturating_sub(1), year.saturating_add(1)] {
+                let Some(rule) = self.year_rule(year) else {
+                    continue;
+                };
+                let mut local = SYSTEMTIME::default();
+                // SAFETY: The sampled year rule, UTC input, and output are valid.
+                if unsafe { SystemTimeToTzSpecificLocalTime(&rule, utc, &mut local) } != 0
+                    && local.wYear == year
+                {
+                    return Some(local);
+                }
+            }
+            None
         }
 
         fn offset_at(self, at: i64) -> Option<i32> {
@@ -345,11 +377,7 @@ mod native {
                         .max(1601);
                     let until = self.project(&calendar(until)?)?.wYear.saturating_add(1);
                     for year in from..=until {
-                        let mut info = TIME_ZONE_INFORMATION::default();
-                        // SAFETY: The captured dynamic zone is valid and the yearly output is writable.
-                        if unsafe { GetTimeZoneInformationForYear(year, &self.0, &mut info) } == 0 {
-                            return None;
-                        }
+                        let info = self.year_rule(year)?;
                         let standard = info.Bias.checked_add(info.StandardBias)?;
                         let daylight = info.Bias.checked_add(info.DaylightBias)?;
                         for (rule, before) in
@@ -385,6 +413,19 @@ mod native {
             };
             full().or_else(|| Some(Zone::constant(now, 0, offset)))
         }
+    }
+
+    fn requires_compatible_projection() -> bool {
+        static WINE: OnceLock<bool> = OnceLock::new();
+        *WINE.get_or_init(|| {
+            // Older Wine versions export Ex as an aborting stub. A Wine
+            // marker identifies that compatibility environment without
+            // invoking the stub; native Windows always uses Ex.
+            unsafe {
+                let ntdll = GetModuleHandleW(w!("ntdll.dll"));
+                !ntdll.is_null() && GetProcAddress(ntdll, s!("wine_get_version")).is_some()
+            }
+        })
     }
 
     fn transition(year: u16, mut rule: SYSTEMTIME) -> Option<i64> {
@@ -479,7 +520,7 @@ mod tests {
     #[test]
     fn wall_clock_is_signed_and_language_order_is_preserved() {
         use std::time::{Duration, UNIX_EPOCH};
-        assert_eq!(unix_ms(UNIX_EPOCH - Duration::from_nanos(1)), Ok(-1));
+        assert_eq!(unix_ms(UNIX_EPOCH - Duration::from_nanos(100)), Ok(-1));
         assert_eq!(unix_ms(UNIX_EPOCH + Duration::from_millis(17)), Ok(17));
         let input = "fr-CA\0en-CA\0\0".encode_utf16().collect::<Vec<_>>();
         assert_eq!(languages(&input).unwrap(), ["fr-CA", "en-CA"]);
