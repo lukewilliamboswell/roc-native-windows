@@ -234,6 +234,34 @@ The ZIP contains an executable that can run after extraction. Both carry
 the executable, `assets/`, and any top-level `LICENSE` or
 `THIRD_PARTY_LICENSES.md` supplied by the app author.
 
+[#http-capabilities]
+== Grant an HTTP origin
+
+The app can use HTTP only for exact origins declared in `windows.json`.
+Declare the scheme, ASCII DNS name or IPv4 address, and port. An omitted
+port uses the scheme's default. An origin grants all paths at that
+scheme, host and port. Apps without a grant can still use native pickers,
+clipboard commands, assets and local settings.
+
+[source,json]
+----
+{
+  "capabilities": {
+    "version": 1,
+    "http": { "origins": ["https://api.example.com"] }
+  }
+}
+----
+
+The launcher validates the declaration and embeds it in the app EXE.
+The host checks requests before starting network work or supplying a
+scenario response. It follows same-origin redirects with a bounded
+deadline. A redirect to another granted origin returns the 3xx response
+so the app can issue a fresh request. An undeclared destination returns
+the existing `Network` failure. A
+https://gist.github.com/lukewilliamboswell/92c68a01222f8d36c1ddc893762d481d[Signals proposal]
+describes a distinct policy result.
+
 [#examples]
 == Choose an example
 

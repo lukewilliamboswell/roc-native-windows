@@ -3,6 +3,7 @@
 mod files;
 mod folders;
 mod http;
+mod http_policy;
 mod images;
 mod pickers;
 mod storage;
@@ -91,6 +92,7 @@ pub(crate) struct SpecOptions {
 pub(crate) struct Effects {
     started: Instant,
     declarations: Declarations,
+    http_policy: http_policy::Policy,
     send: mpsc::Sender<Event>,
     complete: mpsc::Sender<Completion>,
     completed: mpsc::Receiver<Completion>,
@@ -108,11 +110,12 @@ pub(crate) struct Effects {
 }
 
 impl Effects {
-    pub(crate) fn new(send: mpsc::Sender<Event>, declarations: Declarations) -> Self {
+    pub(crate) fn new(send: mpsc::Sender<Event>, declarations: Declarations) -> Result<Self> {
         let (complete, completed) = mpsc::channel();
-        Self {
+        Ok(Self {
             started: Instant::now(),
             declarations,
+            http_policy: http_policy::Policy::load()?,
             send,
             complete,
             completed,
@@ -127,7 +130,7 @@ impl Effects {
             clipboard_writes: 0,
             clipboard_text: String::new(),
             clipboard_busy: false,
-        }
+        })
     }
 
     pub(crate) fn configure_spec(&mut self, mut options: SpecOptions) -> Result<()> {
@@ -428,10 +431,22 @@ impl Effects {
         match kind {
             1 => {
                 let request = http::Request::read(reader)?;
+                let target = match request.target() {
+                    Ok(target) => target,
+                    Err(error) => {
+                        self.answer(id, http::failure(&error.to_string()));
+                        return Ok(());
+                    }
+                };
+                if !self.http_policy.admits(&target) {
+                    self.answer(id, http::policy_denied());
+                    return Ok(());
+                }
                 if self.spec.as_ref().is_some_and(|spec| !spec.live_http) {
                     self.simulated
                         .hold(id, spec_effects::Kind::Http(request.spec_request()));
                 } else {
+                    let policy = self.http_policy.clone();
                     self.spawn(
                         id,
                         WorkOptions {
@@ -440,7 +455,9 @@ impl Effects {
                             finish_on_cancel: false,
                             unavailable: http::failure("HTTP worker unavailable"),
                         },
-                        move |stop, report| Outcome::Bytes(request.run(stop, report)),
+                        move |stop, report| {
+                            Outcome::Bytes(request.run(target, &policy, stop, report))
+                        },
                     );
                 }
             }
@@ -893,7 +910,7 @@ mod tests {
     #[test]
     fn raw_clipboard_denial_leaves_a_native_copy_and_its_fixture_available() {
         let (send, receive) = mpsc::channel();
-        let mut effects = Effects::new(send, Declarations::default());
+        let mut effects = Effects::new(send, Declarations::default()).unwrap();
         effects.spec = Some(SpecOptions {
             storage: PathBuf::new(),
             output: PathBuf::new(),

@@ -90,7 +90,7 @@ impl App {
         let title = app_name();
         let display_settings = DisplaySettings::new();
         let declarations = Declarations::decode(&Engine::declarations()?)?;
-        let effects = Effects::new(send, declarations.clone());
+        let effects = Effects::new(send, declarations.clone())?;
         let mut app = Self {
             engine: Engine::default(),
             tree: Tree::new(),

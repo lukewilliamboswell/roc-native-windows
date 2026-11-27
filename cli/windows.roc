@@ -30,7 +30,7 @@ PackageOptions : { target : Str, format : PackageFormat, id : Str, version : Str
 
 MsiMetadata : { id : Str, version : Str, publisher : Str }
 
-AppMetadata : { installer : MsiMetadata, icon : Try(Str, [Missing]), display_name : Try(Str, [Missing]) }
+AppMetadata : { installer : MsiMetadata, icon : Try(Str, [Missing]), display_name : Try(Str, [Missing]), origins : List(Str) }
 
 app_manifest = "windows.json"
 
@@ -1127,7 +1127,8 @@ stage_build! = |entry, name, target, stage, dir, settings, profile| {
 		Ok(title) => icon_resources.append(display_name_resource(title))
 	}
 	asset_resources = if (catalog.keys().is_empty()) app_resources else app_resources.append(asset_catalog_resource(catalog))
-	resources = if (profile == ScenarioRunner) asset_resources.append(scenario_runner_resource) else asset_resources
+	policy_resources = if (settings.origins.is_empty()) asset_resources else asset_resources.append(capability_resource(settings.origins))
+	resources = if (profile == ScenarioRunner) policy_resources.append(scenario_runner_resource) else policy_resources
 	updated = if resources.is_empty() {
 		binary
 	} else {
@@ -1384,25 +1385,178 @@ empty_metadata : MsiMetadata
 empty_metadata = { id: "", version: "", publisher: "" }
 
 empty_app_metadata : AppMetadata
-empty_app_metadata = { installer: empty_metadata, icon: Err(Missing), display_name: Err(Missing) }
+empty_app_metadata = { installer: empty_metadata, icon: Err(Missing), display_name: Err(Missing), origins: [] }
 
 parse_metadata : Str -> Try(AppMetadata, Str)
 parse_metadata = |source| {
-	fields : Dict(Str, Str)
-	fields = Json.parse(source) ? |_| "expected a JSON object with string values"
-	if fields.keys().any(|key| !["id", "version", "publisher", "icon", "display_name"].contains(key)) {
-		return Err("use id, version, publisher, icon or display_name")
-	}
-	display_name = fields.get("display_name").map_err(|_| Missing)
+	fields = manifest_fields(source)?
+	known_fields(fields, ["id", "version", "publisher", "icon", "display_name", "capabilities"])?
+	display_name = optional_manifest_text(fields, "display_name")?
 	match display_name {
 		Ok(title) if !valid_display_name(title) => return Err("display_name must be a Windows-safe ASCII name of at most 64 bytes")
 		_ => {}
 	}
-	Ok({
-		installer: { id: fields.get("id") ?? "", version: fields.get("version") ?? "", publisher: fields.get("publisher") ?? "" },
-		icon: fields.get("icon").map_err(|_| Missing),
-		display_name,
-	})
+	id = optional_manifest_text(fields, "id")?
+	version = optional_manifest_text(fields, "version")?
+	publisher = optional_manifest_text(fields, "publisher")?
+	icon = optional_manifest_text(fields, "icon")?
+	origins = match fields.get("capabilities") {
+		Ok(policy) => parse_capabilities(policy)?
+		Err(_) => []
+	}
+	Ok({ installer: { id: id ?? "", version: version ?? "", publisher: publisher ?? "" }, icon, display_name, origins })
+}
+
+optional_manifest_text : Dict(Str, Str), Str -> Try(Try(Str, [Missing]), Str)
+optional_manifest_text = |fields, key| match fields.get(key) {
+	Ok(raw) => {
+		value : Str
+		value = Json.parse(raw) ? |_| "${key} must be a string"
+		Ok(Ok(value))
+	}
+	Err(_) => Ok(Err(Missing))
+}
+
+known_fields : Dict(Str, Str), List(Str) -> Try({}, Str)
+known_fields = |fields, allowed| match fields.keys().find_first(|name| !allowed.contains(name)) {
+	Ok(name) => Err("unknown field ${name}")
+	Err(_) => Ok({})
+}
+
+# Keep JSON value slices so each schema can reject duplicate field names
+# before decoding its values. All recognized values below are parsed by Json.
+manifest_fields : Str -> Try(Dict(Str, Str), Str)
+manifest_fields = |source| {
+	bytes = source.to_utf8()
+	if (bytes.len() > 65_536) return Err("manifest must be at most 64 KiB")
+	first = manifest_gap(bytes, 0)
+	if (bytes.get(first) != Ok('{')) return Err("expected a JSON object")
+	var $at = manifest_gap(bytes, first + 1)
+	var $fields = Dict.empty()
+	if bytes.get($at) != Ok('}') {
+		while $at < bytes.len() {
+			end = manifest_quote_end(bytes, $at)?
+			key_source = Str.from_utf8_lossy(bytes.sublist({ start: $at, len: end - $at }))
+			key : Str
+			key = Json.parse(key_source) ? |_| "invalid JSON field name"
+			if ($fields.get(key).is_ok()) return Err("duplicate field ${key}")
+			colon = manifest_gap(bytes, end)
+			if (bytes.get(colon) != Ok(':')) return Err("expected a colon after ${key}")
+			start = manifest_gap(bytes, colon + 1)
+			stop = manifest_value_end(bytes, start)?
+			$fields = $fields.insert(key, Str.from_utf8_lossy(bytes.sublist({ start, len: stop - start })).trim())
+			$at = stop
+			if (bytes.get($at) != Ok(',')) break
+			$at = manifest_gap(bytes, $at + 1)
+		}
+	}
+	if bytes.get($at) != Ok('}') or manifest_gap(bytes, $at + 1) != bytes.len() {
+		return Err("expected the end of a JSON object")
+	}
+	Ok($fields)
+}
+
+manifest_gap : List(U8), U64 -> U64
+manifest_gap = |bytes, start| {
+	var $at = start
+	while spec_space(bytes.get($at) ?? 0) {
+		$at = $at + 1
+	}
+	$at
+}
+
+manifest_quote_end : List(U8), U64 -> Try(U64, Str)
+manifest_quote_end = |bytes, start| {
+	if (bytes.get(start) != Ok('"')) return Err("expected a JSON string")
+	var $at = start + 1
+	while $at < bytes.len() {
+		byte = bytes.get($at) ?? 0
+		if (byte == '"') return Ok($at + 1)
+		$at = $at + (if (byte == '\\') 2 else 1)
+	}
+	Err("unterminated JSON string")
+}
+
+manifest_value_end : List(U8), U64 -> Try(U64, Str)
+manifest_value_end = |bytes, start| {
+	var $at = start
+	var $closing = []
+	while $at < bytes.len() {
+		byte = bytes.get($at) ?? 0
+		if byte == '"' {
+			$at = manifest_quote_end(bytes, $at)?
+		} else {
+			if byte == '{' or byte == '[' {
+				if ($closing.len() >= 16) return Err("JSON value is nested too deeply")
+				$closing = $closing.append(if (byte == '{') '}' else ']')
+			} else if byte == '}' or byte == ']' {
+				if ($closing.is_empty()) return Ok($at)
+				if ($closing.last() != Ok(byte)) return Err("unbalanced JSON value")
+				$closing = $closing.drop_last(1)
+			} else if byte == ',' and $closing.is_empty() {
+				return Ok($at)
+			}
+			$at = $at + 1
+		}
+	}
+	Err("unterminated JSON value")
+}
+
+parse_capabilities : Str -> Try(List(Str), Str)
+parse_capabilities = |source| {
+	fields = manifest_fields(source)?
+	known_fields(fields, ["version", "http"])?
+	version : U64
+	version = Json.parse(fields.get("version") ?? "") ? |_| "capabilities requires version 1"
+	if (version != 1) return Err("capabilities requires version 1")
+	http = match fields.get("http") {
+		Ok(value) => manifest_fields(value)?
+		Err(_) => return Ok([])
+	}
+	known_fields(http, ["origins"])?
+	declared : List(Str)
+	declared = Json.parse(http.get("origins") ?? "") ? |_| "http.origins must be an array of strings"
+	if (declared.len() > 64) return Err("declare at most 64 HTTP origins")
+	var $origins = []
+	for value in declared {
+		origin = canonical_origin(value)?
+		if ($origins.contains(origin)) return Err("duplicate HTTP origin ${origin}")
+		$origins = $origins.append(origin)
+	}
+	Ok($origins.sort_with(compare_name_text))
+}
+
+canonical_origin : Str -> Try(Str, Str)
+canonical_origin = |value| {
+	error = "expected an exact HTTP or HTTPS origin with an ASCII DNS name or IPv4 address"
+	parts = value.split_first("://") ? |_| error
+	scheme = ascii_lower(parts.before)
+	default = match scheme {
+		"http" => 80.U16
+		"https" => 443.U16
+		_ => return Err(error)
+	}
+	(host, port) = match parts.after.split_on(":") {
+		[name] => (ascii_lower(name), default)
+		[name, text] if text.to_utf8().all(|byte| byte >= '0' and byte <= '9') => (ascii_lower(name), U16.from_str(text) ? |_| error)
+		_ => return Err(error)
+	}
+	labels = host.split_on(".")
+	if port == 0 or host.count_utf8_bytes() > 253 or !labels.all(valid_dns_label) {
+		return Err(error)
+	}
+	if host.to_utf8().all(|byte| byte == '.' or (byte >= '0' and byte <= '9')) {
+		if labels.len() != 4 or !labels.all(|label| U8.from_str(label).map_ok(U8.to_str) == Ok(label)) {
+			return Err(error)
+		}
+	}
+	Ok("${scheme}://${host}:${port.to_str()}")
+}
+
+valid_dns_label : Str -> Bool
+valid_dns_label = |label| {
+	bytes = label.to_utf8()
+	!bytes.is_empty() and bytes.len() <= 63 and !label.starts_with("-") and !label.ends_with("-") and bytes.all(|byte| (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-')
 }
 
 valid_display_name : Str -> Bool
@@ -1823,7 +1977,17 @@ expect {
 }
 expect parse_text(["package"]) == Ok(Package({ target: "", format: Msi, id: "", version: "", publisher: "" }))
 expect parse_text(["package", "--format", "zip", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", format: Zip, id: "", version: "", publisher: "" }))
-expect parse_metadata("{\"id\":\"com.example.app\",\"version\":\"1.2.3\"}") == Ok({ installer: { id: "com.example.app", version: "1.2.3", publisher: "" }, icon: Err(Missing), display_name: Err(Missing) })
+expect parse_metadata("{\"id\":\"com.example.app\",\"version\":\"1.2.3\"}") == Ok({ installer: { id: "com.example.app", version: "1.2.3", publisher: "" }, icon: Err(Missing), display_name: Err(Missing), origins: [] })
+expect parse_metadata("{\"capabilities\":{\"version\":1,\"http\":{\"origins\":[\"HTTPS://Example.COM\",\"http://127.0.0.1:8000\"]}}}").map_ok(|settings| settings.origins) ==
+	Ok(["http://127.0.0.1:8000", "https://example.com:443"])
+expect [
+	"{\"id\":\"a\",\"id\":\"b\"}",
+	"{\"id\":\"a\",}",
+	"{\"capabilities\":{\"version\":2}}",
+	"{\"capabilities\":{\"version\":1,\"processes\":[]}}",
+	"{\"capabilities\":{\"version\":1,\"http\":{\"origins\":[\"https://example.com\",\"https://example.com:443\"]}}}",
+].all(|source| parse_metadata(source).is_err())
+expect ["https://user@example.com", "http://example.com/a", "ftp://example.com", "http://127.1", "http://example.com:0"].all(|origin| canonical_origin(origin).is_err())
 expect parse_metadata("{\"icon\":\"app.ico\"}").map_ok(|settings| settings.icon) == Ok(Ok("app.ico"))
 expect parse_metadata("{\"id\": 1}").is_err()
 expect parse_metadata("{\"product\":\"App\"}").is_err()
@@ -2058,6 +2222,13 @@ asset_catalog_resource = |catalog| {
 	lines = catalog.keys().sort_with(compare_name_text).map(|name| "${name}\t${catalog.get(name) ?? ""}")
 	bytes = Str.join_with(["roc-windows-assets 1"].concat(lines), "\n").to_utf8()
 	{ id: 10, names: [{ id: 502, languages: [{ id: 0, code_page: 65001, bytes }] }] }
+}
+
+# Keep resource 503 and its version header in sync with the Windows host.
+capability_resource : List(Str) -> ResourceType
+capability_resource = |origins| {
+	bytes = Str.join_with(["roc-windows-capabilities 1"].concat(origins), "\n").to_utf8()
+	{ id: 10, names: [{ id: 503, languages: [{ id: 0, code_page: 65001, bytes }] }] }
 }
 
 # Keep this neutral RT_RCDATA marker in sync with host startup and the MSI packager.

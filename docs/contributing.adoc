@@ -132,13 +132,12 @@ randomness with deterministic spec fixtures.
 Windows architectures.
 
 |36
-|Retained files, rooted packaged assets and local settings, user-triggered
-Copy, and dedicated scenario executables.
-|Finish confirmation-time picker handles, exclusive Save As creation, and
-the optional capability manifest. Strict network admission requires
-matching typed refusal results in the Signals protocol. Strict raw
-clipboard denial remains open. Verify denial, replacement, and
-cancellation through the native entry points.
+|Retained file handles at Open and Save As confirmation, exclusive Save
+As creation, rooted assets and settings, native Copy, dedicated scenario
+executables, and an exact HTTP origin allowlist.
+|Verify picker behavior, replacement, cancellation, and installed
+capabilities on both Windows architectures. HTTP uses a generic network
+failure for denial pending a dedicated result in Signals.
 |===
 
 Before publication, validate one exact set of versioned release assets.

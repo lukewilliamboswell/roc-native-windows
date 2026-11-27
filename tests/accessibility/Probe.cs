@@ -293,7 +293,8 @@ public static class RocWindowsAccessibility
 
     private sealed class LoopbackResponse : IDisposable
     {
-        private readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+        // This endpoint is declared in the HTTP example's capabilities.
+        private readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 48393);
         private readonly Thread worker;
         public string Url { get; private set; }
         public ManualResetEvent RequestReceived { get; private set; } = new ManualResetEvent(false);
