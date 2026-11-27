@@ -24,9 +24,15 @@ import zip.Zip
 
 PackageFormat : [Msi, Zip]
 
-BuildProfile : [Shipping, ScenarioRunner]
+Optimization : [Size, Speed]
 
-PackageOptions : { target : Str, format : PackageFormat, id : Str, version : Str, publisher : Str }
+BuildProfile : [Shipping(Optimization), Development, ScenarioRunner]
+
+reload_exit = 82
+
+BuildOptions : { target : Str, optimization : Optimization }
+
+PackageOptions : { target : Str, optimization : Optimization, format : PackageFormat, id : Str, version : Str, publisher : Str }
 
 MsiMetadata : { id : Str, version : Str, publisher : Str }
 
@@ -42,7 +48,7 @@ TestOptions : { check : Bool, failure_screenshot : Bool, target : Str }
 
 RecordFormat : [Gif, Png]
 
-Command : [Help, Init(Str, Str, Bool), Build(Str), Run(Str), Test(TestOptions), Record(Str, RecordFormat, Str), Fuzz(Bool), Package(PackageOptions)]
+Command : [Help, Init(Str, Str, Bool), Build(BuildOptions), Run(BuildOptions), Dev(Str), Test(TestOptions), Record(Str, RecordFormat, Str), Fuzz(Bool), Package(PackageOptions)]
 
 ScaffoldFile : { path : Str, bytes : List(U8) }
 
@@ -92,8 +98,9 @@ parser =
 			Cli.map(
 				SubCmd.optional([
 					init_command,
-					target_command("build", "Build a Windows EXE and copy assets/.", |target| Build(target)),
-					target_command("run", "Build and launch the app on Windows.", |target| Run(target)),
+					build_command("build", "Build a Windows EXE and copy assets/.", |options| Build(options)),
+					build_command("run", "Build and launch the optimized app on Windows.", |options| Run(options)),
+					SubCmd.finish(target_option, { name: "dev", description: "Launch a Roc dev build on Windows. Press Ctrl+R in the app to rebuild and relaunch.", mapper: |target| Dev(target) }),
 					test_command,
 					record_command,
 					fuzz_command,
@@ -113,13 +120,13 @@ parser =
 	)
 
 description =
-	\\Create, build, run, test and package Roc Win32 apps with roc windows.roc.
+	\\Create, build, run, develop, test and package Roc Win32 apps with roc windows.roc.
 	\\
-	\\Run build, run, test and package from the app directory. The entry point
+	\\Run build, run, dev, test and package from the app directory. The entry point
 	\\is src/main.roc, or main.roc for an existing single-file application.
 	\\Build, test and package work on Windows, macOS and Linux. You can
 	\\cross-compile for Windows x64 or ARM64 from any of those systems.
-	\\The EXE and installer run on Windows. The run command requires Windows.
+	\\The EXE and installer run on Windows. Run and dev require Windows.
 	\\
 	\\For MSI packaging, the release tool automatically downloads a packager
 	\\for the OS and CPU running Roc. For example, roc-windows-msi-0.1.0-macos-arm64
@@ -151,9 +158,9 @@ init_command =
 		{ name: "init", description: "Create the reading-list starter with a logic package, behaviour specs and fuzz tests.", mapper: |{ dir, source, simple }| Init(dir, source, simple) },
 	)
 
-target_command : Str, Str, (Str -> Command) -> SubCmd.SubcommandParserConfig(Command)
-target_command = |name, summary, mapper|
-	SubCmd.finish(target_option, { name, description: summary, mapper })
+build_command : Str, Str, (BuildOptions -> Command) -> SubCmd.SubcommandParserConfig(Command)
+build_command = |name, summary, mapper|
+	SubCmd.finish({ target: target_option, optimization: optimization_option }.Cli, { name, description: summary, mapper })
 
 test_command : SubCmd.SubcommandParserConfig(Command)
 test_command =
@@ -212,11 +219,27 @@ target_option =
 		default: Value(""),
 	})
 
+optimization_option =
+	Opt.single({
+		short: "",
+		long: "profile",
+		type: "profile",
+		help: "Roc build optimization. Use size (default) for smaller executables or speed for execution speed.",
+		parser: |arg| match arg.to_str() {
+			Ok("size") => Ok(Size)
+			Ok("speed") => Ok(Speed)
+			Ok(_) => Err(InvalidValue("expected size or speed"))
+			Err(_) => Err(InvalidUtf8)
+		},
+		default: Value(Size),
+	})
+
 package_command : SubCmd.SubcommandParserConfig(Command)
 package_command =
 	SubCmd.finish(
 		{
 			target: target_option,
+			optimization: optimization_option,
 			format: Opt.single({
 				short: "",
 				long: "format",
@@ -250,8 +273,9 @@ execute! = |command|
 	match command {
 		Help => Stdout.line!(help_text)
 		Init(dir, source, simple) => init!(dir, source, simple)
-		Build(target) => build!(target).map_ok(|_| {})
-		Run(target) => run!(target)
+		Build(options) => build!(options).map_ok(|_| {})
+		Run(options) => run!(options)
+		Dev(target) => dev!(target)
 		Test(options) => test!(options)
 		Record(path, format, target) => record!(path, format, target)
 		Fuzz(check) => fuzz!(check)
@@ -268,17 +292,59 @@ windows_target! = || {
 	}
 }
 
-run! : Str => Try({}, _)
-run! = |requested| {
-	own = windows_target!()
-	if own.is_empty() {
-		return Err(RunRequiresWindows)
-	}
-	target = if (requested.is_empty()) own else requested
-	{ dir, name, .. } = build!(target)?
+run! : BuildOptions => Try({}, _)
+run! = |options| {
+	if (windows_target!().is_empty()) return Err(RunRequiresWindows)
+	built = build!(options)?
+	status = launch!(built)?
+	check_exit(status, "run")
+}
+
+launch! = |{ dir, name, .. }| {
 	program = Path.absolute!(Path.utf8("${dir}/${name}.exe"))?
 	ran = Cmd.new(program.to_os_str()).cwd(Path.utf8(dir)).inherit_stdio().run!()?
-	check_exit(ran.status, "run")
+	Ok(ran.status)
+}
+
+dev! : Str => Try({}, _)
+dev! = |requested| {
+	own = windows_target!()
+	if (own.is_empty()) return Err(DevRequiresWindows)
+	target = if (requested.is_empty()) own else requested
+	ensure_dir!("build/dev")?
+	session = Env.create_temp_dir_in!(Path.utf8("build/dev"), ".windows-")?
+	outcome = dev_session!(target, session.display())
+	match outcome {
+		Err(BuildRecovery(_)) => {}
+		_ => Path.delete_all!(session) ?? {}
+	}
+	outcome
+}
+
+dev_session! = |target, parent| {
+	var $built = dev_build!(target, parent)?
+	Stdout.line!("Press Ctrl+R in the app to rebuild and relaunch. Close the app to finish.")?
+	while Bool.True {
+		status = launch!($built)?
+		if (status != Exited(reload_exit)) return check_exit(status, "dev")
+		match dev_build!(target, parent) {
+			Ok(next) => {
+				$built = next
+			}
+			Err(BuildRecovery(path)) => {
+				return Err(BuildRecovery(path))
+			}
+			Err(problem) => {
+				Stderr.line!("windows.roc: ${Str.inspect(problem)}. Reopening the last successful build.")?
+				{}
+			}
+		}
+	}
+}
+
+dev_build! = |target, parent| {
+	settings = app_metadata!()?
+	build_in!(target, settings, Development, parent)
 }
 
 entry! : () => Try(Str, _)
@@ -1078,17 +1144,21 @@ fuzz! = |check| {
 	Ok({})
 }
 
-build! : Str => Try({ dir : Str, name : Str, target : Str }, _)
-build! = |requested| {
+build! : BuildOptions => Try({ dir : Str, name : Str, target : Str }, _)
+build! = |{ target, optimization }| {
 	settings = app_metadata!()?
-	build_with_metadata!(requested, settings, Shipping)
+	build_with_metadata!(target, settings, Shipping(optimization))
 }
 
 build_with_metadata! = |requested, settings, profile| {
-	entry = entry!()?
 	own = windows_target!()
 	target = if (!requested.is_empty()) requested else if (own.is_empty()) "x64mingw" else own
 	parent = if (profile == ScenarioRunner) "build/spec-executables" else "build"
+	build_in!(target, settings, profile, parent)
+}
+
+build_in! = |target, settings, profile, parent| {
+	entry = entry!()?
 	dir = "${parent}/${target}"
 	name = app_name(Env.cwd!()?.display())
 	ensure_dir!(parent)?
@@ -1116,20 +1186,32 @@ stage_build! = |entry, name, target, stage, dir, settings, profile| {
 		Ok(asset) => icon_resource_types(read_icon!(fresh, catalog.get(asset) ?? asset)?)
 	}
 	program = "${fresh}/${name}.exe"
-	roc!(["build", entry, "--target=${target}", "--opt=size", "--output=${program}"], "build")?
+	optimization = match profile {
+		Shipping(Speed) => "speed"
+		Shipping(Size) | ScenarioRunner => "size"
+		Development => "dev"
+	}
+	roc!(["build", entry, "--target=${target}", "--opt=${optimization}", "--output=${program}"], "build")?
 	image = Path.utf8(program)
 	if !Path.is_file!(image)? {
 		return Err(MissingExecutable(program))
 	}
 	linked = gui_executable(Path.read_bytes!(image)?, target)?
-	binary = if (profile == Shipping) strip_link_metadata(linked) ? |detail| BadExecutable(detail) else linked
+	binary = match profile {
+		Shipping(_) => strip_link_metadata(linked) ? |detail| BadExecutable(detail)
+		_ => linked
+	}
 	app_resources = match settings.display_name {
 		Err(Missing) => icon_resources
 		Ok(title) => icon_resources.append(display_name_resource(title))
 	}
 	asset_resources = if (catalog.keys().is_empty()) app_resources else app_resources.append(asset_catalog_resource(catalog))
 	policy_resources = if (settings.origins.is_empty()) asset_resources else asset_resources.append(capability_resource(settings.origins))
-	resources = if (profile == ScenarioRunner) policy_resources.append(scenario_runner_resource) else policy_resources
+	resources = match profile {
+		ScenarioRunner => policy_resources.append(execution_resource("roc-windows-scenario-1"))
+		Development => policy_resources.append(execution_resource("roc-windows-development-1"))
+		Shipping(_) => policy_resources
+	}
 	updated = if resources.is_empty() {
 		binary
 	} else {
@@ -1447,7 +1529,7 @@ package! : PackageOptions => Try({}, _)
 package! = |options| {
 	settings = app_metadata!()?
 	metadata = merge_metadata({ id: options.id, version: options.version, publisher: options.publisher }, settings.installer)
-	built = build_with_metadata!(options.target, settings, Shipping)?
+	built = build_with_metadata!(options.target, settings, Shipping(options.optimization))?
 	extension = if (options.format == Msi) "msi" else "zip"
 	ensure_dir!("dist")?
 	output = "dist/${built.name}-${built.target}.${extension}"
@@ -1965,6 +2047,7 @@ explain = |problem|
 		FuzzHost => "The bundled roc-fuzz suite runs on Apple Silicon macOS or x64 Linux."
 		MissingScaffold => "Use the released tool or run init from the platform checkout. Pass --simple for a minimal counter."
 		RunRequiresWindows => "Run requires a Windows x64 or ARM64 machine. You can use build here."
+		DevRequiresWindows => "Dev requires a Windows x64 or ARM64 machine. You can use build here."
 		CompilerMissing(compiler) => "Could not find ${compiler}. Put Roc on PATH or set ROC_WINDOWS_ROC."
 		PackagerMissing(helper) => "Could not find ${helper}. Put roc-windows-msi on PATH or set ROC_WINDOWS_MSI to its path. From a platform checkout, build it with blueprint run packager."
 		DownloadFailed(url, reason) => "Could not download ${url} (${reason})."
@@ -2041,8 +2124,12 @@ expect {
 	invalid.all(|source| spec_parse("invalid.scm", source).is_err())
 }
 
-expect parse_text(["build", "--target", "arm64mingw"]) == Ok(Build("arm64mingw"))
-expect parse_text(["run", "--target=x64mingw"]) == Ok(Run("x64mingw"))
+expect parse_text(["build", "--target", "arm64mingw"]) == Ok(Build({ target: "arm64mingw", optimization: Size }))
+expect parse_text(["build", "--profile=speed"]) == Ok(Build({ target: "", optimization: Speed }))
+expect parse_text(["run", "--target=x64mingw"]) == Ok(Run({ target: "x64mingw", optimization: Size }))
+expect parse_text(["dev"]) == Ok(Dev(""))
+expect parse_text(["dev", "--target=arm64mingw"]) == Ok(Dev("arm64mingw"))
+expect parse_text(["build", "--profile=dev"]).is_err()
 expect parse_text(["test"]) == Ok(Test({ check: Bool.False, failure_screenshot: Bool.False, target: "" }))
 expect parse_text(["test", "--check"]) == Ok(Test({ check: Bool.True, failure_screenshot: Bool.False, target: "" }))
 expect parse_text(["record", "tests/specs/demo.scm", "--format", "png"]) == Ok(Record("tests/specs/demo.scm", Png, ""))
@@ -2062,8 +2149,8 @@ expect {
 		_ => Bool.False
 	}
 }
-expect parse_text(["package"]) == Ok(Package({ target: "", format: Msi, id: "", version: "", publisher: "" }))
-expect parse_text(["package", "--format", "zip", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", format: Zip, id: "", version: "", publisher: "" }))
+expect parse_text(["package"]) == Ok(Package({ target: "", optimization: Size, format: Msi, id: "", version: "", publisher: "" }))
+expect parse_text(["package", "--format", "zip", "--profile=speed", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", optimization: Speed, format: Zip, id: "", version: "", publisher: "" }))
 expect parse_metadata("{\"id\":\"com.example.app\",\"version\":\"1.2.3\"}") == Ok({ installer: { id: "com.example.app", version: "1.2.3", publisher: "" }, icon: Err(Missing), display_name: Err(Missing), origins: [] })
 expect parse_metadata("{\"capabilities\":{\"version\":1,\"http\":{\"origins\":[\"HTTPS://Example.COM\",\"http://127.0.0.1:8000\"]}}}").map_ok(|settings| settings.origins) ==
 	Ok(["http://127.0.0.1:8000", "https://example.com:443"])
@@ -2352,9 +2439,9 @@ capability_resource = |origins| {
 }
 
 # Keep this neutral RT_RCDATA marker in sync with host startup and the MSI packager.
-scenario_runner_resource : ResourceType
-scenario_runner_resource =
-	{ id: 10, names: [{ id: 504, languages: [{ id: 0, code_page: 0, bytes: "roc-windows-scenario-1".to_utf8() }] }] }
+execution_resource : Str -> ResourceType
+execution_resource = |marker|
+	{ id: 10, names: [{ id: 504, languages: [{ id: 0, code_page: 0, bytes: marker.to_utf8() }] }] }
 
 merge_resources : List(ResourceType), List(ResourceType) -> Try(List(ResourceType), Str)
 merge_resources = |original, added| {

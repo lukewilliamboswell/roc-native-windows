@@ -1,13 +1,13 @@
-//! Read the scenario marker without depending on Windows APIs on the packaging machine.
+//! Read the execution marker without depending on Windows APIs on the packaging machine.
 
 use std::io::{self, Read, Seek, SeekFrom};
 
 const RT_RCDATA: u32 = 10;
 // Keep this identifier in sync with CLI staging and host startup.
-const SCENARIO_MARKER: u32 = 504;
+const EXECUTION_MARKER: u32 = 504;
 const DIRECTORY_FLAG: u32 = 1 << 31;
 
-pub(super) fn has_scenario_marker(mut image: impl Read + Seek) -> io::Result<bool> {
+pub(super) fn has_non_shipping_marker(mut image: impl Read + Seek) -> io::Result<bool> {
     let mut signature = [0; 2];
     match image.read_exact(&mut signature) {
         Ok(()) if signature == *b"MZ" => {}
@@ -83,7 +83,7 @@ impl<T: Read + Seek> Resource<'_, T> {
         // A present marker ID is never accepted in a shipping archive,
         // regardless of the marker payload or language.
         Ok(self
-            .find(u64::from(data & !DIRECTORY_FLAG), SCENARIO_MARKER)?
+            .find(u64::from(data & !DIRECTORY_FLAG), EXECUTION_MARKER)?
             .is_some())
     }
 
@@ -162,7 +162,7 @@ mod tests {
         write32(
             &mut image,
             0x228,
-            if marker { SCENARIO_MARKER } else { 501 },
+            if marker { EXECUTION_MARKER } else { 501 },
         );
         write32(&mut image, 0x22c, DIRECTORY_FLAG | 48);
         image
@@ -177,18 +177,21 @@ mod tests {
     }
 
     #[test]
-    fn detects_the_marker_without_confusing_the_app_title_or_unrelated_bytes() {
-        assert!(has_scenario_marker(Cursor::new(fixture(true))).unwrap());
+    fn detects_the_execution_marker_without_confusing_the_app_title_or_unrelated_bytes() {
+        assert!(has_non_shipping_marker(Cursor::new(fixture(true))).unwrap());
+        let mut development = fixture(true);
+        development[0x280..0x299].copy_from_slice(b"roc-windows-development-1");
+        assert!(has_non_shipping_marker(Cursor::new(development)).unwrap());
         let mut shipping = fixture(false);
         shipping[0x280..0x294].copy_from_slice(b"roc-windows-scenario");
-        assert!(!has_scenario_marker(Cursor::new(shipping)).unwrap());
-        assert!(!has_scenario_marker(Cursor::new(b"demo executable")).unwrap());
+        assert!(!has_non_shipping_marker(Cursor::new(shipping)).unwrap());
+        assert!(!has_non_shipping_marker(Cursor::new(b"demo executable")).unwrap());
     }
 
     #[test]
     fn rejects_a_pe_with_an_out_of_bounds_resource_table() {
         let mut image = fixture(true);
         write32(&mut image, 0x214, DIRECTORY_FLAG | 256);
-        assert!(has_scenario_marker(Cursor::new(image)).is_err());
+        assert!(has_non_shipping_marker(Cursor::new(image)).is_err());
     }
 }

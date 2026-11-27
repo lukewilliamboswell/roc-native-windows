@@ -18,7 +18,8 @@ roc windows.roc -- package --target x64mingw
 The command writes `dist/my-app-x64mingw.msi`. On Windows x64, open the
 MSI to install the app. Launch it from the Start menu. Enter a title, select
 Add, mark the title read, and remove it. During development on Windows,
-`roc windows.roc -- run` builds and launches without installing the MSI.
+use xref:apps.adoc#hot-reloading[`roc windows.roc -- dev`] to rebuild and
+relaunch from the app.
 
 The starter keeps the Roc Signals view in `src/`, pure decisions in a
 separate `logic/` package, and the displayed bitmap in `assets/`.
@@ -49,6 +50,47 @@ For example, `roc-windows-msi-0.1.0-linux-x64` runs on an x64 Linux
 machine and can produce either Windows target. The CLI selects the
 packager automatically and checks its SHA-256 before running it. For a
 custom platform, use `init --platform <platform/main.roc-or-bundle-URL>`.
+
+[#build-profiles]
+== Choose a build profile
+
+`build`, `run`, and `package` accept `--profile size` and `--profile speed`.
+`size` is the default and passes `--opt=size` to Roc. `speed` passes
+`--opt=speed`. Both profiles strip the linked debug metadata and write the
+selected target to `build/<target>/`. `run` launches the resulting executable
+on Windows. `package` uses the selected executable in the MSI or ZIP.
+
+[source,sh]
+----
+roc windows.roc -- build --target arm64mingw --profile speed
+roc windows.roc -- package --profile size
+----
+
+[#hot-reloading]
+== Reload during development
+
+From the app directory on Windows, start a development session.
+
+[source,powershell]
+----
+roc windows.roc -- dev
+----
+
+The launcher builds with Roc's `--opt=dev` backend. Each session has its own
+temporary directory under `build/dev/`. It stages the executable, packaged
+assets, catalog, and manifest settings together, as in a normal build.
+The target defaults to the architecture running Roc. Use `--target` to
+select another Windows architecture when your machine can launch it.
+
+Save your changes and press *Ctrl+R* in an app window. The launcher closes the
+app, rebuilds it from disk, and starts a new process. If the build fails, the
+terminal reports the errors and the launcher restarts the last successful
+build. The new process opens fresh windows and starts with fresh in-memory
+signals, session storage, and effects. Local app storage on disk survives.
+Close the app normally to end the development session.
+
+Reload uses a rebuilt executable so the current assets and manifest settings
+travel with the new code. Use `run` to preview a shipping build.
 
 [#native-features]
 == Select native features

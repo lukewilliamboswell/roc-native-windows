@@ -173,8 +173,10 @@ fn spec(
     let mut files = Vec::new();
     let main_executable = format!("{name}.exe");
     add_file(stage, &main_executable, &mut files)?;
-    if pe::has_scenario_marker(File::open(stage.join(&main_executable))?)? {
-        return Err("scenario executables cannot be packaged for distribution".into());
+    if pe::has_non_shipping_marker(File::open(stage.join(&main_executable))?)? {
+        return Err(
+            "scenario and development executables cannot be packaged for distribution".into(),
+        );
     }
     for notice in ["LICENSE", "THIRD_PARTY_LICENSES.md"] {
         if stage.join(notice).symlink_metadata().is_ok() {

@@ -51,6 +51,8 @@ const REPORT_EVENTS: u32 = WM_APP + 1;
 const GRID_EVENTS: u32 = WM_APP + 2;
 const CLOSE_EVENTS: u32 = WM_APP + 6;
 const WINDOW_CLASS: PCWSTR = w!("RocSignalsWindow");
+// Keep this status in sync with the CLI development supervisor.
+const RELOAD_EXIT: i32 = 82;
 
 thread_local! {
     // User32 is allowed to send synchronous child notifications during a
@@ -1019,12 +1021,20 @@ pub(crate) fn paths_from_drop(drop: HDROP) -> (Option<POINT>, Vec<PathBuf>) {
     (client.then_some(point), paths)
 }
 
-fn scenario_runner() -> Result<bool> {
-    const MARKER: &[u8] = b"roc-windows-scenario-1";
-    match embedded_app_data(504, MARKER.len())? {
-        None => Ok(false),
-        Some(bytes) if bytes == MARKER => Ok(true),
-        Some(_) => Err("invalid embedded scenario marker".into()),
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExecutionMode {
+    Shipping,
+    Scenario,
+    Development,
+}
+
+fn execution_mode() -> Result<ExecutionMode> {
+    const DEVELOPMENT: &[u8] = b"roc-windows-development-1";
+    match embedded_app_data(504, DEVELOPMENT.len())? {
+        None => Ok(ExecutionMode::Shipping),
+        Some(b"roc-windows-scenario-1") => Ok(ExecutionMode::Scenario),
+        Some(DEVELOPMENT) => Ok(ExecutionMode::Development),
+        Some(_) => Err("invalid embedded execution marker".into()),
     }
 }
 
@@ -1046,7 +1056,7 @@ fn app_name() -> String {
 
 pub(crate) fn report_error(error: &str) {
     eprintln!("roc-native-windows: {error}");
-    if scenario_runner().unwrap_or(false) {
+    if execution_mode() == Ok(ExecutionMode::Scenario) {
         return;
     }
     let text = wide(error);
@@ -1119,8 +1129,8 @@ fn create_pump() -> Result<OwnedWindow> {
     }
 }
 
-fn run() -> Result<()> {
-    let driven = scenario_runner()?;
+fn run() -> Result<i32> {
+    let mode = execution_mode()?;
     let _accessibility = crate::accessibility::Apartment::new()?;
     // SAFETY: Register the class once on the UI thread, before mounting.
     let title = unsafe {
@@ -1152,12 +1162,12 @@ fn run() -> Result<()> {
         app_name()
     };
     let window = create_window(&title)?;
-    let result = if driven {
+    let result = if mode == ExecutionMode::Scenario {
         let path = std::env::var_os("ROC_WINDOWS_SPEC")
             .ok_or("launch scenario executables through windows.roc test or record")?;
-        spec_run::run(window, &PathBuf::from(path))
+        spec_run::run(window, &PathBuf::from(path)).map(|()| 0)
     } else {
-        mount(window, None).and_then(|()| run_message_loop())
+        mount(window, None).and_then(|()| run_message_loop(mode))
     };
     clear_app();
     if let Some(error) = FAILURE.with(|failure| failure.borrow_mut().take()) {
@@ -1166,7 +1176,7 @@ fn run() -> Result<()> {
     result
 }
 
-fn run_message_loop() -> Result<()> {
+fn run_message_loop(mode: ExecutionMode) -> Result<i32> {
     let mut message = MSG::default();
     // SAFETY: Translate and dispatch messages from this thread's own queue.
     unsafe {
@@ -1174,9 +1184,12 @@ fn run_message_loop() -> Result<()> {
             crate::accessibility::disconnect_retired();
             match GetMessageW(&mut message, null_mut(), 0, 0) {
                 -1 => return Err(last_error("read the Windows message queue")),
-                0 if message.wParam == 0 => return Ok(()),
+                0 if message.wParam == 0 => return Ok(0),
                 0 => return Err("Windows event loop terminated with an error".into()),
                 _ => {}
+            }
+            if mode == ExecutionMode::Development && reload_requested(&message) {
+                return Ok(RELOAD_EXIT);
             }
             let (owner, native, handled) = route_key(&message)?;
             if handled {
@@ -1188,6 +1201,19 @@ fn run_message_loop() -> Result<()> {
             }
         }
     }
+}
+
+fn reload_requested(message: &MSG) -> bool {
+    message.message == WM_KEYDOWN
+        && message.wParam == usize::from(b'R')
+        && message.lParam & (1 << 30) == 0
+        && modifiers() == 2
+        && APP.with(|state| {
+            state.borrow().as_ref().is_some_and(|app| {
+                app.surface.for_handle(message.hwnd).is_some()
+                    || app.calendar_owner(message.hwnd).is_some()
+            })
+        })
 }
 
 fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
@@ -1316,7 +1342,7 @@ fn clear_app() {
 extern "C" fn main(_argc: i32, _argv: *mut *mut u8) -> i32 {
     crate::abi::register_main_thread();
     match run() {
-        Ok(()) => 0,
+        Ok(status) => status,
         Err(error) => {
             report_error(&error);
             1
