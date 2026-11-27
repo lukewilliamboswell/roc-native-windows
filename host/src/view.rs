@@ -1160,7 +1160,7 @@ impl Surface {
                 }
             }
             kind if kind.is_choice() => view.choices.restore(view.handle, kind),
-            Control::TreeView => view.tree.restore(view.handle),
+            Control::TreeView => view.tree.restore(view.handle)?,
             Control::Slider => view.slider.restore(view.handle),
             _ => {}
         }

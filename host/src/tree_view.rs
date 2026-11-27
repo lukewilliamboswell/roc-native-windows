@@ -102,7 +102,7 @@ impl TreeProjection {
 
         self.model = model;
         self.selected = tree.node(owner).attr("selected").unwrap_or("").into();
-        self.restore(hwnd);
+        self.restore(hwnd)?;
         if let Some(key) = first.filter(|key| self.visible(key)) {
             // SAFETY: This key names a live visible item in this tree.
             unsafe {
@@ -117,12 +117,12 @@ impl TreeProjection {
         Ok(())
     }
 
-    pub(crate) fn restore(&self, hwnd: HWND) {
+    pub(crate) fn restore(&self, hwnd: HWND) -> Result<()> {
         for key in &self.model.order {
             if self.model.is_branch(key) && self.model.nodes[key].item.expanded {
                 let item = self.handles[key];
                 if !is_expanded(hwnd, item) {
-                    expand(hwnd, item, true);
+                    expand(hwnd, item, true, key)?;
                 }
             }
         }
@@ -141,10 +141,11 @@ impl TreeProjection {
             if self.model.is_branch(key) && !self.model.nodes[key].item.expanded {
                 let item = self.handles[key];
                 if is_expanded(hwnd, item) {
-                    expand(hwnd, item, false);
+                    expand(hwnd, item, false, key)?;
                 }
             }
         }
+        Ok(())
     }
 
     pub(crate) fn capture(&mut self, code: u32, item: HTREEITEM, action: u32) -> bool {
@@ -217,7 +218,14 @@ impl TreeProjection {
         if !self.model.is_branch(key) {
             return Err(format!("no tree branch has key {key:?}"));
         }
-        Ok(is_expanded(hwnd, self.handles[key]))
+        let expanded = is_expanded(hwnd, self.handles[key]);
+        let requested = self.model.nodes[key].item.expanded;
+        if expanded != requested {
+            return Err(format!(
+                "native tree branch {key:?} reports expanded={expanded} after projecting expanded={requested}"
+            ));
+        }
+        Ok(expanded)
     }
 
     pub(crate) fn propose_expansion(
@@ -294,20 +302,27 @@ fn get_item(hwnd: HWND, relation: u32) -> HTREEITEM {
 
 fn is_expanded(hwnd: HWND, item: HTREEITEM) -> bool {
     // SAFETY: The item belongs to the live system tree control.
-    unsafe {
+    let state = unsafe {
         SendMessageW(
             hwnd,
             TVM_GETITEMSTATE,
             item as usize,
             TVIS_EXPANDED as LPARAM,
-        ) != 0
-    }
+        )
+    };
+    state as u32 & TVIS_EXPANDED != 0
 }
 
-fn expand(hwnd: HWND, item: HTREEITEM, expanded: bool) {
+fn expand(hwnd: HWND, item: HTREEITEM, expanded: bool, key: &str) -> Result<()> {
     let action = if expanded { TVE_EXPAND } else { TVE_COLLAPSE };
     // SAFETY: The item belongs to the live system tree control.
-    unsafe { SendMessageW(hwnd, TVM_EXPAND, action as usize, item) };
+    let result = unsafe { SendMessageW(hwnd, TVM_EXPAND, action as usize, item) };
+    if is_expanded(hwnd, item) != expanded {
+        return Err(format!(
+            "native tree item {key:?} did not reach expanded={expanded} (TVM_EXPAND returned {result})"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
