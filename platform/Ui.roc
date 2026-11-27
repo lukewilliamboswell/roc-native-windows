@@ -187,6 +187,38 @@ Ui := [].{
 			[Engine.text_s(title)],
 		)
 
+	CopyResult : [Copied, Unavailable, InvalidText, TooLarge]
+
+	CopyButtonProps(ctx) := {
+		text : Signal(ctx, Str),
+		on_result : HandlerOf(ctx, CopyResult),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+	}
+
+	## A native command that copies the currently committed plain text once.
+	## The result reports busy, invalid text, or output over 64 KiB in UTF-16.
+	copy_button : Signal(ctx, Str), CopyButtonProps(ctx) -> Elem(ctx)
+	copy_button = |title, props| Engine.element(
+		"ui-button",
+		[
+			Engine.attr_s("enabled", props.enabled.map(bool_word)),
+			Engine.attr_s("host-copy", props.text),
+			Engine.on(
+				"host-copy-result",
+				props.on_result.from_payload_by(
+					Engine.const({}),
+					|_, report| match report {
+						"copied" => Copied
+						"invalid" => InvalidText
+						"too-large" => TooLarge
+						_ => Unavailable
+					},
+				),
+			),
+		],
+		[Engine.text_s(title)],
+	)
+
 	## The accessible name of a toolbar.
 	ToolbarProps(ctx) := { label : Signal(ctx, Str) }
 

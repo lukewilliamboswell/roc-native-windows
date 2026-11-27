@@ -24,7 +24,6 @@ store = Engine.store(
 		reference_for: Engine.cell(0.U64),
 		reference: Engine.cell(NoReference),
 		completed: Engine.cell(""),
-		copies: Engine.cell(Engine.outbox({})),
 		status: Engine.cell("Enter a URL and press Fetch."),
 		body: Engine.cell(""),
 	}.Engine.Cells,
@@ -120,14 +119,14 @@ view = || {
 					],
 				),
 			),
-			Win.Ui.button(
+			Win.Ui.copy_button(
 				"Copy request details",
 				{
 					enabled: details.map(|value| !value.is_empty()),
-					on_press: Engine.handle_by(details, |value, _| [cells.copies.update(|outbox| outbox.post(value))]),
+					text: details,
+					on_result: Engine.handle(|_| []),
 				},
 			),
-			Engine.on_post(cells.copies.signal(), |value| [Win.Clipboard.text(value)], Engine.ignore({})),
 			Engine.watch_latest(
 				request,
 				|r| if (r.phase == Starting) [Win.System.monotonic({})] else [],

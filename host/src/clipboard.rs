@@ -21,6 +21,30 @@ pub(crate) fn request<'a>(reader: &mut Reader<'a>) -> Result<(&'a str, Format)> 
     Ok((text, format))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CopyRefusal {
+    InvalidText,
+    TooLarge,
+}
+
+pub(crate) fn validate_copy(text: &str) -> std::result::Result<(), CopyRefusal> {
+    // Count UTF-16, including the carriage returns added for lone LFs and
+    // the terminator, before the clipboard or simulator receives the text.
+    let mut size = 1;
+    let mut previous = 0;
+    for unit in text.encode_utf16() {
+        if unit == 0 {
+            return Err(CopyRefusal::InvalidText);
+        }
+        size += if unit == 10 && previous != 13 { 2 } else { 1 };
+        if size > 32_768 {
+            return Err(CopyRefusal::TooLarge);
+        }
+        previous = unit;
+    }
+    Ok(())
+}
+
 fn utf16(text: &str) -> Option<Vec<u16>> {
     if text.contains('\0') {
         return None;
@@ -93,6 +117,20 @@ mod tests {
         assert_eq!(rich.u8().unwrap(), 0x55);
         assert!(request(&mut Reader::new(b"\x01\0\0\0a\x01")).is_err());
         assert!(request(&mut Reader::new(b"\x01\0\0\0a\x02")).is_err());
+    }
+
+    #[test]
+    fn native_copy_checks_the_normalized_size_and_rejects_nul() {
+        assert!(validate_copy(&"a".repeat(32_767)).is_ok());
+        assert_eq!(
+            validate_copy(&"a".repeat(32_768)),
+            Err(CopyRefusal::TooLarge)
+        );
+        assert_eq!(
+            validate_copy(&"\n".repeat(16_384)),
+            Err(CopyRefusal::TooLarge)
+        );
+        assert_eq!(validate_copy("a\0b"), Err(CopyRefusal::InvalidText));
     }
 
     #[test]

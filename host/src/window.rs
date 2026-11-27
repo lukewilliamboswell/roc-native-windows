@@ -458,7 +458,19 @@ impl App {
         use crate::view::Control;
         let (event_name, value) = match (view_kind, u32::from(notification)) {
             (Control::Edit | Control::TextArea, EN_CHANGE) => ("input", self.surface.input(key)),
-            (Control::Button, BN_CLICKED) => ("click", String::new()),
+            (Control::Button, BN_CLICKED) => {
+                if let Some(text) = self.tree.node(key).attr("host-copy") {
+                    if self.surface.spec_disabled(key)?
+                        || self.surface.blocked(self.surface.selected())
+                    {
+                        return Ok(());
+                    }
+                    let (owner, _) = self.surface.grid_coordinates();
+                    let report = self.effects.copy_from_button(owner, text);
+                    return self.control_event(key, "host-copy-result", report.into());
+                }
+                ("click", String::new())
+            }
             (Control::Checkbox | Control::AggregateCheckbox, BN_CLICKED) => {
                 ("change", self.surface.input(key))
             }

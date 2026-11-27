@@ -74,11 +74,17 @@ control actions, effect simulation, and recording.
 [#copy-text]
 == Copy text from an app action
 
-Import `pf.Clipboard` and issue `Clipboard.text(value)` through
-`Engine.on_post` after a user action. Its result reports success,
-`NotAllowed`, `Unavailable`, or `Refused`. An outbox preserves each
-action even when two consecutive copies have the same text. Native edit
-controls also support their usual Windows clipboard shortcuts.
+Use `Win.Ui.copy_button(title, { text, on_result })` for a custom Copy command.
+The native button copies its current text once when the user activates it.
+The host checks plain text, including Windows line endings, against a
+64 KiB UTF-16 limit before touching the clipboard. The result is
+`Copied`, `Unavailable` for a busy clipboard, `InvalidText` for embedded
+NUL, or `TooLarge`. Retrying takes another activation. Native edit Copy,
+Cut, and Paste continue to follow focus.
+
+Files uses this button for Copy SHA-256. HTTP uses it for Copy request
+details. Existing `Clipboard.text` callers can move their text signal
+and response handling to the button.
 
 [#system-services]
 == Read time and regional settings

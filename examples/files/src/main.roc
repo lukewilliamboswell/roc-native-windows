@@ -37,7 +37,6 @@ store = Engine.store(
 		next_key: Engine.cell(1.U64),
 		selected: Engine.cell(Win.Ui.Selection.NoSelection),
 		display: Engine.cell(Inspector.idle),
-		copies: Engine.cell(Engine.outbox({})),
 		copy_status: Engine.cell(""),
 		preview_bytes: Engine.cell(NoPreview),
 		photo: Engine.cell(Waiting),
@@ -193,11 +192,12 @@ main_inspector = || {
 					{},
 					[
 						Win.Ui.text_with(display.map(|state| state.digest), { style: Monospace }),
-						Win.Ui.button(
+						Win.Ui.copy_button(
 							"Copy SHA-256",
 							{
 								enabled: checksum.map(|text| !text.is_empty()),
-								on_press: Engine.handle_by(checksum, |text, _| if (text.is_empty()) [] else [cells.copies.update(|outbox| outbox.post(text))]),
+								text: checksum,
+								on_result: Engine.handle(|answer| [cells.copy_status.set(if (answer == Copied) "SHA-256 copied." else "Could not copy SHA-256.")]),
 							},
 						),
 						Win.Ui.status_text(cells.copy_status.signal(), {}),
@@ -264,11 +264,6 @@ main_inspector = || {
 					ReadFolder(folder) => [folder.files({})]
 				},
 				Engine.react_by(cells.next_key.signal(), folder_listed),
-			),
-			Engine.on_post(
-				cells.copies.signal(),
-				|text| [Win.Clipboard.text(text)],
-				Engine.react(|_, answer| [cells.copy_status.set(if (answer == Ok({})) "SHA-256 copied." else "Could not copy SHA-256.")]),
 			),
 			Engine.watch_latest(
 				selection,

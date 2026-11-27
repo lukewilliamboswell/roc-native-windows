@@ -498,20 +498,7 @@ impl Effects {
             22 => self.environment(id),
             19 => {
                 let (text, format) = clipboard::request(reader)?;
-                let copied = if format == Format::Rich || text.contains('\0') {
-                    false
-                } else if self.spec.is_some() {
-                    if std::mem::take(&mut self.clipboard_busy) {
-                        false
-                    } else {
-                        self.clipboard_writes += 1;
-                        self.clipboard_text.clear();
-                        self.clipboard_text.push_str(text);
-                        true
-                    }
-                } else {
-                    clipboard::write(self.window, text).is_some()
-                };
+                let copied = format == Format::Plain && self.copy_text(self.window, text);
                 self.answer(id, if copied { vec![23] } else { vec![24, 2] });
             }
             8 => {
@@ -714,6 +701,31 @@ impl Effects {
             },
             move |_, _| Outcome::Bytes(work()),
         );
+    }
+
+    pub(crate) fn copy_from_button(&mut self, owner: HWND, text: &str) -> &'static str {
+        match clipboard::validate_copy(text) {
+            Ok(()) if self.copy_text(owner, text) => "copied",
+            Ok(()) => "unavailable",
+            Err(clipboard::CopyRefusal::InvalidText) => "invalid",
+            Err(clipboard::CopyRefusal::TooLarge) => "too-large",
+        }
+    }
+
+    fn copy_text(&mut self, owner: HWND, text: &str) -> bool {
+        if text.contains('\0') {
+            return false;
+        }
+        if self.spec.is_none() {
+            return clipboard::write(owner, text).is_some();
+        }
+        if std::mem::take(&mut self.clipboard_busy) {
+            return false;
+        }
+        self.clipboard_writes += 1;
+        self.clipboard_text.clear();
+        self.clipboard_text.push_str(text);
+        true
     }
 
     pub(crate) fn boot_value(&self, session: bool, key: &str) -> Option<String> {
