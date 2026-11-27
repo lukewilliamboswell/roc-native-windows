@@ -4,7 +4,7 @@ app [main] {
 }
 
 import pf.Engine exposing [Elem, Signal]
-import pf.Ui
+import pf.Win
 import TaskList exposing [Task]
 
 main : Engine.Program(_)
@@ -48,18 +48,18 @@ view = || {
 	new_todo = { draft, due_date, due_time, id: cells.next_id.signal() }.Signal.map(
 		|{ draft: text, due_date: date, due_time: time, id }| { id, title: text.trim(), done: Bool.False, notes: "", due_date: date, due_time: time },
 	)
-	content = Ui.vstack(
+	content = Win.Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
-			Ui.hstack(
+			Win.Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("todos.bmp", { description: Decorative, width: 32, height: 32 }),
-					Ui.text_with("To-do list", { style: Heading }),
+					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Decorative, width: 32, height: 32 }),
+					Win.Ui.text_with("To-do list", { style: Heading }),
 				],
 			),
-			Ui.text_with(todos.map(TaskList.remaining), { style: Caption, tone: SecondaryText }),
-			Ui.aggregate_checkbox(
+			Win.Ui.text_with(todos.map(TaskList.remaining), { style: Caption, tone: SecondaryText }),
+			Win.Ui.aggregate_checkbox(
 				"Complete all visible tasks",
 				{
 					state: todos.map(TaskList.completion),
@@ -67,18 +67,18 @@ view = || {
 					on_change: Engine.handle(|done| [cells.todos.update(|all| all.map(|task| { ..task, done }))]),
 				},
 			),
-			Ui.hstack(
+			Win.Ui.hstack(
 				{},
 				[
-					Ui.text_field(draft, { label: "New to-do", placeholder: "What needs doing?", on_input: Engine.handle(|text| [cells.draft.set(text)]) }),
-					Ui.button("Add", { enabled: new_todo.map(|t| !t.title.is_empty()), on_press: Engine.handle_by(new_todo, |todo, _| add(todo)) }),
+					Win.Ui.text_field(draft, { label: "New to-do", placeholder: "What needs doing?", on_input: Engine.handle(|text| [cells.draft.set(text)]) }),
+					Win.Ui.button("Add", { enabled: new_todo.map(|t| !t.title.is_empty()), on_press: Engine.handle_by(new_todo, |todo, _| add(todo)) }),
 				],
 			),
-			Ui.hstack(
+			Win.Ui.hstack(
 				{},
 				[
-					Ui.date_field(due_date, { label: "New due date", on_change: Engine.handle(draft_date) }),
-					Ui.time_field(due_time, { label: "New due time", enabled: due_date.map(TaskList.has_due_date), on_change: Engine.handle(|time| [cells.due_time.set(time)]) }),
+					Win.Ui.date_field(due_date, { label: "New due date", on_change: Engine.handle(draft_date) }),
+					Win.Ui.time_field(due_time, { label: "New due time", enabled: due_date.map(TaskList.has_due_date), on_change: Engine.handle(|time| [cells.due_time.set(time)]) }),
 				],
 			),
 			notes_panel(),
@@ -109,41 +109,41 @@ view = || {
 			),
 		],
 	)
-	Ui.window({ appearance: { accent: CustomAccent({ red: 35, green: 106, blue: 84 }) } }, content)
+	Win.Ui.window({ appearance: { accent: CustomAccent({ red: 35, green: 106, blue: 84 }) } }, content)
 }
 
 todo_row = |item| {
 	today = cells.clock.signal().map(|sample| TaskList.project_date(sample.zone, sample.now))
 	date = item.map(|todo| todo.due_date)
 	detail = { item, today }.Signal.map(|reading| TaskList.due_summary(reading.item, reading.today))
-	Ui.vstack(
+	Win.Ui.vstack(
 		{ spacing: 4, padding: 4 },
 		[
-			Ui.hstack(
+			Win.Ui.hstack(
 				{},
 				[
-					Ui.checkbox(
+					Win.Ui.checkbox(
 						item.map(|todo| todo.title),
 						{ checked: item.map(|todo| todo.done), on_change: Engine.handle_by(item, |todo, done| update(todo.id, |task| { ..task, done })) },
 					),
-					Ui.button(
+					Win.Ui.button(
 						item.map(|todo| "Notes for ${todo.title}"),
 						{ on_press: Engine.handle_by(item, |todo, _| [cells.note_editor.set(Editing({ id: todo.id, title: todo.title, draft: todo.notes }))]) },
 					),
-					Ui.button("Remove", { on_press: Engine.handle_by(item, |todo, _| remove(todo.id)) }),
+					Win.Ui.button("Remove", { on_press: Engine.handle_by(item, |todo, _| remove(todo.id)) }),
 				],
 			),
-			Ui.hstack(
+			Win.Ui.hstack(
 				{},
 				[
-					Ui.date_field(
+					Win.Ui.date_field(
 						date,
 						{
 							label: item.map(|todo| "Due date for ${todo.title}"),
 							on_change: Engine.handle_by(item, |todo, value| update(todo.id, |task| TaskList.with_date(task, value))),
 						},
 					),
-					Ui.time_field(
+					Win.Ui.time_field(
 						item.map(|todo| todo.due_time),
 						{
 							label: item.map(|todo| "Due time for ${todo.title}"),
@@ -153,7 +153,7 @@ todo_row = |item| {
 					),
 				],
 			),
-			Ui.text_with(detail, { style: Caption, tone: SecondaryText }),
+			Win.Ui.text_with(detail, { style: Caption, tone: SecondaryText }),
 		],
 	)
 }
@@ -179,19 +179,19 @@ notes_panel = || {
 			Editing(fields) => fields.draft
 		},
 	)
-	Ui.dialog(
+	Win.Ui.dialog(
 		{ title, open: is_open, on_close_request: Engine.handle(|_| [cells.note_editor.set(Closed)]) },
-		Ui.panel(
+		Win.Ui.panel(
 			{ surface: AccentTint, width: Fill },
-			Ui.vstack(
+			Win.Ui.vstack(
 				{},
 				[
-					Ui.text_area(draft, { label: "Notes", rows: 4, mode: Editable(Engine.handle(write_note)) }),
-					Ui.hstack(
+					Win.Ui.text_area(draft, { label: "Notes", rows: 4, mode: Editable(Engine.handle(write_note)) }),
+					Win.Ui.hstack(
 						{},
 						[
-							Ui.button("Save notes", { enter_action: WindowDefault, on_press: Engine.handle_by(editor, |current, _| save_note(current)) }),
-							Ui.button("Cancel", { on_press: Engine.handle(|_| [cells.note_editor.set(Closed)]) }),
+							Win.Ui.button("Save notes", { enter_action: WindowDefault, on_press: Engine.handle_by(editor, |current, _| save_note(current)) }),
+							Win.Ui.button("Cancel", { on_press: Engine.handle(|_| [cells.note_editor.set(Closed)]) }),
 						],
 					),
 				],
@@ -228,7 +228,7 @@ remove = |id| [
 	),
 ]
 
-draft_date : Ui.DateSelection -> List(Engine.Write(_))
+draft_date : Win.Ui.DateSelection -> List(Engine.Write(_))
 draft_date = |date|
 	if TaskList.has_due_date(date) {
 		[cells.due_date.set(date)]

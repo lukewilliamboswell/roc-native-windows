@@ -128,6 +128,40 @@ worker and only the current effect can deliver a response. Regional
 facts, timestamps, and bytes stay in the app until it chooses to share
 them. Clipboard export is a separate user action.
 
+[#packaged-assets]
+== Declare packaged assets
+
+Keep packaged files under `assets/`. Put an optional `assets.json` next
+to `windows.json` to give the files your app relies on stable names.
+Paths are relative to `assets/`.
+
+[source,json]
+----
+{
+  "logo": "images/logo.png",
+  "display-font": "fonts/IBMPlexSans-Bold.ttf"
+}
+----
+
+Import `pf.Win` and pass `Win.asset("logo")` to a control that accepts an
+asset path. For an image's signal parameter, use
+`Engine.const(Win.asset("logo"))` when the image is fixed. Use the same
+lookup for a command icon, shader, texture, or font. Existing literal
+paths still work and remain useful for computed paths.
+
+`windows.roc test --check` and the build validate the asset tree and every
+declared path. The build checks the staged files before running Roc and
+replaces the previous executable only after staging succeeds. The checks
+cover regular files, Windows-safe path components and supported media
+headers and size limits. Windows still verifies decoding and font or
+shader compatibility when loading the asset.
+
+The launcher embeds the name-to-path catalog in the executable.
+The app opens requested files directly and uses no directory scan at
+startup. An unknown name or an asset unavailable after installation uses
+the consuming control's normal fallback. A name computed by Roc is
+resolved when the app uses it.
+
 [#ship-a-windows-app]
 == Package an app for distribution
 
@@ -137,8 +171,8 @@ product name and the Start shortcut label.
 Use a Windows-safe ASCII name of up to 64 bytes.
 The name defaults to the executable's basename. The ZIP retains the
 title through the executable resource.
-Set `icon` to an `.ico` path relative to `assets/` to brand the executable
-on both Windows architectures. A multi-size icon serves the window, Start
+Set `icon` to a catalog name or an `.ico` path relative to `assets/` to
+brand the executable on both Windows architectures. A multi-size icon serves the window, Start
 shortcut and Explorer. The launcher embeds it in the staged executable and
 uses that executable for both MSI and ZIP. The Reading List scaffold
 includes an icon you can replace with your own.

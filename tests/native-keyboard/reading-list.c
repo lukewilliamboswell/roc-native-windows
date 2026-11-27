@@ -4,7 +4,7 @@
 
 static HWND find_window(void) {
     for (int i = 0; i < 150; ++i) {
-        HWND hwnd = FindWindowW(L"RocSignalsWindow", L"reading-list");
+        HWND hwnd = FindWindowW(L"RocSignalsWindow", L"Reading List");
         if (hwnd && IsWindowVisible(FindWindowExW(hwnd, NULL, L"SysListView32", NULL)))
             return hwnd;
         Sleep(40);

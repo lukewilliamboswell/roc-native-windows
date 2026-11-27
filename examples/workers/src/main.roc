@@ -3,7 +3,7 @@ app [main] { pf: platform "../../../platform/main.roc" }
 import Stock
 import StockStyle
 import pf.Engine exposing [Elem, Signal]
-import pf.Ui
+import pf.Win
 import pf.Worker
 
 main : Engine.Program(_)
@@ -62,7 +62,7 @@ keep_item = |query, item| !query.mismatches or item.counted != item.expected
 rank : Query, U64 -> U64
 rank = |query, key| if (query.reverse) 4 - key else key
 
-paste_error : Ui.GridPasteError -> Str
+paste_error : Win.Ui.GridPasteError -> Str
 paste_error = |problem| match problem {
 	Unavailable => "The clipboard does not contain readable text."
 	Malformed => "Paste a rectangular set of tab-separated values."
@@ -93,26 +93,26 @@ view = || {
 	window = page.map(|second| { start: if (second) 3 else 0, count: 3 })
 	job = cells.job.signal()
 	paste_context = { table: cells.counts.signal(), query, page }.Signal.map(|value| value)
-	content = Ui.vstack(
+	content = Win.Ui.vstack(
 		design.page,
 		[
-			Ui.hstack(
+			Win.Ui.hstack(
 				design.commands,
 				[
-					Ui.asset_image("workers.bmp", { description: Decorative, width: 28, height: 28 }),
-					Ui.text_with("Stock count reconciliation", design.title),
+					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Decorative, width: 28, height: 28 }),
+					Win.Ui.text_with("Stock count reconciliation", design.title),
 				],
 			),
-			Ui.text_with("Edit a Counted cell with Enter or F2. Hold Shift and use the arrows to select a range for Ctrl+V.", design.metadata),
-			Ui.hstack(
+			Win.Ui.text_with("Edit a Counted cell with Enter or F2. Hold Shift and use the arrows to select a range for Ctrl+V.", design.metadata),
+			Win.Ui.hstack(
 				design.commands,
 				[
-					Ui.button("Reverse order", { on_press: Engine.handle(|_| [cells.reverse.update(|reverse| !reverse)]) }),
-					Ui.button(
+					Win.Ui.button("Reverse order", { on_press: Engine.handle(|_| [cells.reverse.update(|reverse| !reverse)]) }),
+					Win.Ui.button(
 						cells.mismatches.signal().map(|only| if (only) "All items" else "Mismatches only"),
 						{ on_press: Engine.handle(|_| [cells.mismatches.update(|only| !only), cells.second_page.set(Bool.False)]) },
 					),
-					Ui.button(
+					Win.Ui.button(
 						page.map(|second| if (second) "First page" else "Next page"),
 						{
 							enabled: cells.mismatches.signal().map(|only| !only),
@@ -121,7 +121,7 @@ view = || {
 					),
 				],
 			),
-			Ui.data_grid(
+			Win.Ui.data_grid(
 				{
 					label: "Stock counts",
 					columns: [
@@ -151,10 +151,10 @@ view = || {
 					{ query, plan, window },
 					|_, row| {
 						value = row.signal()
-						Ui.grid_row([
-							Ui.grid_cell(value.map(|item| item.name), { column: "item" }),
-							Ui.grid_cell(value.map(|item| item.expected.to_str()), { column: "expected" }),
-							Ui.grid_cell(
+						Win.Ui.grid_row([
+							Win.Ui.grid_cell(value.map(|item| item.name), { column: "item" }),
+							Win.Ui.grid_cell(value.map(|item| item.expected.to_str()), { column: "expected" }),
+							Win.Ui.grid_cell(
 								value.map(|item| item.counted.to_str()),
 								{
 									column: "counted",
@@ -166,10 +166,10 @@ view = || {
 					},
 				),
 			),
-			Ui.hstack(
+			Win.Ui.hstack(
 				design.commands,
 				[
-					Ui.button(
+					Win.Ui.button(
 						"Reconcile",
 						{
 							on_press: Engine.handle_by(
@@ -184,7 +184,7 @@ view = || {
 							),
 						},
 					),
-					Ui.button(
+					Win.Ui.button(
 						"Cancel",
 						{
 							enabled: job.map(|run| run.running),
@@ -193,12 +193,12 @@ view = || {
 					),
 				],
 			),
-			Ui.panel(
+			Win.Ui.panel(
 				design.results_panel,
-				Ui.vstack(
+				Win.Ui.vstack(
 					design.results,
 					[
-						Ui.status_text(cells.status.signal(), { text: design.summary }),
+						Win.Ui.status_text(cells.status.signal(), { text: design.summary }),
 						variance_meter(design, cells.variance.signal()),
 					],
 				),
@@ -222,16 +222,16 @@ view = || {
 			),
 		],
 	)
-	Ui.window({ appearance: design.appearance }, content)
+	Win.Ui.window({ appearance: design.appearance }, content)
 }
 
 variance_meter : StockStyle, Signal(ctx, Variance) -> Elem(ctx)
 variance_meter = |design, variance| Engine.when(
 	variance.map(|value| value != NoSnapshot),
-	|| Ui.vstack(
+	|| Win.Ui.vstack(
 		design.results,
 		[
-			Ui.text_with(
+			Win.Ui.text_with(
 				variance.map(
 					|value| match value {
 						NoSnapshot => ""
@@ -240,9 +240,9 @@ variance_meter = |design, variance| Engine.when(
 				),
 				design.metric,
 			),
-			Ui.shader_view({
+			Win.Ui.shader_view({
 				description: Described({ label: "Share of submitted lines with a count variance" }),
-				shader: "stock-variance.cso",
+				shader: Win.asset("stock-variance"),
 				width: 264,
 				height: 12,
 				parameters: variance.map(
@@ -259,7 +259,7 @@ variance_meter = |design, variance| Engine.when(
 			}),
 		],
 	),
-	|| Ui.vstack({}, []),
+	|| Win.Ui.vstack({}, []),
 )
 
 expect Engine.mounts(main) > 0

@@ -286,6 +286,7 @@ mod native {
 
     pub(crate) fn decode_asset(root: &Path, name: &str) -> Result<Arc<Pixels>> {
         let operation = || {
+            let name = crate::asset_catalog::resolve(name)?;
             let expected =
                 Format::extension(Path::new(name)).ok_or("expected a PNG, JPEG or BMP asset")?;
             let path = resolve_asset(root, name)?;

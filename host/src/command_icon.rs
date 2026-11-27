@@ -28,6 +28,7 @@ impl Images {
     }
 
     pub(crate) fn add(&self, root: &Path, name: &str, dpi: u32) -> Option<i32> {
+        let name = crate::asset_catalog::resolve(name).ok()?;
         let ext = Path::new(name).extension()?.to_str()?;
         if !ext.eq_ignore_ascii_case("ico") {
             return None;

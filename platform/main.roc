@@ -9,7 +9,7 @@ platform ""
 	requires {
 		[Store : st] for main : Engine.Program(st)
 	}
-	exposes [Clipboard, Engine, Files, Layout, System, Ui, Wire, Worker]
+	exposes [Clipboard, Engine, Files, Layout, System, Ui, Win, Wire, Worker]
 	packages { engine: "https://github.com/lukewilliamboswell/roc-signals/releases/download/0.8.0-rc2/engine-GKiw1oqhZ1Q3sWgo1mSinHwACzFUCU8cCZPRY7SXYSgh.tar.zst" }
 	provides {
 		"roc_engine_ask": ask_for_host!,
@@ -47,6 +47,7 @@ import Hosted
 import Layout
 import System
 import Ui
+import Win
 import Wire
 import Worker
 

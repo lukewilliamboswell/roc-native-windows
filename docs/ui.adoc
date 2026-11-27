@@ -1,5 +1,9 @@
 = Win32 controls
 
+Import `pf.Win` to use `Win.Ui` for controls, `Win.Files` for files and
+`Win.System` for system services. The standalone `pf.Ui` import also
+works. Examples in this reference use `Ui` as shorthand for `Win.Ui`.
+
 [#window]
 == Windows and dialogs
 
@@ -317,24 +321,25 @@ an accent that carries across the app.
 [#packaged-fonts]
 === Packaged fonts
 
-`Ui.text_with` uses `SystemFont` by default. To opt a label into an app
-font, place a single static TrueType face under `assets/` and set its
-relative path and Windows family name.
+`Ui.text_with` uses `SystemFont` by default. To use an app font, place a
+single static TrueType face under `assets/`, declare it in
+xref:apps.adoc#packaged-assets[the asset catalog] and define a text style
+your views can share.
 
 [source,roc]
 ----
-Ui.text_with(
-	count,
-	{
-		style: Display,
-		align: Center,
-		font: PackagedFont({
-			asset: "fonts/IBMPlexSans-Bold.ttf",
-			family: "IBM Plex Sans",
-			face: Bold,
-		}),
-	},
-)
+count_style : Win.Ui.TextProps
+count_style = {
+	style: Display,
+	align: Center,
+	font: PackagedFont({
+		asset: Win.asset("display-font"),
+		family: "IBM Plex Sans",
+		face: Bold,
+	}),
+}
+
+readout = |count| Win.Ui.text_with(count, count_style)
 ----
 
 `Ui.PackagedFontProps` defaults to `Regular` and also accepts `Bold`,
@@ -387,9 +392,10 @@ shader and supplies a second raster generated in Roc.
 
 Use `Ui.shader_view({ description, shader, width, height, ... })` for one
 Direct3D 11 pixel pass. Put precompiled shader-model 5.0 DXBC (`.cso`) in
-the app's assets directory. Keep the HLSL source alongside the app source.
-To compile the Files example shader on Windows, run this command from
-the example directory with FXC available.
+the app's assets directory and reference it with `Win.asset(...)`. You
+can build and run the Files example with its checked-in bytecode. If you
+change the HLSL source, regenerate the bytecode from the example
+directory. This command uses FXC on Windows.
 
 [source,powershell]
 ----

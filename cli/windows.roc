@@ -8,6 +8,7 @@ app [main!] {
 import cli.Cmd
 import cli.Duration
 import cli.Env
+import cli.File
 import cli.Http
 import cli.OsStr
 import cli.Path
@@ -30,6 +31,10 @@ MsiMetadata : { id : Str, version : Str, publisher : Str }
 AppMetadata : { installer : MsiMetadata, icon : Try(Str, [Missing]), display_name : Try(Str, [Missing]) }
 
 app_manifest = "windows.json"
+
+asset_manifest = "assets.json"
+
+AssetCatalog : Dict(Str, Str)
 
 TestOptions : { check : Bool, failure_screenshot : Bool, target : Str }
 
@@ -302,6 +307,20 @@ check_exit = |status, step|
 
 test! : TestOptions => Try({}, _)
 test! = |options| {
+	catalog = asset_catalog!()?
+	entries = collect_assets!("assets", catalog)?
+	for entry in entries {
+		if !entry.directory {
+			validate_asset_file!(entry.source, entry.path)?
+		}
+	}
+	settings = app_metadata!()?
+	match settings.icon {
+		Ok(icon) => {
+			_ = read_icon!(".", catalog.get(icon) ?? icon)?
+		}
+		Err(Missing) => {}
+	}
 	entry = entry!()?
 	roc!(["check", entry], "check")?
 	roc!(["test", entry], "test")?
@@ -1085,6 +1104,13 @@ stage_build! = |entry, name, target, stage, dir, settings| {
 	fresh = "${stage}/candidate"
 	backup = "${stage}/previous"
 	ensure_dir!(fresh)?
+	catalog = asset_catalog!()?
+	assets = collect_assets!("assets", catalog)?
+	copy_assets!(assets, fresh)?
+	icon_resources = match settings.icon {
+		Err(Missing) => []
+		Ok(asset) => icon_resource_types(read_icon!(fresh, catalog.get(asset) ?? asset)?)
+	}
 	program = "${fresh}/${name}.exe"
 	roc!(["build", entry, "--target=${target}", "--opt=size", "--output=${program}"], "build")?
 	image = Path.utf8(program)
@@ -1092,23 +1118,17 @@ stage_build! = |entry, name, target, stage, dir, settings| {
 		return Err(MissingExecutable(program))
 	}
 	binary = gui_executable(Path.read_bytes!(image)?, target)?
-	icon_resources = match settings.icon {
-		Err(Missing) => []
-		Ok(asset) => icon_resource_types(read_icon!(asset)?)
-	}
-	resources = match settings.display_name {
+	app_resources = match settings.display_name {
 		Err(Missing) => icon_resources
 		Ok(title) => icon_resources.append(display_name_resource(title))
 	}
+	resources = if (catalog.keys().is_empty()) app_resources else app_resources.append(asset_catalog_resource(catalog))
 	updated = if resources.is_empty() {
 		binary
 	} else {
 		pe_with_resources(binary, resources) ? |detail| BadExecutable(detail)
 	}
 	Path.write_bytes!(image, updated)?
-	if Path.exists!(Path.utf8("assets"))? {
-		copy_assets!("assets", fresh)?
-	}
 	for notice in ["LICENSE", "THIRD_PARTY_LICENSES.md"] {
 		path = Path.utf8(notice)
 		if Path.exists!(path)? {
@@ -1198,16 +1218,22 @@ Asset : { path : Str, source : Path.Path, directory : Bool }
 
 assets! : Path.Path, Str => Try(List(Asset), _)
 assets! = |source, relative| {
-	if !Path.is_dir!(source)? {
+	if Path.type!(source)? != IsDir {
 		return Err(ExpectedDirectory(source.display()))
 	}
 	var $entries = [{ path: relative, source, directory: Bool.True }]
+	var $names = Set.empty()
 	for entry in Path.list!(source)? {
 		part = Path.filename(entry)?.to_str().map_err(|_| InvalidAsset(entry.display()))?
 		if !valid_asset_name(part) {
 			return Err(InvalidAsset(entry.display()))
 		}
 		path = "${relative}/${part}"
+		folded = ascii_lower(part)
+		if $names.contains(folded) {
+			return Err(InvalidAssetData(path, "name collides with another Windows asset"))
+		}
+		$names = $names.insert(folded)
 		match Path.type!(entry)? {
 			IsDir => {
 				$entries = $entries.concat(assets!(entry, path)?)
@@ -1221,18 +1247,95 @@ assets! = |source, relative| {
 	Ok($entries)
 }
 
-copy_assets! : Str, Str => Try({}, _)
-copy_assets! = |source, destination| {
-	for asset in assets!(Path.utf8(source), "assets")? {
+copy_assets! : List(Asset), Str => Try({}, _)
+copy_assets! = |entries, destination| {
+	for asset in entries {
 		next = "${destination}/${asset.path}"
 		if asset.directory {
 			ensure_dir!(next)?
 		} else {
 			Path.copy!(asset.source, Path.utf8(next))?
+			validate_asset_file!(Path.utf8(next), asset.path)?
 		}
 	}
 	Ok({})
 }
+
+asset_catalog! : () => Try(AssetCatalog, _)
+asset_catalog! = || {
+	path = Path.utf8(asset_manifest)
+	if (!Path.exists!(path)?) return Ok(Dict.empty())
+	source = Path.read_utf8!(path)?
+	parse_asset_catalog(source).map_err(|detail| InvalidAssetCatalog(detail))
+}
+
+parse_asset_catalog : Str -> Try(AssetCatalog, Str)
+parse_asset_catalog = |source| {
+	catalog : AssetCatalog
+	catalog = Json.parse(source) ? |_| "expected a JSON object mapping asset names to paths relative to assets/"
+	if (catalog.keys().len() > 64) return Err("declare at most 64 named assets")
+	for name in catalog.keys() {
+		path = catalog.get(name) ?? ""
+		if (!valid_asset_alias(name)) return Err("invalid name ${Str.inspect(name)}")
+		if path.count_utf8_bytes() > 240 or !path.split_on("/").all(valid_asset_name) {
+			return Err("${name} must use a Windows-safe path relative to assets/")
+		}
+	}
+	Ok(catalog)
+}
+
+valid_asset_alias : Str -> Bool
+valid_asset_alias = |name| {
+	bytes = name.to_utf8()
+	!bytes.is_empty() and bytes.len() <= 64 and bytes.all(|byte| (byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or ['-', '_'].contains(byte))
+}
+
+collect_assets! : Str, AssetCatalog => Try(List(Asset), _)
+collect_assets! = |root, catalog| {
+	folder = Path.utf8(root)
+	entries = if (Path.exists!(folder)?) assets!(folder, "assets")? else []
+	for name in catalog.keys() {
+		relative = catalog.get(name) ?? ""
+		if !entries.any(|entry| !entry.directory and entry.path == "assets/${relative}") {
+			return Err(InvalidAssetCatalog("${name} requires assets/${relative}"))
+		}
+	}
+	Ok(entries)
+}
+
+validate_asset_file! : Path.Path, Str => Try({}, _)
+validate_asset_file! = |path, name| {
+	extension = name.split_on(".").last().map_ok(ascii_lower) ?? ""
+	limit = match extension {
+		"cso" => 1_048_576
+		"ico" => 2_097_152
+		"ttf" => 16_777_216
+		"png" | "bmp" | "jpg" | "jpeg" => 33_554_432
+		_ => return Ok({})
+	}
+	reader = File.open_reader!(path)?
+	size = reader.seek!(End(0)) ? |error| InvalidAssetData(name, Str.inspect(error))
+	if (size > limit) return Err(InvalidAssetData(name, "exceeds the ${limit.to_str()} byte limit for .${extension}"))
+	_ = reader.seek!(Start(0)) ? |error| InvalidAssetData(name, Str.inspect(error))
+	header = reader.read_exactly!(size.min(32)) ? |error| InvalidAssetData(name, Str.inspect(error))
+	if (!asset_header(extension, size, header)) return Err(InvalidAssetData(name, "does not have a supported .${extension} header"))
+	Ok({})
+}
+
+asset_header : Str, U64, List(U8) -> Bool
+asset_header = |extension, size, header| match extension {
+	"png" => size >= 33 and header.take_first(8) == [137, 80, 78, 71, 13, 10, 26, 10] and header.sublist({ start: 12, len: 4 }) == "IHDR".to_utf8()
+	"bmp" => size >= 26 and header.take_first(2) == "BM".to_utf8() and little_endian(header, 10, 4) < size
+	"jpg" | "jpeg" => size >= 4 and header.take_first(3) == [255, 216, 255]
+	"ico" => size >= 22 and header.take_first(4) == [0, 0, 1, 0] and little_endian(header, 4, 2) > 0 and 6 + 16 * little_endian(header, 4, 2) < size
+	"ttf" => size >= 28 and header.take_first(4) == [0, 1, 0, 0]
+	"cso" => size >= 32 and header.take_first(4) == "DXBC".to_utf8() and little_endian(header, 24, 4) == size
+	_ => Bool.False
+}
+
+ascii_lower : Str -> Str
+ascii_lower = |value|
+	Str.from_utf8_lossy(value.to_utf8().map(|byte| if (byte >= 'A' and byte <= 'Z') byte + 32 else byte))
 
 valid_asset_name : Str -> Bool
 valid_asset_name = |part|
@@ -1245,7 +1348,7 @@ valid_asset_name = |part|
 reserved_name : Str -> Bool
 reserved_name = |name| {
 	base = name.split_on(".").first() ?? ""
-	lower = Str.from_utf8_lossy(base.to_utf8().map(|byte| if (byte >= 'A' and byte <= 'Z') byte + 32 else byte))
+	lower = ascii_lower(base)
 	["aux", "con", "nul", "prn", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "com¹", "com²", "com³", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "lpt¹", "lpt²", "lpt³"].contains(lower)
 }
 
@@ -1583,18 +1686,18 @@ simple_counter = |source_ref|
 	\\app [main] { pf: platform "${source_ref}" }
 	\\
 	\\import pf.Engine exposing [Elem, In, Root, State]
-	\\import pf.Ui
+	\\import pf.Win
 	\\
 	\\main : Engine.Program(_)
 	\\main = Engine.program(|| Engine.state(0.I64, view))
 	\\
 	\\view : State(In(Root, I64), I64) -> Elem(In(Root, I64))
 	\\view = |count|
-	\\	Ui.vstack(
+	\\	Win.Ui.vstack(
 	\\		{ padding: 16 },
 	\\		[
-	\\			Ui.text(count.signal().map(|n| n.to_str())),
-	\\			Ui.button("+", { on_press: count.update(increment) }),
+	\\			Win.Ui.text(count.signal().map(|n| n.to_str())),
+	\\			Win.Ui.button("+", { on_press: count.update(increment) }),
 	\\		],
 	\\	)
 	\\
@@ -1623,6 +1726,8 @@ explain = |problem|
 		ChildFailed(step, status) => "The ${step} command failed (${status})."
 		ExpectedDirectory(path) => "Expected a directory at ${path}."
 		InvalidAsset(path) => "Expected a regular file or directory with a Windows-safe name at ${path}."
+		InvalidAssetCatalog(detail) => "${asset_manifest}: ${detail}."
+		InvalidAssetData(path, detail) => "Asset ${path}: ${detail}."
 		InvalidOutput(path) => "Expected a regular file at ${path}."
 		InvalidManifest(detail) => "${app_manifest}: ${detail}."
 		InvalidIcon(path, detail) => "Application icon ${path}: ${detail}."
@@ -1734,6 +1839,16 @@ expect app_name("C:\\apps\\CON") == "con-app"
 
 expect valid_asset_name("photo.jpg")
 expect !valid_asset_name("AUX.jpg") and !valid_asset_name("some:file") and !valid_asset_name("dot.")
+expect parse_asset_catalog("{\"logo\":\"icons/logo.png\"}").map_ok(|catalog| catalog.keys()) == Ok(["logo"])
+expect [
+	"{\"Logo\":\"logo.png\"}",
+	"{\"logo\":\"../logo.png\"}",
+	"{\"logo\":\"icons/CON.png\"}",
+	"{\"logo\":\"C:logo.png\"}",
+	"{\"logo\":null}",
+].all(|source| parse_asset_catalog(source).is_err())
+expect !asset_header("png", 60, "not a PNG".to_utf8())
+expect !asset_header("cso", 32, "DXBC".to_utf8().concat(List.repeat(0, 28)))
 
 # A minimal PE32+ header with a console subsystem and an optional certificate table.
 pe_fixture : List(U8), Bool -> List(U8)
@@ -1931,6 +2046,15 @@ display_name_resource : Str -> ResourceType
 display_name_resource = |title|
 	{ id: 10, names: [{ id: 501, languages: [{ id: 0, code_page: 65001, bytes: title.to_utf8() }] }] }
 
+# The asset aliases and paths exclude control characters. The Windows host
+# reads the resource without enumerating the installed asset directory.
+asset_catalog_resource : AssetCatalog -> ResourceType
+asset_catalog_resource = |catalog| {
+	lines = catalog.keys().sort_with(compare_name_text).map(|name| "${name}\t${catalog.get(name) ?? ""}")
+	bytes = Str.join_with(["roc-windows-assets 1"].concat(lines), "\n").to_utf8()
+	{ id: 10, names: [{ id: 502, languages: [{ id: 0, code_page: 65001, bytes }] }] }
+}
+
 merge_resources : List(ResourceType), List(ResourceType) -> Try(List(ResourceType), Str)
 merge_resources = |original, added| {
 	var $resources = original
@@ -2070,10 +2194,10 @@ icon_path = |name|
 		Err("expected a Windows-safe path to an .ico file under assets")
 	}
 
-read_icon! : Str => Try(List(IconFrame), _)
-read_icon! = |asset| {
+read_icon! : Str, Str => Try(List(IconFrame), _)
+read_icon! = |root, asset| {
 	name = icon_path(asset) ? |detail| InvalidIcon(asset, detail)
-	path = Path.utf8(name)
+	path = Path.utf8(root).join(name)
 	if (!Path.is_file!(path)?) return Err(InvalidIcon(name, "file is missing"))
 	icon_frames(Path.read_bytes!(path)?).map_err(|detail| InvalidIcon(name, detail))
 }

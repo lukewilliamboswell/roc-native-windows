@@ -360,7 +360,8 @@ fn publish(shared: &Shared, id: u64, revision: u64, frame: Display) {
 }
 
 fn load_program(snapshot: &Snapshot) -> Result<Program> {
-    if !Path::new(&snapshot.shader)
+    let name = crate::asset_catalog::resolve(&snapshot.shader)?;
+    if !Path::new(name)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("cso"))
     {
@@ -369,7 +370,7 @@ fn load_program(snapshot: &Snapshot) -> Result<Program> {
             snapshot.shader
         ));
     }
-    let path = resolve_asset(&snapshot.assets, &snapshot.shader)?;
+    let path = resolve_asset(&snapshot.assets, name)?;
     let mut bytes = Vec::new();
     File::open(&path)
         .and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes))

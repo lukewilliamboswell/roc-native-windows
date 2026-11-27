@@ -3,7 +3,7 @@ app [main] { logic: "../logic/main.roc", pf: platform "../../../platform/main.ro
 import ReadingStyle
 import logic.ReadingList
 import pf.Engine exposing [Elem, Signal]
-import pf.Ui
+import pf.Win
 
 main : Engine.Program(_)
 main = Engine.program_store({}, |_| store, |_| view())
@@ -13,8 +13,8 @@ store = Engine.store(
 	{
 		draft: Engine.cell(""),
 		items: Engine.cell(ReadingList.empty),
-		filter: Engine.cell(Ui.Selection.Selected("all")),
-		selected: Engine.cell(Ui.Selection.NoSelection),
+		filter: Engine.cell(Win.Ui.Selection.Selected("all")),
+		selected: Engine.cell(Win.Ui.Selection.NoSelection),
 		sorted: Engine.cell(Bool.False),
 	}.Engine.Cells,
 )
@@ -44,40 +44,40 @@ view = || {
 			Selected(key) => state.items.find_first(|item| item.title == key).map_err(|_| NoTitle)
 		},
 	)
-	content = Ui.vstack(
+	content = Win.Ui.vstack(
 		design.page,
 		[
-			Ui.hstack(
+			Win.Ui.hstack(
 				design.heading,
 				[
-					Ui.asset_image("reading-list.bmp", { description: Decorative, width: 40, height: 40 }),
-					Ui.text_with("Reading list", design.page_title),
+					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Decorative, width: 40, height: 40 }),
+					Win.Ui.text_with("Reading list", design.page_title),
 				],
 			),
-			Ui.panel(
+			Win.Ui.panel(
 				design.entry_panel,
-				Ui.hstack(
+				Win.Ui.hstack(
 					design.entry,
 					[
-						Ui.text_field(draft, { label: "Title", placeholder: "Add something to read", on_input: Engine.handle(|text| [cells.draft.set(text)]) }),
-						Ui.button("Add", { enabled: draft.map(|text| !text.trim().is_empty()), on_press: Engine.handle_by(draft, |title, _| [change(Add(title)), cells.selected.set(Selected(title.trim())), cells.draft.set("")]) }),
+						Win.Ui.text_field(draft, { label: "Title", placeholder: "Add something to read", on_input: Engine.handle(|text| [cells.draft.set(text)]) }),
+						Win.Ui.button("Add", { enabled: draft.map(|text| !text.trim().is_empty()), on_press: Engine.handle_by(draft, |title, _| [change(Add(title)), cells.selected.set(Selected(title.trim())), cells.draft.set("")]) }),
 					],
 				),
 			),
-			Ui.combo_box({
+			Win.Ui.combo_box({
 				label: "Status filter",
 				choices: Engine.const([
-					Ui.Choice.{ key: "all", label: "All statuses" },
-					Ui.Choice.{ key: "unread", label: "Unread" },
-					Ui.Choice.{ key: "read", label: "Read" },
+					Win.Ui.Choice.{ key: "all", label: "All statuses" },
+					Win.Ui.Choice.{ key: "unread", label: "Unread" },
+					Win.Ui.Choice.{ key: "read", label: "Read" },
 				]),
 				selected: filter,
 				on_select: Engine.handle(|value| [cells.filter.set(value)]),
 			}),
-			Ui.toolbar(
+			Win.Ui.toolbar(
 				{ label: "Reading list actions" },
 				[
-					Ui.toolbar_button(
+					Win.Ui.toolbar_button(
 						active.map(
 							|result| match result {
 								Ok(item) if item.read => "Mark unread"
@@ -88,7 +88,7 @@ view = || {
 							key: "mark",
 							icon: active.map(
 								|result| match result {
-									Ok(item) if !item.read => IconAsset("reading-list.ico")
+									Ok(item) if !item.read => IconAsset(Win.asset("app-icon"))
 									_ => NoIcon
 								},
 							),
@@ -102,7 +102,7 @@ view = || {
 							),
 						},
 					),
-					Ui.toolbar_button(
+					Win.Ui.toolbar_button(
 						"Remove",
 						{
 							key: "remove",
@@ -118,7 +118,7 @@ view = || {
 					),
 				],
 			),
-			Ui.list_view(
+			Win.Ui.list_view(
 				{
 					label: "Titles",
 					columns: [{ key: "title", heading: "Title" }, { key: "status", heading: "Status" }],
@@ -134,11 +134,11 @@ view = || {
 						|row| {
 							item = row.item()
 							title = item.map(|entry| entry.title)
-							Ui.list_row(
+							Win.Ui.list_row(
 								{ key: title },
 								[
-									Ui.list_cell(title, { column: "title" }),
-									Ui.list_cell(item.map(|entry| if (entry.read) "Read" else "Unread"), { column: "status" }),
+									Win.Ui.list_cell(title, { column: "title" }),
+									Win.Ui.list_cell(item.map(|entry| if (entry.read) "Read" else "Unread"), { column: "status" }),
 								],
 							)
 						},
@@ -149,7 +149,7 @@ view = || {
 	)
 	visible_count = visible_items.map(|list| "${list.len().to_str()} visible")
 	unread_count = items.map(|list| "${ReadingList.remaining(list).to_str()} unread")
-	Ui.window(
+	Win.Ui.window(
 		{
 			appearance: design.appearance,
 			status_bar: StatusBar({ text: visible_count, trailing: [{ text: unread_count }] }),

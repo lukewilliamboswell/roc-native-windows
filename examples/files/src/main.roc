@@ -1,10 +1,8 @@
 app [main] { logic: "../logic/main.roc", pf: platform "../../../platform/main.roc" }
 
 import logic.Inspector
-import pf.Clipboard
 import pf.Engine exposing [Elem, File, HandlerOf, Signal]
-import pf.Files
-import pf.Ui
+import pf.Win
 
 main : Engine.Program(_)
 main = Engine.program_store({}, |_boot| store, |_boot| view())
@@ -15,7 +13,7 @@ Selection : [None, Selected(File)]
 
 PreviewBytes : [NoPreview, Loaded(List(U8))]
 
-Photo : [Waiting, PreviewReady(Ui.Raster), PreviewRefused(Str)]
+Photo : [Waiting, PreviewReady(Win.Ui.Raster), PreviewRefused(Str)]
 
 WindowEntry := { key : Str, file : Selection }.{
 	# A session keeps the same file for the lifetime of its key.
@@ -25,7 +23,7 @@ WindowEntry := { key : Str, file : Selection }.{
 
 main_window = WindowEntry.{ key: "main", file: None }
 
-FolderRequest := { sequence : U64, selected : [NoFolder, ReadFolder(Files.Folder)] }.{
+FolderRequest := { sequence : U64, selected : [NoFolder, ReadFolder(Win.Files.Folder)] }.{
 	is_eq : FolderRequest, FolderRequest -> Bool
 	is_eq = |first, second| first.sequence == second.sequence
 }
@@ -37,7 +35,7 @@ store = Engine.store(
 	{
 		queue: Engine.cell([]),
 		next_key: Engine.cell(1.U64),
-		selected: Engine.cell(Ui.Selection.NoSelection),
+		selected: Engine.cell(Win.Ui.Selection.NoSelection),
 		display: Engine.cell(Inspector.idle),
 		copies: Engine.cell(Engine.outbox({})),
 		copy_status: Engine.cell(""),
@@ -50,7 +48,7 @@ store = Engine.store(
 		format: Engine.cell("text"),
 		detail: Engine.cell("preview"),
 		grouped: Engine.cell(Bool.False),
-		group_selection: Engine.cell(Ui.Selection.NoSelection),
+		group_selection: Engine.cell(Win.Ui.Selection.NoSelection),
 		expanded: Engine.cell(Set.empty()),
 		folder: Engine.cell(no_folder),
 		pick_status: Engine.cell(""),
@@ -62,13 +60,13 @@ store = Engine.store(
 cells = store.cells()
 
 view : () -> Elem(Engine.StoreRoot(_))
-view = || Ui.windows(
+view = || Win.Ui.windows(
 	Engine.each(
 		cells.windows.signal(),
 		|entry| entry.key,
 		|row| {
 			entry = row.item()
-			Ui.window(
+			Win.Ui.window(
 				{
 					title: entry.map(
 						|window| match window.file {
@@ -125,21 +123,21 @@ main_inspector = || {
 			_ => state.preview
 		},
 	)
-	queue_pane = Ui.file_drop_target(
+	queue_pane = Win.Ui.file_drop_target(
 		{ label: "Drop files here", on_files },
-		Ui.vstack(
+		Win.Ui.vstack(
 			{},
 			[
-				Ui.checkbox(
+				Win.Ui.checkbox(
 					"Group by file type",
 					{ checked: cells.grouped.signal(), on_change: Engine.handle_by(selection, toggle_grouped) },
 				),
 				Engine.when(
 					cells.grouped.signal(),
-					|| Ui.vstack(
+					|| Win.Ui.vstack(
 						{},
 						[
-							Ui.tree_view({
+							Win.Ui.tree_view({
 								label: "Picked files",
 								nodes: queue.map(group_nodes),
 								selected: tree_selected,
@@ -148,12 +146,12 @@ main_inspector = || {
 								on_expand: Engine.handle(expand_group),
 								visible_rows: 5,
 							}),
-							Engine.when(group_summary.map(|title| !title.is_empty()), || Ui.text(group_summary), || Ui.vstack({}, [])),
+							Engine.when(group_summary.map(|title| !title.is_empty()), || Win.Ui.text(group_summary), || Win.Ui.vstack({}, [])),
 						],
 					),
-					|| Ui.list_box({
+					|| Win.Ui.list_box({
 						label: "Picked files",
-						choices: queue.map(|entries| entries.map(|item| Ui.Choice.{ key: item.key, label: item.file.name() })),
+						choices: queue.map(|entries| entries.map(|item| Win.Ui.Choice.{ key: item.key, label: item.file.name() })),
 						selected,
 						on_select: Engine.handle_by(queue, select),
 						visible_rows: 4,
@@ -162,15 +160,15 @@ main_inspector = || {
 			],
 		),
 	)
-	details = Ui.vstack(
+	details = Win.Ui.vstack(
 		{},
 		[
-			Ui.text_with(display.map(|state| state.name), { style: Heading, overflow: EllipsizeEnd }),
-			Ui.text_with(display.map(|state| state.size), { style: Caption, tone: SecondaryText }),
+			Win.Ui.text_with(display.map(|state| state.name), { style: Heading, overflow: EllipsizeEnd }),
+			Win.Ui.text_with(display.map(|state| state.size), { style: Caption, tone: SecondaryText }),
 			Engine.when(
 				display.map(|state| !state.status.is_empty()),
-				|| Ui.text(display.map(|state| state.status)),
-				|| Ui.vstack({}, []),
+				|| Win.Ui.text(display.map(|state| state.status)),
+				|| Win.Ui.vstack({}, []),
 			),
 			inspection_tabs(
 				detail,
@@ -178,53 +176,53 @@ main_inspector = || {
 				|| Engine.when(
 					selection.map(is_photo),
 					|| photo_preview(),
-					|| Ui.vstack(
+					|| Win.Ui.vstack(
 						{},
 						[
-							Ui.radio_group({
+							Win.Ui.radio_group({
 								label: "Preview format",
-								choices: [Ui.Choice.{ key: "text", label: "Text" }, Ui.Choice.{ key: "hex", label: "Hex" }],
+								choices: [Win.Ui.Choice.{ key: "text", label: "Text" }, Win.Ui.Choice.{ key: "hex", label: "Hex" }],
 								selected: format,
 								on_select: Engine.handle(|format_key| [cells.format.set(format_key)]),
 							}),
-							Ui.text_area(preview, { label: "Contents" }),
+							Win.Ui.text_area(preview, { label: "Contents" }),
 						],
 					),
 				),
-				|| Ui.vstack(
+				|| Win.Ui.vstack(
 					{},
 					[
-						Ui.text_with(display.map(|state| state.digest), { style: Monospace }),
-						Ui.button(
+						Win.Ui.text_with(display.map(|state| state.digest), { style: Monospace }),
+						Win.Ui.button(
 							"Copy SHA-256",
 							{
 								enabled: checksum.map(|text| !text.is_empty()),
 								on_press: Engine.handle_by(checksum, |text, _| if (text.is_empty()) [] else [cells.copies.update(|outbox| outbox.post(text))]),
 							},
 						),
-						Ui.status_text(cells.copy_status.signal(), {}),
+						Win.Ui.status_text(cells.copy_status.signal(), {}),
 					],
 				),
 			),
 		],
 	)
-	Ui.vstack(
+	Win.Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
-			Ui.hstack(
+			Win.Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("files.png", { description: Described({ label: "A document in a folder" }), width: 36, height: 36, fit: Contain }),
-					Ui.text_with("Files", { style: Title }),
+					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Described({ label: "A document in a folder" }), width: 36, height: 36, fit: Contain }),
+					Win.Ui.text_with("Files", { style: Title }),
 				],
 			),
-			Ui.hstack(
+			Win.Ui.hstack(
 				{ stack_below: 480 },
 				[
-					Ui.file_button("Choose Files…", { selection: MultipleFiles, on_files }),
-					Ui.folder_button("Choose Folder…", { on_folder: Engine.handle(receive_folder) }),
-					Ui.button("Clear", { on_press: Engine.handle(|_| reset(Clear)) }),
-					Ui.button(
+					Win.Ui.file_button("Choose Files…", { selection: MultipleFiles, on_files }),
+					Win.Ui.folder_button("Choose Folder…", { on_folder: Engine.handle(receive_folder) }),
+					Win.Ui.button("Clear", { on_press: Engine.handle(|_| reset(Clear)) }),
+					Win.Ui.button(
 						"Open in New Window",
 						{
 							enabled: comparison_input.map(
@@ -249,14 +247,14 @@ main_inspector = || {
 			),
 			Engine.when(
 				cells.pick_status.signal().map(|status| !status.is_empty()),
-				|| Ui.text_with(cells.pick_status.signal(), { style: Caption, tone: SecondaryText }),
-				|| Ui.vstack({}, []),
+				|| Win.Ui.text_with(cells.pick_status.signal(), { style: Caption, tone: SecondaryText }),
+				|| Win.Ui.vstack({}, []),
 			),
-			Ui.hstack(
+			Win.Ui.hstack(
 				{ stack_below: 552, spacing: 12 },
 				[
-					Ui.panel({ width: Fill, padding: 0 }, queue_pane),
-					Ui.panel({ width: Fill, padding: 10 }, details),
+					Win.Ui.panel({ width: Fill, padding: 0 }, queue_pane),
+					Win.Ui.panel({ width: Fill, padding: 10 }, details),
 				],
 			),
 			Engine.watch_latest(
@@ -269,7 +267,7 @@ main_inspector = || {
 			),
 			Engine.on_post(
 				cells.copies.signal(),
-				|text| [Clipboard.text(text)],
+				|text| [Win.Clipboard.text(text)],
 				Engine.react(|_, answer| [cells.copy_status.set(if (answer == Ok({})) "SHA-256 copied." else "Could not copy SHA-256.")]),
 			),
 			Engine.watch_latest(
@@ -312,10 +310,10 @@ comparison = |entry| Engine.state(
 		window = entry.lift()
 		current = local.signal()
 		detail = current.map(|state| state.detail)
-		Ui.vstack(
+		Win.Ui.vstack(
 			{ padding: 16, spacing: 12 },
 			[
-				Ui.text_with(
+				Win.Ui.text_with(
 					window.map(
 						|value| match value.file {
 							None => ""
@@ -330,9 +328,9 @@ comparison = |entry| Engine.state(
 					|| Engine.when(
 						window.map(|value| is_photo(value.file)),
 						|| original_photo(current.map(|state| state.photo)),
-						|| Ui.text_area(current.map(|state| state.display.preview), { label: "Contents" }),
+						|| Win.Ui.text_area(current.map(|state| state.display.preview), { label: "Contents" }),
 					),
-					|| Ui.text_with(current.map(|state| state.display.digest), { style: Monospace }),
+					|| Win.Ui.text_with(current.map(|state| state.display.digest), { style: Monospace }),
 				),
 				Engine.watch_latest(
 					window,
@@ -375,13 +373,13 @@ is_photo = |selection| match selection {
 	Selected(file) => ["png", "jpeg", "jpg", "bmp"].contains(Inspector.extension(file.name()))
 }
 
-photo_requests : Selection -> List(Engine.Ask(Ui.Raster, Ui.RasterError))
+photo_requests : Selection -> List(Engine.Ask(Win.Ui.Raster, Win.Ui.RasterError))
 photo_requests = |selection| match selection {
-	Selected(file) if is_photo(selection) => [Ui.decode_image(file)]
+	Selected(file) if is_photo(selection) => [Win.Ui.decode_image(file)]
 	_ => []
 }
 
-photo_result : Try(Ui.Raster, Ui.RasterError) -> Photo
+photo_result : Try(Win.Ui.Raster, Win.Ui.RasterError) -> Photo
 photo_result = |answer| match answer {
 	Ok(raster) => PreviewReady(raster)
 	Err(problem) => PreviewRefused("Could not preview image: ${Str.inspect(problem)}")
@@ -391,16 +389,16 @@ photo_preview : () -> Elem(ctx) where [ctx.store : () -> Engine.Reach(ctx, _)]
 photo_preview = || {
 	photo = cells.photo.signal()
 	mode = cells.photo_mode.signal()
-	Ui.vstack(
+	Win.Ui.vstack(
 		{},
 		[
-			Ui.combo_box({
+			Win.Ui.combo_box({
 				label: "Image view",
 				choices: Engine.const([
-					Ui.Choice.{ key: "original", label: "Original" },
-					Ui.Choice.{ key: "contrast", label: "Adjust contrast" },
-					Ui.Choice.{ key: "compare", label: "Compare to calibration" },
-					Ui.Choice.{ key: "calibration", label: "Calibration reference" },
+					Win.Ui.Choice.{ key: "original", label: "Original" },
+					Win.Ui.Choice.{ key: "contrast", label: "Adjust contrast" },
+					Win.Ui.Choice.{ key: "compare", label: "Compare to calibration" },
+					Win.Ui.Choice.{ key: "calibration", label: "Calibration reference" },
 				]),
 				selected: mode.map(|key| Selected(key)),
 				on_select: Engine.handle(
@@ -416,7 +414,7 @@ photo_preview = || {
 				|key| match key {
 					"contrast" => contrast_photo(photo)
 					"compare" => compare_photo(photo)
-					"calibration" => Ui.image(
+					"calibration" => Win.Ui.image(
 						Engine.const(calibration.map_ok(|raster| RasterImage(raster)) ?? NoImage),
 						{ description: Described({ label: "Calibration reference" }), width: 300, height: 150, fit: Contain },
 					)
@@ -428,10 +426,10 @@ photo_preview = || {
 }
 
 original_photo : Signal(ctx, Photo) -> Elem(ctx)
-original_photo = |photo| Ui.vstack(
+original_photo = |photo| Win.Ui.vstack(
 	{},
 	[
-		Ui.image(
+		Win.Ui.image(
 			photo.map(
 				|current| match current {
 					PreviewReady(raster) => RasterImage(raster)
@@ -440,7 +438,7 @@ original_photo = |photo| Ui.vstack(
 			),
 			{ description: Described({ label: "Original image" }), width: 300, height: 150, fit: Contain },
 		),
-		Ui.text_with(photo.map(photo_status), { style: Caption, tone: SecondaryText }),
+		Win.Ui.text_with(photo.map(photo_status), { style: Caption, tone: SecondaryText }),
 	],
 )
 
@@ -451,7 +449,7 @@ photo_status = |current| match current {
 	PreviewRefused(message) => message
 }
 
-photo_texture : Photo -> Ui.ShaderTexture
+photo_texture : Photo -> Win.Ui.ShaderTexture
 photo_texture = |current| match current {
 	PreviewReady(raster) => RasterTexture(raster)
 	_ => NoTexture
@@ -460,19 +458,19 @@ photo_texture = |current| match current {
 contrast_photo : Signal(ctx, Photo) -> Elem(ctx) where [ctx.store : () -> Engine.Reach(ctx, _)]
 contrast_photo = |photo| {
 	value = cells.contrast.signal()
-	Ui.vstack(
+	Win.Ui.vstack(
 		{},
 		[
-			Ui.shader_view({
+			Win.Ui.shader_view({
 				description: Described({ label: "Contrast-adjusted image" }),
-				shader: "scan-contrast.cso",
+				shader: Win.asset("scan-contrast"),
 				width: 300,
 				height: 150,
 				texture: photo.map(photo_texture),
 				parameters: value.map(|percent| [{ name: "contrast", value: percent.to_f32() / 50.F32 }]),
 			}),
-			Ui.slider(value, { label: "Contrast", on_change: Engine.handle(|percent| [cells.contrast.set(percent)]) }),
-			Ui.text_with(photo.map(photo_status), { style: Caption, tone: SecondaryText }),
+			Win.Ui.slider(value, { label: "Contrast", on_change: Engine.handle(|percent| [cells.contrast.set(percent)]) }),
+			Win.Ui.text_with(photo.map(photo_status), { style: Caption, tone: SecondaryText }),
 		],
 	)
 }
@@ -499,12 +497,12 @@ compare_photo = |photo| Engine.state(
 			},
 		)
 		stop = drag.update(|_| Bool.False)
-		Ui.vstack(
+		Win.Ui.vstack(
 			{},
 			[
-				Ui.shader_view({
+				Win.Ui.shader_view({
 					description: Described({ label: "Image comparison" }),
-					shader: "image-compare.cso",
+					shader: Win.asset("image-compare"),
 					width: 300,
 					height: 150,
 					texture: photo_at_surface.map(photo_texture),
@@ -522,7 +520,7 @@ compare_photo = |photo| Engine.state(
 						}),
 					}),
 				}),
-				Ui.slider(
+				Win.Ui.slider(
 					divider,
 					{
 						label: "Comparison divider",
@@ -530,7 +528,7 @@ compare_photo = |photo| Engine.state(
 						on_change: Engine.handle(|percent| [cells.divider.set(percent)]),
 					},
 				),
-				Ui.text_with(divider.map(|percent| "Comparison divider: ${percent.to_str()}%"), { style: Caption, tone: SecondaryText }),
+				Win.Ui.text_with(divider.map(|percent| "Comparison divider: ${percent.to_str()}%"), { style: Caption, tone: SecondaryText }),
 			],
 		)
 	},
@@ -543,22 +541,22 @@ divider_position = |pointer| match pointer.at {
 	_ => []
 }
 
-calibration : Try(Ui.Raster, Ui.RasterError)
+calibration : Try(Win.Ui.Raster, Win.Ui.RasterError)
 calibration = {
 	width = 80
 	height = 40
 	colors = [[16, 32, 56, 255], [34, 86, 111, 255], [40, 126, 140, 255], [222, 129, 82, 255], [246, 222, 170, 255]]
 	row = List.join(colors.map(|color| List.join(List.repeat(color, 16))))
-	Ui.raster({ width, height, rgba: List.join(List.repeat(row, height.to_u64())) })
+	Win.Ui.raster({ width, height, rgba: List.join(List.repeat(row, height.to_u64())) })
 }
 
 inspection_tabs : Signal(ctx, Str), HandlerOf(ctx, Str), (() -> Elem(ctx)), (() -> Elem(ctx)) -> Elem(ctx)
-inspection_tabs = |detail, on_select, preview, fingerprint| Ui.tabs(
+inspection_tabs = |detail, on_select, preview, fingerprint| Win.Ui.tabs(
 	{
 		label: "File details",
 		tabs: [
-			Ui.Choice.{ key: "preview", label: "Preview" },
-			Ui.Choice.{ key: "fingerprint", label: "Fingerprint" },
+			Win.Ui.Choice.{ key: "preview", label: "Preview" },
+			Win.Ui.Choice.{ key: "fingerprint", label: "Fingerprint" },
 		],
 		selected: detail,
 		on_select,
@@ -593,7 +591,7 @@ group_title = |entries, extension| {
 	"${name} (${count.to_str()})"
 }
 
-group_nodes : List(Queued) -> List(Ui.TreeNode)
+group_nodes : List(Queued) -> List(Win.Ui.TreeNode)
 group_nodes = |entries| {
 	extensions = entries.fold(
 		[],
@@ -602,8 +600,8 @@ group_nodes = |entries| {
 			if (types.contains(extension)) types else types.append(extension)
 		},
 	)
-	roots = extensions.map(|extension| Ui.TreeNode.{ key: group_key(extension), label: group_title(entries, extension), parent: Root })
-	leaves = entries.map(|item| Ui.TreeNode.{ key: item.key, label: item.file.name(), parent: ChildOf(group_key(file_type(item.file))) })
+	roots = extensions.map(|extension| Win.Ui.TreeNode.{ key: group_key(extension), label: group_title(entries, extension), parent: Root })
+	leaves = entries.map(|item| Win.Ui.TreeNode.{ key: item.key, label: item.file.name(), parent: ChildOf(group_key(file_type(item.file))) })
 	roots.concat(leaves)
 }
 
@@ -622,7 +620,7 @@ open_group = |file| {
 	cells.expanded.update(|expanded| expanded.insert(key))
 }
 
-expand_group : Ui.TreeExpansion -> List(Engine.Write(_))
+expand_group : Win.Ui.TreeExpansion -> List(Engine.Write(_))
 expand_group = |{ key, expansion }| [
 	cells.expanded.update(
 		|expanded| match expansion {
@@ -632,21 +630,21 @@ expand_group = |{ key, expansion }| [
 	),
 ]
 
-select_tree : List(Queued), Ui.Selection -> List(Engine.Write(_))
+select_tree : List(Queued), Win.Ui.Selection -> List(Engine.Write(_))
 select_tree = |entries, wanted|
 	match wanted {
 		Selected(key) if key.starts_with("type:") => [cells.group_selection.set(wanted)]
 		_ => [cells.group_selection.set(NoSelection)].concat(select(entries, wanted))
 	}
 
-active : List(Queued), Ui.Selection -> Selection
+active : List(Queued), Win.Ui.Selection -> Selection
 active = |entries, selection|
 	match selection {
 		NoSelection => None
 		Selected(key) => entries.find_first(|item| item.key == key).map_ok(|item| Selected(item.file)) ?? None
 	}
 
-select : List(Queued), Ui.Selection -> List(Engine.Write(_))
+select : List(Queued), Win.Ui.Selection -> List(Engine.Write(_))
 select = |entries, selection| {
 	action = match active(entries, selection) {
 		Selected(file) => Choose(file.name(), file.size())
@@ -666,7 +664,7 @@ receive = |base, { files, refused }| {
 	}
 }
 
-receive_folder : Files.FolderSelection -> List(Engine.Write(_))
+receive_folder : Win.Files.FolderSelection -> List(Engine.Write(_))
 receive_folder = |choice| match choice {
 	FolderChosen(folder) => [
 		cells.folder.update(|previous| FolderRequest.{ sequence: previous.sequence + 1, selected: ReadFolder(folder) }),
@@ -675,7 +673,7 @@ receive_folder = |choice| match choice {
 	FolderRefused(_) => [clear_folder, cells.pick_status.set("Could not open the selected folder.")]
 }
 
-folder_listed : U64, FolderRequest, Try(Files.FolderListing, Files.FolderFailure) -> List(Engine.Write(_))
+folder_listed : U64, FolderRequest, Try(Win.Files.FolderListing, Win.Files.FolderFailure) -> List(Engine.Write(_))
 folder_listed = |base, request, answer| match (request.selected, answer) {
 	(ReadFolder(folder), Ok({ files, completeness })) => {
 		name = folder.name()

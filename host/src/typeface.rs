@@ -142,7 +142,8 @@ impl Registrations {
         base: LOGFONTW,
     ) -> Result<PackagedFont> {
         let selection = requested.selection()?;
-        let path = resolve_asset(assets, &requested.asset)?;
+        let name = crate::asset_catalog::resolve(&requested.asset)?;
+        let path = resolve_asset(assets, name)?;
         let claim = (requested.family.to_uppercase(), requested.face.clone());
         if self.claimed.get(&claim).is_some_and(|owner| owner != &path) {
             return Err("another app asset already supplied this family and face".into());

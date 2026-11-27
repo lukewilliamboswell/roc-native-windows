@@ -1,9 +1,7 @@
 app [main] { pf: platform "../../../platform/main.roc" }
 
-import pf.Clipboard
-import pf.System
 import pf.Engine exposing [Elem, Signal]
-import pf.Ui
+import pf.Win
 
 main : Engine.Program(_)
 main = Engine.program_store({}, |_boot| store, |_boot| view())
@@ -12,7 +10,7 @@ Request : { url : Str, serial : U64, phase : Phase }
 
 Phase : [Idle, Starting, Fetching(StartMark), Finishing(StartMark, Transfer)]
 
-StartMark : Try(System.Mark, System.Failure)
+StartMark : Try(Win.System.Mark, Win.System.Failure)
 
 Transfer : [Received({ status : U16, size : U64, preview : Str }), Failed(Str)]
 
@@ -35,14 +33,14 @@ store = Engine.store(
 cells = store.cells()
 
 HttpStyle := {
-	page : Ui.StackProps ?? { padding: 16, spacing: 12 },
-	header : Ui.StackProps ?? { spacing: 12 },
-	title : Ui.TextProps ?? { style: Title },
-	response_panel : Ui.PanelProps ?? { border: Outline, width: Fill },
-	response_status : Ui.TextProps ?? { style: Heading },
-	response_body : Ui.TextProps ?? {
+	page : Win.Ui.StackProps ?? { padding: 16, spacing: 12 },
+	header : Win.Ui.StackProps ?? { spacing: 12 },
+	title : Win.Ui.TextProps ?? { style: Title },
+	response_panel : Win.Ui.PanelProps ?? { border: Outline, width: Fill },
+	response_status : Win.Ui.TextProps ?? { style: Heading },
+	response_body : Win.Ui.TextProps ?? {
 		style: Monospace,
-		font: PackagedFont({ asset: "fonts/IBMPlexMono-Regular.ttf", family: "IBM Plex Mono" }),
+		font: PackagedFont({ asset: Win.asset("response-font"), family: "IBM Plex Mono" }),
 	},
 }
 
@@ -53,7 +51,7 @@ view : () -> Elem(Engine.StoreRoot(_))
 view = || {
 	design = HttpStyle.{}
 	request = cells.request.signal()
-	progress = request.map(|pending| if (pending.phase != Idle) Ui.Progress.Indeterminate else Ui.Progress.Idle)
+	progress = request.map(|pending| if (pending.phase != Idle) Win.Ui.Progress.Indeterminate else Win.Ui.Progress.Idle)
 	url = cells.url.signal()
 	start = { url, previous: request }.Signal.map(|{ url: typed, previous }| { url: typed.trim(), serial: previous.serial + 1, phase: Starting })
 	details = { completed: cells.completed.signal(), reference: cells.reference.signal() }.Signal.map(
@@ -64,21 +62,21 @@ view = || {
 			Reference(id) => "${completed}\nReference: ${id}"
 		},
 	)
-	content = Ui.vstack(
+	content = Win.Ui.vstack(
 		design.page,
 		[
-			Ui.hstack(
+			Win.Ui.hstack(
 				design.header,
 				[
-					Ui.asset_image("http.bmp", { description: Decorative, width: 28, height: 28 }),
-					Ui.text_with("HTTP", design.title),
+					Win.Ui.asset_image(Engine.const(Win.asset("app-art")), { description: Decorative, width: 28, height: 28 }),
+					Win.Ui.text_with("HTTP", design.title),
 				],
 			),
-			Ui.hstack(
+			Win.Ui.hstack(
 				{},
 				[
-					Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
-					Ui.button(
+					Win.Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
+					Win.Ui.button(
 						"Fetch",
 						{
 							enter_action: WindowDefault,
@@ -96,7 +94,7 @@ view = || {
 							),
 						},
 					),
-					Ui.button(
+					Win.Ui.button(
 						"Cancel",
 						{
 							enabled: request.map(|r| r.phase != Idle),
@@ -111,33 +109,33 @@ view = || {
 					),
 				],
 			),
-			Ui.progress_bar(progress, { label: "Request progress" }),
-			Ui.panel(
+			Win.Ui.progress_bar(progress, { label: "Request progress" }),
+			Win.Ui.panel(
 				design.response_panel,
-				Ui.vstack(
+				Win.Ui.vstack(
 					{},
 					[
-						Ui.status_text(cells.status.signal(), { text: design.response_status }),
-						Ui.text_with(cells.body.signal(), design.response_body),
+						Win.Ui.status_text(cells.status.signal(), { text: design.response_status }),
+						Win.Ui.text_with(cells.body.signal(), design.response_body),
 					],
 				),
 			),
-			Ui.button(
+			Win.Ui.button(
 				"Copy request details",
 				{
 					enabled: details.map(|value| !value.is_empty()),
 					on_press: Engine.handle_by(details, |value, _| [cells.copies.update(|outbox| outbox.post(value))]),
 				},
 			),
-			Engine.on_post(cells.copies.signal(), |value| [Clipboard.text(value)], Engine.ignore({})),
+			Engine.on_post(cells.copies.signal(), |value| [Win.Clipboard.text(value)], Engine.ignore({})),
 			Engine.watch_latest(
 				request,
-				|r| if (r.phase == Starting) [System.monotonic({})] else [],
+				|r| if (r.phase == Starting) [Win.System.monotonic({})] else [],
 				Engine.react(|r, mark| [cells.request.set({ ..r, phase: Fetching(mark) })]),
 			),
 			Engine.watch_latest(
 				cells.reference_for.signal(),
-				|serial| if (serial == 0) [] else [System.secure_random(16)],
+				|serial| if (serial == 0) [] else [Win.System.secure_random(16)],
 				Engine.react(
 					|_, result| [
 						cells.reference.set(
@@ -160,14 +158,14 @@ view = || {
 			Engine.watch_latest(
 				request,
 				|r| match r.phase {
-					Finishing(_, _) => [System.monotonic({})]
+					Finishing(_, _) => [Win.System.monotonic({})]
 					_ => []
 				},
 				Engine.react(completed),
 			),
 		],
 	)
-	Ui.window({ taskbar_progress: progress }, content)
+	Win.Ui.window({ taskbar_progress: progress }, content)
 }
 
 answered : Request, Try(Engine.Response, Engine.HttpFailure) -> List(Engine.Write(_))

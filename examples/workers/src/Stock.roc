@@ -1,7 +1,7 @@
-import pf.Ui
+import pf.Win
 
 Stock := [].{
-	Item : { name : Str, expected : U64, counted : U64, feedback : Ui.Feedback }
+	Item : { name : Str, expected : U64, counted : U64, feedback : Win.Ui.Feedback }
 	Count : { expected : U64, counted : U64 }
 	Summary : { matched : U64, short : U64, surplus : U64 }
 
@@ -14,13 +14,13 @@ Stock := [].{
 		_ => Err("Enter a whole number from 0 to 1,000,000.")
 	}
 
-	recount : Item, Ui.CellEdit -> Item
+	recount : Item, Win.Ui.CellEdit -> Item
 	recount = |item, { draft }| match parse_count(draft) {
 		Ok(counted) => { ..item, counted, feedback: Clear }
 		Err(message) => { ..item, feedback: Invalid(message) }
 	}
 
-	paste : List({ key : U64, row : Item }), Ui.GridPaste -> Try(List({ key : U64, row : Item }), Str)
+	paste : List({ key : U64, row : Item }), Win.Ui.GridPaste -> Try(List({ key : U64, row : Item }), Str)
 	paste = |visible, batch| {
 		if (batch.columns != ["counted"]) return Err("Only the Counted column can be pasted.")
 		var $changes = []

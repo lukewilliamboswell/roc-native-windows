@@ -1,4 +1,5 @@
 README.md
+assets.json
 assets/reading-list.bmp
 assets/reading-list.ico
 logic/ReadingList.roc
