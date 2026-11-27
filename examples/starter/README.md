@@ -1,6 +1,6 @@
 # Reading list
 
-Add a title, then select a row to mark it read or remove it. Double-click a row or press Enter to toggle its read status. Click the Title header to switch between alphabetical and entry order. The list lives in memory for the current session.
+Add a title, then select a row and use the toolbar to mark it read or remove it. Double-click a row or press Enter to toggle its read status. Click the Title header to switch between alphabetical and entry order. The list lives in memory for the current session.
 
 - `src/` connects Win32 controls to Roc Signals.
 - `logic/` is a Roc package with the reading-list decisions shared by the app and fuzz target.

@@ -69,6 +69,44 @@ view = || {
 				selected: filter,
 				on_select: Engine.handle(|value| [cells.filter.set(value)]),
 			}),
+			Ui.toolbar(
+				{ label: "Reading list actions" },
+				[
+					Ui.toolbar_button(
+						active.map(
+							|result| match result {
+								Ok(item) if item.read => "Mark unread"
+								_ => "Mark read"
+							},
+						),
+						{
+							key: "mark",
+							enabled: active.map(Try.is_ok),
+							on_press: Engine.handle_by(
+								active,
+								|result, _| match result {
+									Ok(item) => [change(Toggle(item.title))]
+									Err(_) => []
+								},
+							),
+						},
+					),
+					Ui.toolbar_button(
+						"Remove",
+						{
+							key: "remove",
+							enabled: active.map(Try.is_ok),
+							on_press: Engine.handle_by(
+								active,
+								|result, _| match result {
+									Ok(item) => [change(Remove(item.title)), cells.selected.set(NoSelection)]
+									Err(_) => []
+								},
+							),
+						},
+					),
+				],
+			),
 			Ui.list_view(
 				{
 					label: "Titles",
@@ -92,42 +130,6 @@ view = || {
 									Ui.list_cell(item.map(|entry| if (entry.read) "Read" else "Unread"), { column: "status" }),
 								],
 							)
-						},
-					),
-				],
-			),
-			Ui.hstack(
-				{},
-				[
-					Ui.button(
-						active.map(
-							|result| match result {
-								Ok(item) if item.read => "Mark unread"
-								_ => "Mark read"
-							},
-						),
-						{
-							enabled: active.map(Try.is_ok),
-							on_press: Engine.handle_by(
-								active,
-								|result, _| match result {
-									Ok(item) => [change(Toggle(item.title))]
-									Err(_) => []
-								},
-							),
-						},
-					),
-					Ui.button(
-						"Remove",
-						{
-							enabled: active.map(Try.is_ok),
-							on_press: Engine.handle_by(
-								active,
-								|result, _| match result {
-									Ok(item) => [change(Remove(item.title)), cells.selected.set(NoSelection)]
-									Err(_) => []
-								},
-							),
 						},
 					),
 				],
