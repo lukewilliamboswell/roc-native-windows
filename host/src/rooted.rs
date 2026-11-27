@@ -167,10 +167,11 @@ impl Directory {
         };
         // SAFETY: The root, bounded object name, and output storage remain live
         // throughout this synchronous call. NT does not consume the root handle.
+        // Every returned handle is checked for type and reparse metadata.
         let result = unsafe {
             NtCreateFile(
                 &mut handle,
-                access,
+                access | FILE_READ_ATTRIBUTES,
                 &attributes,
                 &mut status,
                 std::ptr::null(),
