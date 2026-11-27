@@ -84,8 +84,24 @@ public static class RocWindowsAccessibility
 
     private static void Todos(AutomationElement root, int pid)
     {
-        Find(root, "New due date", ControlType.Edit);
-        Find(root, "New due time", ControlType.Edit);
+        var date = Find(root, "New due date", ControlType.Edit);
+        var time = Find(root, "New due time", ControlType.Edit);
+        foreach (var field in new[] { date, time })
+        {
+            var label = field.GetCurrentPropertyValue(AutomationElement.LabeledByProperty) as AutomationElement;
+            Require(label != null && label.Current.Name == field.Current.Name,
+                    field.Current.Name + " has no associated visible label.");
+            Require(field.Current.HelpText.Contains("Example"),
+                    field.Current.Name + " has no format hint.");
+        }
+        date.SetFocus();
+        SetValue(date, "invalid");
+        PostKey(date, 0x0d); // Enter validates the draft in the app's message loop.
+        WaitFor("date validation is exposed on the edit", () =>
+            date.Current.HelpText.Contains("Enter a valid date") ? date : null);
+        PostKey(date, 0x1b); // Escape restores the committed value and hint.
+        WaitFor("date validation clears on Escape", () =>
+            !date.Current.HelpText.Contains("Enter a valid date") ? date : null);
         SetValue(Find(root, "New to-do", ControlType.Edit), "Accessibility task");
         Invoke(Find(root, "Add", ControlType.Button));
         var opener = Find(root, "Notes for Accessibility task", ControlType.Button);

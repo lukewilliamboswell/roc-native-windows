@@ -8,14 +8,17 @@ use crate::view::wide;
 use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
-use windows::Win32::Foundation::{E_NOINTERFACE, HWND, LPARAM, VARIANT_BOOL, WPARAM};
+use windows::Win32::Foundation::{
+    E_NOINTERFACE, E_OUTOFMEMORY, HWND, LPARAM, VARIANT_BOOL, WPARAM,
+};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     CoUninitialize,
 };
+use windows::Win32::System::Ole::{SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement};
 use windows::Win32::System::Variant::*;
 use windows::Win32::UI::Accessibility::*;
-use windows::core::{BSTR, Error, HRESULT, IUnknown, PCWSTR, implement};
+use windows::core::{BSTR, Error, HRESULT, IUnknown, Interface, PCWSTR, implement};
 use windows_sys::Win32::Foundation::{
     HWND as RawHwnd, LPARAM as RawLparam, LRESULT, WPARAM as RawWparam,
 };
@@ -67,6 +70,7 @@ pub(crate) struct NativeName {
     hwnd: HWND,
     service: IAccPropServices,
     help: String,
+    related: bool,
 }
 
 impl NativeName {
@@ -85,6 +89,7 @@ impl NativeName {
                     hwnd: HWND(hwnd),
                     service,
                     help: String::new(),
+                    related: false,
                 });
             }
             if let Some(current) = current {
@@ -98,6 +103,31 @@ impl NativeName {
                         PCWSTR(name.as_ptr()),
                     );
                 }
+            }
+        }
+    }
+
+    pub(crate) fn relate(&mut self, label: RawHwnd, description: Option<RawHwnd>) {
+        if self.related || label.is_null() {
+            return;
+        }
+        self.related = true;
+        // These sibling HWNDs are owned by the same mounted control.
+        self.set_relation(LabeledBy_Property_GUID, label, false);
+        if let Some(description) = description {
+            self.set_relation(DescribedBy_Property_GUID, description, true);
+        }
+    }
+
+    fn set_relation(&self, property: windows::core::GUID, target: RawHwnd, list: bool) {
+        if let Ok(mut value) = related_element(target, list) {
+            // SAFETY: The target and owner are live on this UI thread. The
+            // annotation copies the variant before the call returns.
+            unsafe {
+                let _ =
+                    self.service
+                        .SetHwndProp(self.hwnd, OBJID_CLIENT as u32, 0, property, &value);
+                let _ = VariantClear(&mut value);
             }
         }
     }
@@ -136,9 +166,40 @@ impl Drop for NativeName {
                     Name_Property_GUID,
                     PROPID_ACC_HELP,
                     HelpText_Property_GUID,
+                    LabeledBy_Property_GUID,
+                    DescribedBy_Property_GUID,
                 ],
             );
         }
+    }
+}
+
+fn related_element(hwnd: RawHwnd, list: bool) -> windows::core::Result<VARIANT> {
+    // SAFETY: The target is an owned, mounted STATIC. Its native provider stays
+    // accessible through a COM reference while the property is annotated.
+    let provider = unsafe { UiaHostProviderFromHwnd(HWND(hwnd)) }?.cast::<IUnknown>()?;
+    if !list {
+        return Ok(variant(
+            VT_UNKNOWN,
+            VARIANT_0_0_0 {
+                punkVal: ManuallyDrop::new(Some(provider)),
+            },
+        ));
+    }
+    // SAFETY: This one-element SAFEARRAY owns a reference to the provider.
+    unsafe {
+        let array = SafeArrayCreateVector(VT_UNKNOWN, 0, 1);
+        if array.is_null() {
+            return Err(Error::from_hresult(E_OUTOFMEMORY));
+        }
+        if let Err(error) = SafeArrayPutElement(array, &0, provider.as_raw().cast_const()) {
+            let _ = SafeArrayDestroy(array);
+            return Err(error);
+        }
+        Ok(variant(
+            VARENUM(VT_ARRAY.0 | VT_UNKNOWN.0),
+            VARIANT_0_0_0 { parray: array },
+        ))
     }
 }
 

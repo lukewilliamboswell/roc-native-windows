@@ -517,6 +517,12 @@ impl View {
         if let (Some(editor), Some(value)) = (&mut self.civil_edit, desired.civil) {
             editor.set_value(self.handle, value);
         }
+        if let Some(annotation) = &mut self.native_name {
+            annotation.relate(
+                self.label,
+                self.civil_edit.as_ref().map(|editor| editor.note),
+            );
+        }
         self.props = desired;
         Ok(())
     }
