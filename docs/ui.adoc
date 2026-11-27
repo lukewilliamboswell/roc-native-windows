@@ -13,9 +13,10 @@ for state, stores, and worker tasks.
 | Builder | Native role | Inputs
 | `Ui.vstack` | Vertical layout | Children, `spacing` and `padding`
 | `Ui.hstack` | Horizontal layout | Children, `spacing` and `padding`
-| `Ui.text` | Label | Text signal
+| `Ui.text`, `Ui.text_with` | Label | Text signal and optional `overflow` with `text_with`
 | `Ui.button` | Push button | Title, `on_press`, optional `enabled`
 | `Ui.text_field` | Single-line edit control | Value, `on_input`, optional `label`, `placeholder` and `enabled`
+| `Ui.text_area` | Multiline edit control | Value and `label`, optional `rows`, `enabled`, `mode` and `reference`
 | `Ui.checkbox` | Check box | Title, `checked`, `on_change`, optional `enabled`
 | `Ui.combo_box` | Selection-only drop-down | `label`, `choices`, `selected`, `on_select`, optional `enabled`
 | `Ui.list_box` | Single-selection list | `label`, `choices`, `selected`, `on_select`, optional `enabled` and `visible_rows` (default 6)
@@ -66,3 +67,24 @@ retains its own action. Mount one default button per window.
 from a `state` signal. Activating it requests true from Unchecked or
 Mixed and false from Checked. Use `on_change` to update the underlying
 items and derive the aggregate state from them.
+
+== Text labels and multiline values
+
+`Ui.text(value)` wraps onto as many lines as needed. Use
+`Ui.text_with(value, { overflow: EllipsizeEnd })` to keep a caption on one
+line and show an ellipsis when it runs out of room. The control retains the
+full caption for accessibility and behaviour specs.
+
+`Ui.text_area(value, { label: "Contents" })` displays a read-only preview
+that users can select, scroll and copy. Set `rows` to choose the visible
+height. It defaults to five lines. Use `mode: Editable(on_input)` to receive
+the complete draft after each edit. The value and handler use LF line
+endings. Enter inserts a line break. Use a separate button to submit edits.
+
+Echo the draft through the value signal to keep the displayed text and
+the app's state in sync. If the value signal changes to a different string
+while an editable area has focus, the native draft remains until focus
+leaves. To reset the focused draft deliberately, set its `reference` and
+issue `Engine.command(ApplyValue(reference))` from an effect plan in the
+same turn as the new value. An active input method composition finishes
+before the reset is applied.

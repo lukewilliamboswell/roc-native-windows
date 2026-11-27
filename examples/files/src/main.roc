@@ -79,6 +79,8 @@ view = || {
 				on_select: Engine.handle_by(queue, select),
 				visible_rows: 4,
 			}),
+			Ui.text_with(display.map(|state| state.name), { overflow: EllipsizeEnd }),
+			Ui.text(display.map(|state| state.size)),
 			Ui.text(display.map(|state| state.status)),
 			Ui.text(cells.pick_status.signal()),
 			Ui.radio_group({
@@ -87,7 +89,7 @@ view = || {
 				selected: format,
 				on_select: Engine.handle(|key| [cells.format.set(key)]),
 			}),
-			Ui.text(preview),
+			Ui.text_area(preview, { label: "Contents" }),
 			Ui.text(display.map(|state| state.digest)),
 			Ui.button("Copy SHA-256", { enabled: checksum.map(|text| !text.is_empty()), on_press: Engine.handle_by(checksum, |text, _| if (text.is_empty()) [] else [cells.copies.update(|outbox| outbox.post(text))]) }),
 			Ui.text(cells.copy_status.signal()),

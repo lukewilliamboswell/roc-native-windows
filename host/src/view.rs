@@ -1,6 +1,6 @@
 use crate::Result;
 use crate::choice::Choices;
-use crate::window::enabled_flag;
+use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,12 +11,17 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::SystemServices::{SS_BITMAP, SS_CENTERIMAGE, SS_LEFT, SS_NOPREFIX};
+use windows_sys::Win32::System::SystemServices::{
+    SS_BITMAP, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX,
+};
 use windows_sys::Win32::UI::Controls::{
-    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, EM_SETCUEBANNER, EM_SETSEL, SetScrollInfo,
+    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL,
+    SetScrollInfo,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetFocus};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, GetFocus, IsWindowEnabled, SetFocus,
+};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::{PCWSTR, w};
@@ -30,6 +35,7 @@ pub(crate) enum Control {
     Checkbox,
     AggregateCheckbox,
     Edit,
+    TextArea,
     Image,
     ComboBox,
     ListBox,
@@ -47,6 +53,7 @@ impl Control {
             "ui-checkbox" => Self::Checkbox,
             "ui-aggregate-checkbox" => Self::AggregateCheckbox,
             "ui-text-field" => Self::Edit,
+            "textarea" => Self::TextArea,
             "ui-asset-image" => Self::Image,
             "ui-combo-box" => Self::ComboBox,
             "ui-list-box" => Self::ListBox,
@@ -64,6 +71,10 @@ impl Control {
         matches!(self, Self::ComboBox | Self::ListBox | Self::RadioGroup)
     }
 
+    fn is_edit(self) -> bool {
+        matches!(self, Self::Edit | Self::TextArea)
+    }
+
     fn class(self) -> (u32, PCWSTR, u32) {
         match self {
             Self::Text => (0, w!("STATIC"), SS_LEFT | SS_NOPREFIX),
@@ -76,6 +87,13 @@ impl Control {
                 WS_EX_CLIENTEDGE,
                 w!("EDIT"),
                 WS_TABSTOP | ES_AUTOHSCROLL as u32,
+            ),
+            Self::TextArea => (
+                WS_EX_CLIENTEDGE,
+                w!("EDIT"),
+                WS_TABSTOP
+                    | WS_VSCROLL
+                    | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_READONLY) as u32,
             ),
             Self::Image => (0, w!("STATIC"), SS_BITMAP | SS_CENTERIMAGE),
             Self::ComboBox => (
@@ -98,6 +116,7 @@ struct View {
     label: HWND,
     kind: Control,
     props: Props,
+    force_pending: bool,
     image: HBITMAP,
     rendered_image: Option<(String, i32, i32)>,
     choices: Choices,
@@ -112,15 +131,25 @@ struct Props {
     enabled: bool,
     check_state: u32,
     window_default: bool,
+    editable: bool,
+    ellipsize: bool,
 }
 
 impl View {
     fn new(window: HWND, font: HFONT, kind: Control) -> Result<Self> {
         let (ex, class, style) = kind.class();
         let handle = child(window, font, ex, class, style)?;
-        if kind == Control::Edit {
+        if kind.is_edit() {
             // SAFETY: The new HWND belongs to this thread, with a static callback.
-            if unsafe { SetWindowSubclass(handle, Some(edit_subclass), 1, 0) } == 0 {
+            if unsafe {
+                SetWindowSubclass(
+                    handle,
+                    Some(edit_subclass),
+                    1,
+                    usize::from(kind == Control::TextArea),
+                )
+            } == 0
+            {
                 unsafe { DestroyWindow(handle) };
                 return Err("could not track input method composition".into());
             }
@@ -133,6 +162,7 @@ impl View {
                 enabled: true,
                 ..Props::default()
             },
+            force_pending: false,
             image: null_mut(),
             rendered_image: None,
             choices: Choices::default(),
@@ -156,14 +186,17 @@ impl View {
         // writing. Writing the same string can reset the selection and IME.
         if !matches!(self.kind, Control::ListBox | Control::ComboBox)
             && self.props.caption != desired.caption
-            && (self.kind != Control::Edit || window_text(self.handle) != desired.caption)
         {
-            set_text(self.handle, &desired.caption);
+            if self.kind == Control::TextArea {
+                if !desired.editable || !edit_is_active(self.handle) {
+                    self.write_edit(&desired.caption);
+                }
+            } else if self.kind != Control::Edit || window_text(self.handle) != desired.caption {
+                set_text(self.handle, &desired.caption);
+            }
         }
-        if matches!(
-            self.kind,
-            Control::Edit | Control::ListBox | Control::ComboBox
-        ) && self.props.label != desired.label
+        if (self.kind.is_edit() || matches!(self.kind, Control::ListBox | Control::ComboBox))
+            && self.props.label != desired.label
         {
             if self.label.is_null() && !desired.label.is_empty() {
                 self.label = child(window, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?;
@@ -177,6 +210,24 @@ impl View {
         // view's live window on its creating thread. The string is retained
         // until the synchronous cue-banner message returns.
         unsafe {
+            if self.kind == Control::TextArea && self.props.editable != desired.editable {
+                SendMessageW(
+                    self.handle,
+                    EM_SETREADONLY,
+                    usize::from(!desired.editable),
+                    0,
+                );
+            }
+            if self.kind == Control::Text && self.props.ellipsize != desired.ellipsize {
+                let style = GetWindowLongPtrW(self.handle, GWL_STYLE) as u32;
+                let ellipsis = if desired.ellipsize { SS_ENDELLIPSIS } else { 0 };
+                SetWindowLongPtrW(
+                    self.handle,
+                    GWL_STYLE,
+                    ((style & !SS_ENDELLIPSIS) | ellipsis) as isize,
+                );
+                InvalidateRect(self.handle, null(), 1);
+            }
             if self.props.enabled != desired.enabled {
                 EnableWindow(self.handle, i32::from(desired.enabled));
             }
@@ -203,6 +254,26 @@ impl View {
         }
         self.props = desired;
         Ok(())
+    }
+
+    fn read_edit(&self) -> String {
+        let text = window_text(self.handle);
+        if self.kind == Control::TextArea {
+            canonical_lines(&text)
+        } else {
+            text
+        }
+    }
+
+    fn write_edit(&self, value: &str) {
+        if self.read_edit() == value {
+            return;
+        }
+        if self.kind == Control::TextArea {
+            set_text(self.handle, &native_lines(value));
+        } else {
+            set_text(self.handle, value);
+        }
     }
 
     fn update_bitmap(&mut self, root: &Path, name: &str, width: i32, height: i32) -> Result<()> {
@@ -364,8 +435,8 @@ impl Surface {
 
     pub(crate) fn input(&self, key: Key) -> String {
         let view = &self.views[&key];
-        if view.kind == Control::Edit {
-            return window_text(view.handle);
+        if view.kind.is_edit() {
+            return view.read_edit();
         }
         let checked = self.check_state(key) == "true";
         (if view.kind == Control::AggregateCheckbox {
@@ -388,6 +459,9 @@ impl Surface {
     pub(crate) fn default_button(&self, focus: HWND, message: Option<&MSG>) -> Option<HWND> {
         let default = self.views.values().find(|view| view.props.window_default)?;
         let focused = self.key(focus).and_then(|key| self.views.get(&key));
+        if focused.is_some_and(|view| view.kind == Control::TextArea) {
+            return None;
+        }
         if !focus.is_null() {
             let parameter = message.map_or(0, |msg| std::ptr::from_ref(msg) as isize);
             // SAFETY: The message pointer, when present, is live for this SendMessage call.
@@ -414,7 +488,7 @@ impl Surface {
 
     pub(crate) fn spec_label(&self, key: Key, kind: &str) -> Option<String> {
         let view = self.views.get(&key)?;
-        if kind == "text-field" {
+        if matches!(kind, "text-field" | "text-area") {
             return Some(if view.label.is_null() {
                 view.props.placeholder.clone()
             } else {
@@ -431,10 +505,11 @@ impl Surface {
     }
 
     pub(crate) fn spec_text(&self, key: Key) -> Result<String> {
-        let handle = self
-            .spec_handle(key)
+        let view = self
+            .views
+            .get(&key)
             .ok_or("locator is not a native control")?;
-        Ok(window_text(handle))
+        Ok(view.read_edit())
     }
 
     pub(crate) fn spec_disabled(&self, key: Key) -> Result<bool> {
@@ -449,9 +524,16 @@ impl Surface {
         let view = self
             .views
             .get(&key)
-            .filter(|view| view.kind == Control::Edit)
-            .ok_or("fill requires a text field")?;
-        set_text(view.handle, text);
+            .filter(|view| view.kind.is_edit())
+            .ok_or("fill requires a text field or text area")?;
+        if view.kind == Control::TextArea && !view.props.editable {
+            return Err("cannot fill a read-only text area".into());
+        }
+        if view.kind == Control::TextArea {
+            view.write_edit(&canonical_lines(text));
+        } else {
+            view.write_edit(text);
+        }
         Ok(view.handle)
     }
 
@@ -474,8 +556,9 @@ impl Surface {
             return;
         };
         match view.kind {
-            Control::Edit if window_text(view.handle) != view.props.caption => {
-                set_text(view.handle, &view.props.caption);
+            Control::Edit => view.write_edit(&view.props.caption),
+            Control::TextArea if !edit_is_active(view.handle) => {
+                view.write_edit(&view.props.caption);
             }
             Control::Checkbox | Control::AggregateCheckbox => {
                 // SAFETY: The handle is a live check box owned by this thread.
@@ -491,8 +574,21 @@ impl Surface {
         }
     }
 
-    pub(crate) fn reference(&self, op: u8, key: Key) {
-        let Some(view) = self.views.get(&key) else {
+    pub(crate) fn settle_edit(&mut self, handle: HWND) {
+        let Some(view) = self.key(handle).and_then(|key| self.views.get_mut(&key)) else {
+            return;
+        };
+        if view.kind == Control::TextArea
+            && !composing(handle)
+            && (view.force_pending || !edit_is_active(handle))
+        {
+            view.force_pending = false;
+            view.write_edit(&view.props.caption);
+        }
+    }
+
+    pub(crate) fn reference(&mut self, op: u8, key: Key) {
+        let Some(view) = self.views.get_mut(&key) else {
             return;
         };
         // SAFETY: Both root and child live on the app's UI thread.
@@ -500,12 +596,18 @@ impl Surface {
             match op {
                 1 | 3 | 5 => {
                     SetFocus(view.handle);
-                    if op == 3 && view.kind == Control::Edit {
+                    if op == 3 && view.kind.is_edit() {
                         SendMessageW(view.handle, EM_SETSEL, 0, -1);
                     }
                 }
                 2 => {
                     SetFocus(self.window);
+                }
+                4 if view.kind.is_edit() => {
+                    view.force_pending = composing(view.handle);
+                    if !view.force_pending {
+                        view.write_edit(&view.props.caption);
+                    }
                 }
                 _ => {}
             }
@@ -565,6 +667,7 @@ impl Surface {
                     }
                     Control::Edit => node.attr("value").unwrap_or("").into(),
                     Control::RadioGroup => node.attr("label").unwrap_or("").into(),
+                    Control::TextArea => canonical_lines(node.attr("value").unwrap_or("")),
                     Control::Image => node.attr("label").unwrap_or("").into(),
                     _ => tree.caption(key),
                 };
@@ -586,6 +689,8 @@ impl Surface {
                             u32::from(node.attr("checked").is_some_and(enabled_flag))
                         },
                         window_default: node.attr("window-default").is_some_and(enabled_flag),
+                        editable: node.attr("editable").is_some_and(enabled_flag),
+                        ellipsize: node.attr("ellipsize-end").is_some_and(enabled_flag),
                     },
                 )?;
                 if kind.is_choice() {
@@ -771,11 +876,7 @@ impl Surface {
             let mut room = (inner - spacing.saturating_mul((count - 1).max(0))).max(1);
             // Place fixed-size controls before distributing the leftover
             // width to edit boxes, which benefit from stretching.
-            let is_flex = |key| {
-                self.views
-                    .get(&key)
-                    .is_some_and(|view| view.kind == Control::Edit)
-            };
+            let is_flex = |key| self.views.get(&key).is_some_and(|view| view.kind.is_edit());
             let flex_count = children.iter().filter(|&&key| is_flex(key)).count() as i32;
             let preferred = children
                 .iter()
@@ -867,6 +968,7 @@ fn number(node: &Node, key: &str, fallback: i32) -> i32 {
 fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32, i32) {
     let dip = |value| scale(dpi, value);
     let (width, height) = match view.kind {
+        Control::Text if view.props.ellipsize => (max_width, line_height(dc)),
         Control::Text => (
             max_width,
             wrap_height(dc, &view.props.caption, max_width).max(dip(20)),
@@ -902,6 +1004,11 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             (max_width, rows * row_height + dip(4) + label)
         }
         Control::RadioGroup => (max_width, dip(24 * (view.choices.count() as i32 + 1) + 8)),
+        Control::TextArea => (
+            max_width,
+            line_height(dc) * number(node, "rows", 5).clamp(1, 100)
+                + dip(if view.props.label.is_empty() { 8 } else { 29 }),
+        ),
         Control::Image => (
             dip(number(node, "width", 128)).max(1),
             dip(number(node, "height", 96)).max(1),
@@ -918,13 +1025,26 @@ fn composing(hwnd: HWND) -> bool {
     COMPOSING.with(|active| active.borrow().contains(&(hwnd as usize)))
 }
 
+fn edit_is_active(hwnd: HWND) -> bool {
+    // SAFETY: Focus belongs to the UI thread that owns the edit.
+    (unsafe { GetFocus() == hwnd }) || composing(hwnd)
+}
+
+fn canonical_lines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn native_lines(text: &str) -> String {
+    text.replace('\n', "\r\n")
+}
+
 unsafe extern "system" fn edit_subclass(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
     id: usize,
-    _: usize,
+    multiline: usize,
 ) -> LRESULT {
     match message {
         WM_IME_STARTCOMPOSITION => COMPOSING.with(|active| {
@@ -940,7 +1060,11 @@ unsafe extern "system" fn edit_subclass(
         if message == WM_NCDESTROY {
             RemoveWindowSubclass(hwnd, Some(edit_subclass), id);
         }
-        DefSubclassProc(hwnd, message, wparam, lparam)
+        let result = DefSubclassProc(hwnd, message, wparam, lparam);
+        if multiline != 0 && matches!(message, WM_KILLFOCUS | WM_IME_ENDCOMPOSITION) {
+            PostMessageW(GetParent(hwnd), APPLY_PENDING_EDIT, 0, hwnd as LPARAM);
+        }
+        result
     }
 }
 
@@ -1051,6 +1175,13 @@ fn text_width(dc: HDC, text: &str) -> i32 {
     size.cx
 }
 
+fn line_height(dc: HDC) -> i32 {
+    let mut metrics = TEXTMETRICW::default();
+    // SAFETY: The DC contains the control font and metrics is writable.
+    unsafe { GetTextMetricsW(dc, &mut metrics) };
+    metrics.tmHeight.max(1)
+}
+
 fn wrap_height(dc: HDC, text: &str, width: i32) -> i32 {
     let text = wide(text);
     let mut rect = RECT {
@@ -1093,4 +1224,20 @@ fn resolve_bitmap(root: &Path, name: &str) -> Result<PathBuf> {
         return Err(format!("asset path leaves the assets directory: {name}"));
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_lines, native_lines};
+
+    #[test]
+    fn multiline_values_preserve_spacing_and_empty_lines() {
+        let draft = "first\n  second\n\n";
+        assert_eq!(native_lines(draft), "first\r\n  second\r\n\r\n");
+        assert_eq!(canonical_lines(&native_lines(draft)), draft);
+        assert_eq!(
+            canonical_lines("first\rsecond\r\nthird"),
+            "first\nsecond\nthird"
+        );
+    }
 }

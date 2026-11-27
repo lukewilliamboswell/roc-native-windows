@@ -15,10 +15,10 @@ target = Fuzz.target_with({
 		preview = Inspector.preview(bytes.take_first(Inspector.preview_limit))
 		digits = Inspector.hex(bytes).to_utf8()
 		hexadecimal = digits.all(|byte| (byte >= '0' and byte <= '9') or (byte >= 'a' and byte <= 'f'))
-		if !preview.contains("\n") and digits.len() == bytes.len() * 2 and hexadecimal {
+		if !preview.contains("\r") and !preview.contains("\u(0000)") and digits.len() == bytes.len() * 2 and hexadecimal {
 			Fuzz.keep
 		} else {
-			crash "preview contained a newline or hex output was malformed"
+			crash "preview contained a CR or NUL, or hex output was malformed"
 		}
 	},
 })

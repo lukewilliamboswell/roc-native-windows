@@ -17,7 +17,19 @@ Ui := [].{
 
 	## A label whose text follows a signal.
 	text : Signal(ctx, Str) -> Elem(ctx)
-	text = |value| Engine.element("ui-text", [], [Engine.text_s(value)])
+	text = |value| Ui.text_with(value, {})
+
+	## Wrapped text or a single line with an ellipsis when it does not fit.
+	TextProps := { overflow : [Wrap, EllipsizeEnd] ?? Wrap }
+
+	## The full caption remains available when the display truncates it.
+	text_with : Signal(ctx, Str), TextProps -> Elem(ctx)
+	text_with = |value, props|
+		Engine.element(
+			"ui-text",
+			[Engine.attr("ellipsize-end", bool_word(props.overflow == EllipsizeEnd))],
+			[Engine.text_s(value)],
+		)
 
 	## A button's action and enabled state.
 	ButtonProps(ctx) := {
@@ -61,6 +73,32 @@ Ui := [].{
 			],
 			[],
 		)
+
+	## A read-only preview or an editor that sends its entire LF-delimited draft.
+	TextAreaProps(ctx) := {
+		label : Str,
+		rows : U32 ?? 5,
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+		mode : [ReadOnly, Editable(HandlerOf(ctx, Str))] ?? ReadOnly,
+		reference : Str ?? "",
+	}
+
+	## A wrapped, selectable multiline edit control. Set a reference to request ApplyValue.
+	text_area : Signal(ctx, Str), TextAreaProps(ctx) -> Elem(ctx)
+	text_area = |value, props| {
+		base = [
+			Engine.prop_s(Engine.Prop.value, value),
+			Engine.attr("label", props.label),
+			Engine.attr("rows", props.rows.to_str()),
+			Engine.attr_s("enabled", props.enabled.map(bool_word)),
+			Engine.ref(props.reference),
+		]
+		attrs = match props.mode {
+			ReadOnly => base
+			Editable(on_input) => base.append(Engine.attr("editable", "true")).append(Engine.on("input", on_input))
+		}
+		Engine.element("textarea", attrs, [])
+	}
 
 	## A checkbox sends its new checked state as a Bool.
 	CheckboxProps(ctx) := {

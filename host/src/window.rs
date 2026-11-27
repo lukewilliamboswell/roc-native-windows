@@ -1,4 +1,4 @@
-use crate::abi::{self, Engine};
+use crate::abi::Engine;
 use crate::effects::{Effects, SpecOptions};
 use crate::view::{Surface, wide};
 use crate::wire::{Declarations, EFFECT_NODE, Reader, Tree};
@@ -209,7 +209,7 @@ impl App {
         let view_kind = self.surface.kind(key);
         use crate::view::Control;
         let (event_name, value) = match (view_kind, u32::from(notification)) {
-            (Control::Edit, EN_CHANGE) => ("input", self.surface.input(key)),
+            (Control::Edit | Control::TextArea, EN_CHANGE) => ("input", self.surface.input(key)),
             (Control::Button, BN_CLICKED) => ("click", String::new()),
             (Control::Checkbox | Control::AggregateCheckbox, BN_CLICKED) => {
                 ("change", self.surface.input(key))
@@ -275,6 +275,8 @@ impl App {
         Ok(())
     }
 }
+
+pub(crate) const APPLY_PENDING_EDIT: u32 = WM_APP + 1;
 
 fn read_reference(op: u8, reader: &mut Reader<'_>) -> Result<()> {
     match op {
@@ -522,7 +524,7 @@ fn clear_app() {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 extern "C" fn main(_argc: i32, _argv: *mut *mut u8) -> i32 {
-    abi::register_main_thread();
+    crate::abi::register_main_thread();
     match run() {
         Ok(()) => 0,
         Err(error) => {
@@ -543,7 +545,7 @@ unsafe extern "system" fn window_proc(
     unsafe {
         match message {
             WM_COMMAND | WM_SIZE | WM_TIMER | WM_DPICHANGED | WM_VSCROLL | WM_MOUSEWHEEL
-            | WM_DROPFILES => {
+            | WM_DROPFILES | APPLY_PENDING_EDIT => {
                 let paths = (message == WM_DROPFILES).then(|| paths_from_drop(wparam as HDROP));
                 let handled = APP.with(|state| {
                     let Ok(mut state) = state.try_borrow_mut() else {
@@ -556,6 +558,7 @@ unsafe extern "system" fn window_proc(
                         WM_COMMAND if lparam != 0 && !app.driven => {
                             app.command(lparam as HWND, (wparam >> 16) as u16)?
                         }
+                        APPLY_PENDING_EDIT => app.surface.settle_edit(lparam as HWND),
                         WM_SIZE => app.surface.arrange(&app.tree)?,
                         WM_DPICHANGED => {
                             let rect = &*(lparam as *const RECT);

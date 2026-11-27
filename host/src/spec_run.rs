@@ -532,7 +532,8 @@ impl App {
                 } else {
                     let expected = if kind == "image" { "asset-image" } else { kind };
                     matches!(&node.kind, Kind::Element(tag) if tag.strip_prefix("ui-") == Some(expected)
-                        || (expected == "checkbox" && tag == "ui-aggregate-checkbox"))
+                        || (expected == "checkbox" && tag == "ui-aggregate-checkbox")
+                        || (expected == "text-area" && tag == "textarea"))
                         && (label.is_empty()
                             || self.surface.spec_label(key, kind).as_deref() == Some(label))
                 };

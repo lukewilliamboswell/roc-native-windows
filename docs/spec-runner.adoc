@@ -26,12 +26,16 @@ a fresh process. Each failure names the spec and step. The CLI must match
 the runner protocol in the platform bundle. On Windows on Arm, an x64 Roc
 process can test an ARM64 build with `test --target arm64mingw`.
 
-Selectors look up `button`, `checkbox`, `text-field`, `text`,
-`file-button`, `image`, `combo-box`, `list-box` and `radio-group`. Use `(within OUTER INNER)` to narrow a
+Selectors look up `button`, `checkbox`, `text-field`, `text-area`, `text`,
+`file-button`, `folder-button`, `image`, `combo-box`, `list-box`, and `radio-group`.
+Use `(within OUTER INNER)` to narrow a
 selector to a row or container. An action needs a unique match. Use
 `expect-text`, `expect-visible`, `expect-absent`, `expect-disabled` and
 `expect-checked` to inspect the current control state. Keep control
-assertions independent of pixel output.
+assertions independent of pixel output. `text-area` finds a multiline
+control by its visible label. `expect-text` compares the full text with LF
+line endings. `fill` works on editable areas. Use `"first\nsecond"` for
+multiline content.
 
 Use `(select (combo-box "Status filter") "unread")` to propose a choice and
 `(expect-selection (combo-box "Status filter") "unread")` to assert the current
