@@ -293,7 +293,8 @@ roc! = |args, step| {
 		return Err(CompilerMissing(compiler))
 	}
 	outcome = Cmd.new(OsStr.from_str(compiler)).args(args.map(OsStr.from_str)).inherit_stdio().run!()?
-	check_exit(outcome.status, step)
+	# The pinned Roc compiler exits 2 when its command succeeded with warnings.
+	if (outcome.status == Exited(2)) Ok({}) else check_exit(outcome.status, step)
 }
 
 check_exit = |status, step|
