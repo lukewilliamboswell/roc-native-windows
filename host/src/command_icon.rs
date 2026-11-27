@@ -1,8 +1,9 @@
 use crate::view::{resolve_asset, scale};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Graphics::Gdi::InvalidateRect;
 use windows_sys::Win32::UI::Controls::{
     BCM_SETIMAGELIST, BUTTON_IMAGELIST, BUTTON_IMAGELIST_ALIGN_LEFT, HIMAGELIST, ILC_COLOR32,
     ILC_MASK, ImageList_Create, ImageList_Destroy, ImageList_ReplaceIcon,
@@ -82,10 +83,8 @@ impl ButtonIcon {
             return;
         }
         let padding = scale(dpi, 4);
-        // BCCL_NOGLYPH from commctrl.h clears a button's image list.
-        const NO_GLYPH: HIMAGELIST = -1;
-        let info = BUTTON_IMAGELIST {
-            himl: next.as_ref().map_or(NO_GLYPH, Images::handle),
+        let mut info = BUTTON_IMAGELIST {
+            himl: next.as_ref().map_or(0, Images::handle),
             margin: RECT {
                 left: padding,
                 right: padding,
@@ -94,18 +93,23 @@ impl ButtonIcon {
             },
             uAlign: BUTTON_IMAGELIST_ALIGN_LEFT,
         };
-        // SAFETY: This synchronous message copies the structure. The list
-        // remains live while selected and the prior list is dropped after detaching.
-        if unsafe {
-            SendMessageW(
-                hwnd,
-                BCM_SETIMAGELIST,
-                0,
-                std::ptr::from_ref(&info) as isize,
-            )
-        } != 0
-        {
+        let apply = |info: &BUTTON_IMAGELIST| {
+            // SAFETY: The live button copies this structure synchronously.
+            unsafe {
+                SendMessageW(hwnd, BCM_SETIMAGELIST, 0, std::ptr::from_ref(info) as isize) != 0
+            }
+        };
+        // Clear with a null list when accepted. Older Wine treats the Vista
+        // BCCL_NOGLYPH sentinel as an image-list pointer during paint.
+        let applied = apply(&info)
+            || (next.is_none() && {
+                info.himl = -1;
+                apply(&info)
+            });
+        if applied {
             self.list = next;
+            // SAFETY: The live button now refers to the new list or no list.
+            unsafe { InvalidateRect(hwnd, null(), 1) };
         }
     }
 
