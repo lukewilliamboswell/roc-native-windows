@@ -68,7 +68,8 @@ pub(crate) enum Control {
 impl Control {
     fn from_tag(tag: &str) -> Result<Option<Self>> {
         let control = match tag {
-            "" | "ui-vstack" | "ui-hstack" | "ui-window-content" | "ui-tab-panel" => {
+            "" | "ui-vstack" | "ui-hstack" | "ui-window-content" | "ui-dialog-content"
+            | "ui-tab-panel" => {
                 return Ok(None);
             }
             "ui-window" => return Err("Ui.window must be the single outermost element".into()),
