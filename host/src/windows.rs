@@ -368,11 +368,11 @@ mod native {
                     let measure = entry.surface.dialog_size(tree);
                     modal::position(hwnd, owner_hwnd, measure)?;
                     self.mounted.get_mut(&id).unwrap().surface.arrange(tree)?;
+                    let guard = Modal::begin(owner_hwnd, hwnd);
                     if !self.driven {
-                        let guard = Modal::begin(owner_hwnd, hwnd);
                         guard.show();
-                        self.mounted.get_mut(&id).unwrap().modal = Some(guard);
                     }
+                    self.mounted.get_mut(&id).unwrap().modal = Some(guard);
                 } else if !self.driven {
                     // SAFETY: The validated surface already owns all its native children.
                     unsafe { ShowWindow(hwnd, SW_SHOWNORMAL) };
