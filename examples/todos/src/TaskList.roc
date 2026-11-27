@@ -2,7 +2,7 @@ import pf.Ui
 
 ## Pure task records and the optional due-date policy.
 TaskList := [].{
-	Task : { id : U64, title : Str, done : Bool, due_date : Ui.DateSelection, due_time : Ui.TimeSelection }
+	Task : { id : U64, title : Str, done : Bool, notes : Str, due_date : Ui.DateSelection, due_time : Ui.TimeSelection }
 
 	with_date : Task, Ui.DateSelection -> Task
 	with_date = |task, date|
@@ -91,7 +91,7 @@ schedule_key = |task| {
 expect TaskList.remaining([]) == "0 remaining"
 
 expect {
-	first = { id: 1, title: "First", done: Bool.False, due_date: NoDate, due_time: NoTime }
+	first = { id: 1, title: "First", done: Bool.False, notes: "", due_date: NoDate, due_time: NoTime }
 	second = { ..first, id: 2, title: "Second" }
 	TaskList.update([first, second], 1, |task| { ..task, done: Bool.True }) == [{ ..first, done: Bool.True }, second]
 }
@@ -101,7 +101,7 @@ expect {
 	time = Ui.CivilTime.from_parts({ hour: 9, minute: 15 })
 	match (date, time) {
 		(Ok(day), Ok(clock)) => {
-			first = { id: 1, title: "First", done: Bool.False, due_date: Date(day), due_time: Time(clock) }
+			first = { id: 1, title: "First", done: Bool.False, notes: "", due_date: Date(day), due_time: Time(clock) }
 			second = { ..first, id: 2, title: "Second", due_time: NoTime }
 			TaskList.with_date(first, NoDate) == { ..first, due_date: NoDate, due_time: NoTime }
 				and TaskList.ordered([second, first]) == [first, second]

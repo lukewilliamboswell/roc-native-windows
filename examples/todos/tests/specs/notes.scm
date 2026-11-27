@@ -1,0 +1,16 @@
+(test "save and reopen an optional multiline note"
+  (steps
+    (fill (text-field "New to-do") "First")
+    (click (button "Add"))
+    (expect-absent (text-area "Notes"))
+    (click (button "Notes for First"))
+    (expect-text (text-area "Notes") "")
+    (fill (text-area "Notes") "First line\n  Indented second line")
+    (click (button "Save notes"))
+    (expect-absent (text-area "Notes"))
+    (click (button "Notes for First"))
+    (expect-text (text-area "Notes") "First line\n  Indented second line")
+    (fill (text-area "Notes") "Unsaved change")
+    (click (button "Cancel"))
+    (click (button "Notes for First"))
+    (expect-text (text-area "Notes") "First line\n  Indented second line")))

@@ -7,6 +7,11 @@ import TaskList exposing [Task]
 main : Engine.Program(_)
 main = Engine.program_store({}, |_boot| store, |_boot| view())
 
+NoteEditor : [Closed, Editing({ id : U64, title : Str, draft : Str })]
+
+closed_editor : NoteEditor
+closed_editor = Closed
+
 store = Engine.store(
 	Todos,
 	{
@@ -15,6 +20,7 @@ store = Engine.store(
 		due_time: Engine.cell(NoTime),
 		next_id: Engine.cell(1.U64),
 		todos: Engine.cell([]),
+		note_editor: Engine.cell(closed_editor),
 	}.Engine.Cells,
 )
 
@@ -27,7 +33,7 @@ view = || {
 	due_time = cells.due_time.signal()
 	todos = cells.todos.signal()
 	new_todo = { draft, due_date, due_time, id: cells.next_id.signal() }.Signal.map(
-		|{ draft: text, due_date: date, due_time: time, id }| { id, title: text.trim(), done: Bool.False, due_date: date, due_time: time },
+		|{ draft: text, due_date: date, due_time: time, id }| { id, title: text.trim(), done: Bool.False, notes: "", due_date: date, due_time: time },
 	)
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
@@ -62,6 +68,7 @@ view = || {
 					Ui.time_picker(due_time, { label: "New due time", enabled: due_date.map(TaskList.has_due_date), on_change: Engine.handle(|time| [cells.due_time.set(time)]) }),
 				],
 			),
+			notes_panel(),
 			Engine.each(
 				todos.map(TaskList.ordered),
 				|todo| todo.id.to_str(),
@@ -83,7 +90,11 @@ todo_row = |item| {
 						item.map(|todo| todo.title),
 						{ checked: item.map(|todo| todo.done), on_change: Engine.handle_by(item, |todo, done| update(todo.id, |task| { ..task, done })) },
 					),
-					Ui.button("Remove", { on_press: Engine.handle_by(item, |todo, _| [cells.todos.update(|all| all.keep_if(|t| t.id != todo.id))]) }),
+					Ui.button(
+						item.map(|todo| "Notes for ${todo.title}"),
+						{ on_press: Engine.handle_by(item, |todo, _| [cells.note_editor.set(Editing({ id: todo.id, title: todo.title, draft: todo.notes }))]) },
+					),
+					Ui.button("Remove", { on_press: Engine.handle_by(item, |todo, _| remove(todo.id)) }),
 				],
 			),
 			Ui.hstack(
@@ -110,6 +121,75 @@ todo_row = |item| {
 		],
 	)
 }
+
+notes_panel : () -> Elem(Engine.StoreRoot(_))
+notes_panel = || {
+	editor = cells.note_editor.signal()
+	is_open = editor.map(
+		|current| match current {
+			Closed => Bool.False
+			Editing(_) => Bool.True
+		},
+	)
+	title = editor.map(
+		|current| match current {
+			Closed => ""
+			Editing(fields) => "Notes for ${fields.title}"
+		},
+	)
+	draft = editor.map(
+		|current| match current {
+			Closed => ""
+			Editing(fields) => fields.draft
+		},
+	)
+	Engine.when(
+		is_open,
+		|| Ui.vstack(
+			{},
+			[
+				Ui.text(title),
+				Ui.text_area(draft, { label: "Notes", rows: 4, mode: Editable(Engine.handle(write_note)) }),
+				Ui.hstack(
+					{},
+					[
+						Ui.button("Save notes", { on_press: Engine.handle_by(editor, |current, _| save_note(current)) }),
+						Ui.button("Cancel", { on_press: Engine.handle(|_| [cells.note_editor.set(Closed)]) }),
+					],
+				),
+			],
+		),
+		|| Ui.vstack({}, []),
+	)
+}
+
+write_note : Str -> List(Engine.Write(_))
+write_note = |draft| [
+	cells.note_editor.update(
+		|current| match current {
+			Closed => Closed
+			Editing(fields) => Editing({ ..fields, draft })
+		},
+	),
+]
+
+save_note : NoteEditor -> List(Engine.Write(_))
+save_note = |current|
+	match current {
+		Closed => []
+		Editing(fields) => update(fields.id, |task| { ..task, notes: fields.draft }).append(cells.note_editor.set(Closed))
+	}
+
+remove : U64 -> List(Engine.Write(_))
+remove = |id| [
+	cells.todos.update(|all| all.keep_if(|task| task.id != id)),
+	cells.note_editor.update(
+		|current| match current {
+			Editing(fields) if fields.id == id => Closed
+			_ => current
+		},
+	),
+]
 
 draft_date : Ui.DateSelection -> List(Engine.Write(_))
 draft_date = |date|
