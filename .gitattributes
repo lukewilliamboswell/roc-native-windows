@@ -1,2 +1,5 @@
 /host/glue/RustGlue.roc text eol=lf
 /host/src/roc_platform_abi.rs text eol=lf
+# Specs assert fixture byte counts and digests.
+/examples/*/tests/fixtures/** -text
+/tests/**/fixtures/** -text
