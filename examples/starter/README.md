@@ -2,9 +2,9 @@
 
 Add a title, then select a row and use the toolbar to mark it read or remove it. Double-click a row or press Enter to toggle its read status. Click the Title header to switch between alphabetical and entry order. The list lives in memory for the current session.
 
-- `src/` connects Win32 controls to Roc Signals.
+- `src/main.roc` defines the view, state, and events. `src/ReadingStyle.roc` holds the shared appearance, text, and layout defaults.
 - `logic/` is a Roc package with the reading-list decisions shared by the app and fuzz target.
-- `assets/` holds the bitmap shown in the app.
+- `assets/` holds the artwork and icon shown in the app.
 - `windows.json` sets the MSI identity, version and publisher, plus the name and icon shown in Windows.
 - `tests/specs/` contains a Win32 behaviour test and a recording demo in `.scm` files.
 - `tests/fuzz/` checks reading-list invariants over generated titles.

@@ -3,6 +3,7 @@ assets/reading-list.bmp
 assets/reading-list.ico
 logic/ReadingList.roc
 logic/main.roc
+src/ReadingStyle.roc
 src/main.roc
 tests/fuzz/main.roc
 tests/specs/demo.scm

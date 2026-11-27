@@ -1,5 +1,6 @@
 app [main] { logic: "../logic/main.roc", pf: platform "../../../platform/main.roc" }
 
+import ReadingStyle
 import logic.ReadingList
 import pf.Engine exposing [Elem, Signal]
 import pf.Ui
@@ -22,6 +23,7 @@ cells = store.cells()
 
 view : () -> Elem(Engine.StoreRoot(_))
 view = || {
+	design = ReadingStyle.{}
 	draft = cells.draft.signal()
 	items = cells.items.signal()
 	filter = cells.filter.signal()
@@ -43,21 +45,24 @@ view = || {
 		},
 	)
 	content = Ui.vstack(
-		{ padding: 16, spacing: 12 },
+		design.page,
 		[
 			Ui.hstack(
-				{},
+				design.heading,
 				[
 					Ui.asset_image("reading-list.bmp", { description: Decorative, width: 40, height: 40 }),
-					Ui.text_with("Reading list", { style: Title, tone: AccentText }),
+					Ui.text_with("Reading list", design.page_title),
 				],
 			),
-			Ui.hstack(
-				{},
-				[
-					Ui.text_field(draft, { label: "Title", placeholder: "Add something to read", on_input: Engine.handle(|text| [cells.draft.set(text)]) }),
-					Ui.button("Add", { enabled: draft.map(|text| !text.trim().is_empty()), on_press: Engine.handle_by(draft, |title, _| [change(Add(title)), cells.selected.set(Selected(title.trim())), cells.draft.set("")]) }),
-				],
+			Ui.panel(
+				design.entry_panel,
+				Ui.hstack(
+					design.entry,
+					[
+						Ui.text_field(draft, { label: "Title", placeholder: "Add something to read", on_input: Engine.handle(|text| [cells.draft.set(text)]) }),
+						Ui.button("Add", { enabled: draft.map(|text| !text.trim().is_empty()), on_press: Engine.handle_by(draft, |title, _| [change(Add(title)), cells.selected.set(Selected(title.trim())), cells.draft.set("")]) }),
+					],
+				),
 			),
 			Ui.combo_box({
 				label: "Status filter",
@@ -146,7 +151,7 @@ view = || {
 	unread_count = items.map(|list| "${ReadingList.remaining(list).to_str()} unread")
 	Ui.window(
 		{
-			appearance: { accent: CustomAccent({ red: 123, green: 75, blue: 42 }) },
+			appearance: design.appearance,
 			status_bar: StatusBar({ text: visible_count, trailing: [{ text: unread_count }] }),
 		},
 		content,

@@ -1,6 +1,7 @@
 app [main] { pf: platform "../../../platform/main.roc" }
 
 import Stock
+import StockStyle
 import pf.Engine exposing [Elem, Signal]
 import pf.Ui
 import pf.Worker
@@ -86,24 +87,25 @@ paste_updates = |table, query, page, batch| {
 
 view : () -> Elem(Engine.StoreRoot(_))
 view = || {
+	design = StockStyle.{}
 	query = { reverse: cells.reverse.signal(), mismatches: cells.mismatches.signal() }.Signal.map(|value| value)
 	page = cells.second_page.signal()
 	window = page.map(|second| { start: if (second) 3 else 0, count: 3 })
 	job = cells.job.signal()
 	paste_context = { table: cells.counts.signal(), query, page }.Signal.map(|value| value)
-	Ui.vstack(
-		{ padding: 16, spacing: 12 },
+	content = Ui.vstack(
+		design.page,
 		[
 			Ui.hstack(
-				{ spacing: 12 },
+				design.commands,
 				[
 					Ui.asset_image("workers.bmp", { description: Decorative, width: 28, height: 28 }),
-					Ui.text_with("Stock count reconciliation", { style: Heading }),
+					Ui.text_with("Stock count reconciliation", design.title),
 				],
 			),
-			Ui.text_with("Edit a Counted cell with Enter or F2. Hold Shift and use the arrows to select a range for Ctrl+V.", { style: Caption, tone: SecondaryText }),
+			Ui.text_with("Edit a Counted cell with Enter or F2. Hold Shift and use the arrows to select a range for Ctrl+V.", design.metadata),
 			Ui.hstack(
-				{},
+				design.commands,
 				[
 					Ui.button("Reverse order", { on_press: Engine.handle(|_| [cells.reverse.update(|reverse| !reverse)]) }),
 					Ui.button(
@@ -165,7 +167,7 @@ view = || {
 				),
 			),
 			Ui.hstack(
-				{},
+				design.commands,
 				[
 					Ui.button(
 						"Reconcile",
@@ -192,12 +194,12 @@ view = || {
 				],
 			),
 			Ui.panel(
-				{ width: Fill },
+				design.results_panel,
 				Ui.vstack(
-					{},
+					design.results,
 					[
-						Ui.status_text(cells.status.signal(), { text: { tone: AccentText } }),
-						variance_meter(cells.variance.signal()),
+						Ui.status_text(cells.status.signal(), { text: design.summary }),
+						variance_meter(design, cells.variance.signal()),
 					],
 				),
 			),
@@ -220,13 +222,14 @@ view = || {
 			),
 		],
 	)
+	Ui.window({ appearance: design.appearance }, content)
 }
 
-variance_meter : Signal(ctx, Variance) -> Elem(ctx)
-variance_meter = |variance| Engine.when(
+variance_meter : StockStyle, Signal(ctx, Variance) -> Elem(ctx)
+variance_meter = |design, variance| Engine.when(
 	variance.map(|value| value != NoSnapshot),
 	|| Ui.vstack(
-		{ spacing: 4 },
+		design.results,
 		[
 			Ui.text_with(
 				variance.map(
@@ -235,7 +238,7 @@ variance_meter = |variance| Engine.when(
 						Measured({ total, different }) => "${different.to_str()} of ${total.to_str()} submitted lines differ"
 					},
 				),
-				{ style: Caption, tone: SecondaryText },
+				design.metric,
 			),
 			Ui.shader_view({
 				description: Described({ label: "Share of submitted lines with a count variance" }),
