@@ -634,6 +634,8 @@ spec_step = |expr| {
 		| ("paste-grid", [locator, Quoted(value, _)])
 		| ("expect-text", [locator, Quoted(value, _)])
 		| ("select", [locator, Quoted(value, _)])
+		| ("expand", [locator, Quoted(value, _)])
+		| ("collapse", [locator, Quoted(value, _)])
 		| ("expect-selection", [locator, Quoted(value, _)])
 		|
 			("select-row", [locator, Quoted(value, _)])
@@ -691,6 +693,15 @@ spec_step = |expr| {
 			parts = spec_locator(locator)?
 			encoded = spec_progress(value)?
 			Ok(parts.append(encoded))
+		}
+		("expect-expanded", [locator, Quoted(key, _), value]) => {
+			parts = spec_locator(locator)?
+			word = match value {
+				Word("true", _) | Word("#t", _) => Ok("true")
+				Word("false", _) | Word("#f", _) => Ok("false")
+				_ => Err(spec_error(spec_position(value), "Expected true or false"))
+			}?
+			Ok(parts.concat([key, word]))
 		}
 		("expect-checked", [locator, value]) | ("expect-disabled", [locator, value]) => {
 			parts = spec_locator(locator)?
@@ -820,7 +831,7 @@ spec_locator = |expr| {
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button", "tree-view"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?

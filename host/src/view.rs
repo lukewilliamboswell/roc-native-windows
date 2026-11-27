@@ -5,6 +5,7 @@ use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
 use crate::progress::{Progress, native::ProgressBar};
 use crate::toolbar::Toolbar;
+use crate::tree_view::{TreeIntent, TreeProjection};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::window_chrome::{WindowDeclaration, native::StatusBar};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
@@ -21,10 +22,12 @@ use windows_sys::Win32::System::SystemServices::{
     SS_BITMAP, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX,
 };
 use windows_sys::Win32::UI::Controls::{
-    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, CCS_NODIVIDER, CCS_NOPARENTALIGN, CCS_NORESIZE,
-    DTS_SHORTDATEFORMAT, DTS_SHOWNONE, DTS_TIMEFORMAT, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL,
-    LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL, SetScrollInfo, TBSTYLE_FLAT, TBSTYLE_LIST,
-    TBSTYLE_WRAPABLE, TCM_ADJUSTRECT, TOOLBARCLASSNAMEW, WC_TABCONTROLW,
+    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, CCM_SETUNICODEFORMAT, CCS_NODIVIDER,
+    CCS_NOPARENTALIGN, CCS_NORESIZE, DTS_SHORTDATEFORMAT, DTS_SHOWNONE, DTS_TIMEFORMAT,
+    EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
+    SetScrollInfo, TBSTYLE_FLAT, TBSTYLE_LIST, TBSTYLE_WRAPABLE, TCM_ADJUSTRECT, TOOLBARCLASSNAMEW,
+    TVM_GETITEMHEIGHT, TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT,
+    TVS_SHOWSELALWAYS, WC_TABCONTROLW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -55,6 +58,7 @@ pub(crate) enum Control {
     Tabs,
     ProgressBar,
     Toolbar,
+    TreeView,
 }
 
 impl Control {
@@ -83,6 +87,7 @@ impl Control {
             "ui-tabs" => Self::Tabs,
             "ui-progress-bar" => Self::ProgressBar,
             "ui-toolbar" => Self::Toolbar,
+            "ui-tree-view" => Self::TreeView,
             _ => return Err(format!("unsupported native control {tag}")),
         };
         Ok(Some(control))
@@ -119,6 +124,7 @@ impl Control {
                 | Self::ListView
                 | Self::DataGrid
                 | Self::Tabs
+                | Self::TreeView
                 | Self::ProgressBar
                 | Self::ListBox
                 | Self::ComboBox
@@ -183,6 +189,16 @@ impl Control {
                 WS_TABSTOP | DTS_SHOWNONE | DTS_TIMEFORMAT,
             ),
             Self::Tabs => (0, WC_TABCONTROLW, WS_TABSTOP | WS_CLIPSIBLINGS),
+            Self::TreeView => (
+                WS_EX_CLIENTEDGE,
+                WC_TREEVIEWW,
+                WS_TABSTOP
+                    | TVS_HASLINES
+                    | TVS_LINESATROOT
+                    | TVS_HASBUTTONS
+                    | TVS_SHOWSELALWAYS
+                    | TVS_DISABLEDRAGDROP,
+            ),
         }
     }
 }
@@ -196,6 +212,7 @@ struct View {
     image: HBITMAP,
     rendered_image: Option<(String, i32, i32)>,
     choices: Choices,
+    tree: TreeProjection,
     tab_owner: Option<Key>,
     combo_position: Option<(HWND, i32, i32, i32, i32)>,
     list_view: Option<ListView>,
@@ -221,6 +238,10 @@ impl View {
     fn new(window: HWND, font: HFONT, kind: Control) -> Result<Self> {
         let (ex, class, style) = kind.class();
         let handle = child(window, font, ex, class, style)?;
+        if kind == Control::TreeView {
+            // SAFETY: Configure wide notifications before inserting any items.
+            unsafe { SendMessageW(handle, CCM_SETUNICODEFORMAT, 1, 0) };
+        }
         if kind.is_edit() {
             // SAFETY: The new HWND belongs to this thread, with a static callback.
             if unsafe {
@@ -264,6 +285,7 @@ impl View {
             image: null_mut(),
             rendered_image: None,
             choices: Choices::default(),
+            tree: TreeProjection::default(),
             tab_owner: None,
             combo_position: None,
             list_view,
@@ -538,9 +560,57 @@ impl Surface {
         let view = self
             .views
             .get(&key)
-            .filter(|view| view.kind.is_choice())
-            .ok_or("expect-selection requires a choice control")?;
+            .ok_or("locator is not a native control")?;
+        if view.kind == Control::TreeView {
+            return Ok(view.tree.selected(view.handle));
+        }
+        if !view.kind.is_choice() {
+            return Err("expect-selection requires a choice control".into());
+        }
         Ok(view.choices.selected_key(view.handle, view.kind))
+    }
+
+    pub(crate) fn tree_notification(
+        &mut self,
+        key: Key,
+        code: u32,
+        item: isize,
+        action: u32,
+    ) -> bool {
+        self.views
+            .get_mut(&key)
+            .is_some_and(|view| view.tree.capture(code, item, action))
+    }
+
+    pub(crate) fn tree_intent(&mut self, key: Key) -> Option<TreeIntent> {
+        self.views.get_mut(&key)?.tree.take_intent()
+    }
+
+    pub(crate) fn spec_tree_select(&self, key: Key, selected: &str) -> Result<Option<TreeIntent>> {
+        let view = self.spec_tree(key)?;
+        view.tree.propose_selection(view.handle, selected)
+    }
+
+    pub(crate) fn spec_tree_expand(
+        &self,
+        key: Key,
+        item: &str,
+        expanded: bool,
+    ) -> Result<Option<TreeIntent>> {
+        let view = self.spec_tree(key)?;
+        view.tree.propose_expansion(view.handle, item, expanded)
+    }
+
+    pub(crate) fn spec_tree_expanded(&self, key: Key, item: &str) -> Result<bool> {
+        let view = self.spec_tree(key)?;
+        view.tree.expanded(view.handle, item)
+    }
+
+    fn spec_tree(&self, key: Key) -> Result<&View> {
+        self.views
+            .get(&key)
+            .filter(|view| view.kind == Control::TreeView)
+            .ok_or_else(|| "operation requires a tree view".into())
     }
 
     pub(crate) fn kind(&self, key: Key) -> Control {
@@ -759,6 +829,7 @@ impl Surface {
                 }
             }
             kind if kind.is_choice() => view.choices.restore(view.handle, kind),
+            Control::TreeView => view.tree.restore(view.handle),
             _ => {}
         }
         if let (Some(mode), Some(value)) = (view.kind.civil(), view.props.civil) {
@@ -924,7 +995,9 @@ impl Surface {
                         node.attr("title").unwrap_or("").into()
                     }
                     Control::Edit => node.attr("value").unwrap_or("").into(),
-                    Control::RadioGroup | Control::Tabs => node.attr("label").unwrap_or("").into(),
+                    Control::RadioGroup | Control::Tabs | Control::TreeView => {
+                        node.attr("label").unwrap_or("").into()
+                    }
                     Control::TextArea => canonical_lines(node.attr("value").unwrap_or("")),
                     Control::Image | Control::Toolbar => node.attr("label").unwrap_or("").into(),
                     _ => tree.caption(key),
@@ -960,6 +1033,10 @@ impl Surface {
                 if kind == Control::ProgressBar {
                     let requested = Progress::parse(node.attr("progress").unwrap_or("idle"))?;
                     view.progress.update(view.handle, requested);
+                }
+                if kind == Control::TreeView {
+                    view.tree.sync(view.handle, tree, key)?;
+                    return Ok(());
                 }
                 if kind.is_choice() {
                     view.choices.sync(view.handle, self.font, kind, tree, key)?;
@@ -1421,6 +1498,13 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
                 + if view.grid.is_some() { dip(22) } else { 0 },
         ),
         Control::Tabs => unreachable!("tab containers lay out their panels separately"),
+        Control::TreeView => (
+            max_width,
+            // SAFETY: This measures a live native tree using the current UI font.
+            (unsafe { SendMessageW(view.handle, TVM_GETITEMHEIGHT, 0, 0) } as i32).max(dip(16))
+                * number(node, "visible-rows", 8).clamp(1, 100)
+                + dip(if view.props.label.is_empty() { 4 } else { 25 }),
+        ),
         Control::Image => (
             dip(number(node, "width", 128)).max(1),
             dip(number(node, "height", 96)).max(1),

@@ -3,6 +3,7 @@ use crate::civil::{self, Value as CivilValue};
 use crate::effects::{Effects, SpecOptions};
 use crate::grid::Intent as GridIntent;
 use crate::taskbar::native::Taskbar;
+use crate::tree_view::TreeIntent;
 use crate::view::{Surface, wide};
 use crate::window_icons::WindowIcons;
 use crate::wire::{Declarations, EFFECT_NODE, Key, Reader, Tree};
@@ -28,10 +29,11 @@ use windows_sys::Win32::System::Time::{
 };
 use windows_sys::Win32::UI::Controls::{
     DTN_DATETIMECHANGE, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_LISTVIEW_CLASSES,
-    ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX,
-    InitCommonControlsEx, LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK, LVN_ENDSCROLL,
-    LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RETURN, NMCUSTOMDRAW, NMHDR,
-    NMITEMACTIVATE, NMLISTVIEW, TCN_SELCHANGE,
+    ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, ICC_TAB_CLASSES, ICC_TREEVIEW_CLASSES,
+    INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK,
+    LVN_ENDSCROLL, LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RETURN, NMCUSTOMDRAW,
+    NMHDR, NMITEMACTIVATE, NMLISTVIEW, NMTREEVIEWW, TCN_SELCHANGE, TVN_ITEMEXPANDEDW,
+    TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_LEFT, VK_MENU,
@@ -323,6 +325,11 @@ impl App {
         Ok(())
     }
 
+    fn tree_event(&mut self, key: crate::wire::Key, intent: TreeIntent) -> Result<()> {
+        let (event, payload) = intent.event();
+        self.control_event(key, event, payload)
+    }
+
     fn control_event(
         &mut self,
         key: crate::wire::Key,
@@ -594,6 +601,7 @@ impl App {
 }
 
 pub(crate) const APPLY_PENDING_EDIT: u32 = WM_APP + 3;
+const APPLY_TREE_INTENT: u32 = WM_APP + 5;
 
 fn read_reference(op: u8, reader: &mut Reader<'_>) -> Result<()> {
     match op {
@@ -738,7 +746,8 @@ fn run() -> Result<()> {
                 | ICC_LISTVIEW_CLASSES
                 | ICC_TAB_CLASSES
                 | ICC_PROGRESS_CLASS
-                | ICC_BAR_CLASSES,
+                | ICC_BAR_CLASSES
+                | ICC_TREEVIEW_CLASSES,
         };
         if InitCommonControlsEx(&controls) == 0 {
             return Err(last_error("initialize Windows common controls"));
@@ -915,7 +924,8 @@ unsafe extern "system" fn window_proc(
         }
         match message {
             WM_COMMAND | WM_NOTIFY | REPORT_EVENTS | GRID_EVENTS | WM_SIZE | WM_TIMER
-            | WM_DPICHANGED | WM_VSCROLL | WM_MOUSEWHEEL | WM_DROPFILES | APPLY_PENDING_EDIT => {
+            | WM_DPICHANGED | WM_VSCROLL | WM_MOUSEWHEEL | WM_DROPFILES | APPLY_PENDING_EDIT
+            | APPLY_TREE_INTENT => {
                 let paths = (message == WM_DROPFILES).then(|| paths_from_drop(wparam as HDROP));
                 let handled = APP.with(|state| {
                     let Ok(mut state) = state.try_borrow_mut() else {
@@ -936,10 +946,31 @@ unsafe extern "system" fn window_proc(
                                 app.command(source, notification)?;
                             }
                         }
+                        APPLY_TREE_INTENT => {
+                            if let Some(intent) = app.surface.tree_intent(wparam) {
+                                app.tree_event(wparam, intent)?;
+                            }
+                        }
                         APPLY_PENDING_EDIT => app.surface.settle_edit(lparam as HWND),
                         WM_NOTIFY if lparam != 0 && !app.driven => {
                             let header = &*(lparam as *const NMHDR);
                             match header.code {
+                                TVN_SELCHANGEDW | TVN_ITEMEXPANDINGW | TVN_ITEMEXPANDEDW => {
+                                    if let Some(key) = app.surface.key(header.hwndFrom)
+                                        && app.surface.kind(key) == crate::view::Control::TreeView
+                                    {
+                                        let native = &*(lparam as *const NMTREEVIEWW);
+                                        if app.surface.tree_notification(
+                                            key,
+                                            header.code,
+                                            native.itemNew.hItem,
+                                            native.action,
+                                        ) && PostMessageW(hwnd, APPLY_TREE_INTENT, key, 0) == 0
+                                        {
+                                            return Err(last_error("dispatch native tree intent"));
+                                        }
+                                    }
+                                }
                                 TCN_SELCHANGE => app.notify(header.hwndFrom, header.code)?,
                                 DTN_DATETIMECHANGE => {
                                     if let Some(key) = app.surface.key(header.hwndFrom)

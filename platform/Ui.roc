@@ -396,6 +396,68 @@ Ui := [].{
 			props.choices.map(static_choice),
 		)
 
+	## A keyed tree item. The list order defines the order of siblings.
+	TreeNode := { key : Str, label : Str, parent : [Root, ChildOf(Str)] }
+
+	Expansion : [Expanded, Collapsed]
+	TreeExpansion : { key : Str, expansion : Expansion }
+
+	TreeViewProps(ctx) := {
+		label : Str,
+		nodes : Signal(ctx, List(TreeNode)),
+		selected : Signal(ctx, Selection),
+		on_select : HandlerOf(ctx, Selection),
+		expanded : Signal(ctx, Set(Str)),
+		on_expand : HandlerOf(ctx, TreeExpansion),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+		visible_rows : U32 ?? 8,
+	}
+
+	## A tree with controlled selection and expansion.
+	tree_view : TreeViewProps(ctx) -> Elem(ctx)
+	tree_view = |props| {
+		nodes = { nodes: props.nodes, expanded: props.expanded }.Signal.map(|{ nodes: items, expanded }|
+			items.map(|item| {
+				key: item.key,
+				label: item.label,
+				parent: match item.parent {
+					Root => ""
+					ChildOf(key) => "1${key}"
+				},
+				expanded: expanded.contains(item.key),
+			}),
+		)
+		Engine.element(
+			"ui-tree-view",
+			[
+				Engine.attr("label", props.label),
+				Engine.attr("visible-rows", props.visible_rows.to_str()),
+				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.attr_s("selected", props.selected.map(selection_key)),
+				Engine.on("change", props.on_select.from_payload_by(Engine.const({}), |_, key| selection_from_key(key))),
+				Engine.on("expand", props.on_expand.from_payload_by(Engine.const({}), |_, payload| {
+					key: payload.drop_prefix(if (payload.starts_with("1")) "1" else "0"),
+					expansion: if (payload.starts_with("1")) Expanded else Collapsed,
+				})),
+			],
+			[
+				Engine.each(nodes, |item| item.key, |row| {
+					node = row.item()
+					Engine.element(
+						"ui-tree-node",
+						[
+							Engine.attr_s("key", node.map(|item| item.key)),
+							Engine.attr_s("label", node.map(|item| item.label)),
+							Engine.attr_s("parent", node.map(|item| item.parent)),
+							Engine.attr_s("expanded", node.map(|item| bool_word(item.expanded))),
+						],
+						[],
+					)
+				}),
+			],
+		)
+	}
+
 	## A native tab strip with an app-owned selection and active page.
 	TabsProps(ctx) := {
 		label : Str,

@@ -32,6 +32,10 @@ mod spec_plan;
 mod taskbar;
 #[cfg(any(test, windows))]
 mod toolbar;
+#[cfg(any(test, windows))]
+mod tree_model;
+#[cfg(windows)]
+mod tree_view;
 #[cfg(windows)]
 mod view;
 #[cfg(windows)]

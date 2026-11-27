@@ -392,7 +392,7 @@ impl App {
                 "click" | "fill" | "toggle" | "press-enter" | "expect-visible" | "expect-absent"
                 | "expect-text" | "expect-checked" | "expect-disabled" | "select"
                 | "expect-selection" | "set-date" | "expect-date" | "set-time" | "expect-time"
-                | "expect-progress",
+                | "expect-progress" | "expand" | "collapse" | "expect-expanded",
                 _,
             ) => self.control_step(step),
             (
@@ -522,6 +522,28 @@ impl App {
                 } else {
                     expect(actual, CivilValue::parse(mode, value)?)
                 }
+            }
+            ("expect-expanded", [item, value]) => {
+                expect(self.surface.spec_tree_expanded(key, item)?, number(value)?)
+            }
+            ("expand" | "collapse", [item]) => {
+                if self.surface.spec_disabled(key)? {
+                    return Err("control is disabled".into());
+                }
+                let intent = self
+                    .surface
+                    .spec_tree_expand(key, item, step.command == "expand")?;
+                intent.map_or(Ok(()), |intent| self.tree_event(key, intent))
+            }
+            ("select", [value])
+                if self.surface.spec_handle(key).is_some()
+                    && self.surface.kind(key) == Control::TreeView =>
+            {
+                if self.surface.spec_disabled(key)? {
+                    return Err("control is disabled".into());
+                }
+                let intent = self.surface.spec_tree_select(key, value)?;
+                intent.map_or(Ok(()), |intent| self.tree_event(key, intent))
             }
             ("click" | "fill" | "toggle" | "select", _) => {
                 if self.surface.spec_disabled(key)? {
