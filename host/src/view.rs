@@ -550,6 +550,7 @@ impl Drop for View {
     fn drop(&mut self) {
         drop(self.semantics.take());
         drop(self.native_name.take());
+        drop(self.civil_edit.take());
         drop(self.picture.take());
         drop(self.grid.take());
         // SAFETY: Children are owned by this surface and were created on
@@ -966,6 +967,9 @@ impl Surface {
         for view in self.views.values_mut() {
             if let Some(semantics) = &mut view.semantics {
                 semantics.announce();
+            }
+            if let Some(editor) = &mut view.civil_edit {
+                editor.announce_help();
             }
             if let Some(shader) = &mut view.shader {
                 shader.poll(self.window);

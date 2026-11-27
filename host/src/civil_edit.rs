@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::accessibility::NativeHelp;
 use crate::civil::{self, CivilFormat, Kind, Value};
 use crate::style::native::{Paint, StyledWindow};
 use crate::view::{child, composing, set_text, wide, window_text};
@@ -23,6 +24,7 @@ pub(crate) struct CivilEdit {
     committed: Value,
     invalid: bool,
     help: String,
+    native_help: NativeHelp,
     pub(crate) note: HWND,
     pub(crate) chooser: Option<HWND>,
     note_style: Option<StyledWindow>,
@@ -36,6 +38,7 @@ impl CivilEdit {
             committed: Value::Unset,
             invalid: false,
             help: String::new(),
+            native_help: NativeHelp::new(edit)?,
             note: child(parent, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?,
             note_style: None,
             chooser: None,
@@ -144,6 +147,10 @@ impl CivilEdit {
         &self.help
     }
 
+    pub(crate) fn announce_help(&mut self) {
+        self.native_help.announce();
+    }
+
     pub(crate) fn invalid(&self) -> bool {
         self.invalid
     }
@@ -161,6 +168,7 @@ impl CivilEdit {
         };
         if self.help != help {
             set_text(self.note, &help);
+            self.native_help.update(&help);
             self.help = help;
         }
         let cue = wide(&example);

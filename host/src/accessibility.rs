@@ -73,6 +73,89 @@ pub(crate) struct NativeName {
     related: bool,
 }
 
+/// The native EDIT proxy does not consistently expose dynamically annotated
+/// HelpText. Supply that property while leaving its native patterns available.
+pub(crate) struct NativeHelp {
+    text: Arc<Mutex<Option<String>>>,
+    mount: Mount,
+    announced: String,
+}
+
+impl NativeHelp {
+    pub(crate) fn new(hwnd: RawHwnd) -> Result<Self> {
+        let text = Arc::new(Mutex::new(Some(String::new())));
+        let provider: SimpleAbi = HelpProvider {
+            hwnd: hwnd as usize,
+            text: Arc::clone(&text),
+        }
+        .into();
+        Ok(Self {
+            text,
+            mount: Mount::new(hwnd, provider.into_provider())?,
+            announced: String::new(),
+        })
+    }
+
+    pub(crate) fn update(&self, details: &str) {
+        *self.text.lock().unwrap() = Some(details.to_owned());
+    }
+
+    pub(crate) fn announce(&mut self) {
+        if !self.mount.events_allowed() {
+            return;
+        }
+        let details = self.text.lock().unwrap().clone().unwrap_or_default();
+        if self.announced != details {
+            text_changed(
+                self.mount.provider(),
+                UIA_HelpTextPropertyId,
+                &self.announced,
+                &details,
+            );
+            self.announced = details;
+        }
+    }
+}
+
+impl Drop for NativeHelp {
+    fn drop(&mut self) {
+        *self.text.lock().unwrap() = None;
+    }
+}
+
+#[implement(SimpleAbi)]
+struct HelpProvider {
+    hwnd: usize,
+    text: Arc<Mutex<Option<String>>>,
+}
+
+impl IRawElementProviderSimple_Impl for HelpProvider_Impl {
+    fn ProviderOptions(&self) -> windows::core::Result<ProviderOptions> {
+        Ok(ProviderOptions_ServerSideProvider | ProviderOptions_OverrideProvider)
+    }
+
+    fn GetPatternProvider(&self, _: UIA_PATTERN_ID) -> windows::core::Result<IUnknown> {
+        Err(Error::from_hresult(E_NOINTERFACE))
+    }
+
+    fn GetPropertyValue(&self, id: UIA_PROPERTY_ID) -> windows::core::Result<VARIANT> {
+        let text = self.text.lock().unwrap();
+        let text = text.as_deref().ok_or_else(unavailable)?;
+        Ok(match id {
+            UIA_HelpTextPropertyId => string(text),
+            _ => VARIANT::default(),
+        })
+    }
+
+    fn HostRawElementProvider(&self) -> windows::core::Result<IRawElementProviderSimple> {
+        if self.text.lock().unwrap().is_none() {
+            return Err(unavailable());
+        }
+        // SAFETY: The provider is mounted on this EDIT HWND. UIA validates it.
+        unsafe { UiaHostProviderFromHwnd(HWND(self.hwnd as _)) }
+    }
+}
+
 impl NativeName {
     pub(crate) fn annotate(hwnd: RawHwnd, name: &str, current: &mut Option<Self>) {
         if name.trim().is_empty() {
