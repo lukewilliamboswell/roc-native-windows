@@ -313,8 +313,8 @@ public static class RocWindowsAccessibility
         private readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 48393);
         private readonly Thread worker;
         public string Url { get; private set; }
-        public ManualResetEvent RequestReceived { get; private set; } = new ManualResetEvent(false);
-        public ManualResetEvent Complete { get; private set; } = new ManualResetEvent(false);
+        public readonly ManualResetEvent RequestReceived = new ManualResetEvent(false);
+        public readonly ManualResetEvent Complete = new ManualResetEvent(false);
 
         public LoopbackResponse()
         {

@@ -37,6 +37,7 @@ if (-not $Example) {
 }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $env:ROC_WINDOWS_ROC = $Roc
+$failures = @()
 
 foreach ($name in $Example) {
     $directory = Join-Path $repo "examples/$name"
@@ -58,6 +59,7 @@ foreach ($name in $Example) {
                 "-NoProfile", "-Mta", "-File", ('"' + $PSCommandPath + '"'),
                 "-AppPid", $app.Id, "-Check", $name
             ) -NoNewWindow -PassThru
+            [void] $probe.Handle
             if (-not $probe.WaitForExit(45000)) { throw "$name's UI Automation client exceeded 45 seconds." }
             if ($probe.ExitCode -ne 0) { throw "$name's UI Automation client exited with code $($probe.ExitCode)." }
             Write-Output "PASS $name accessibility ($Target)"
@@ -68,7 +70,13 @@ foreach ($name in $Example) {
                 if (-not $app.WaitForExit(2000)) { $app.Kill() }
             }
         }
+    } catch {
+        $failures += "$name ($Target): $_"
     } finally {
         Pop-Location
     }
+}
+
+if ($failures.Count -gt 0) {
+    throw "UI Automation verification failed:`n$($failures -join "`n")"
 }
