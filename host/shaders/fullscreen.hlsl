@@ -1,8 +1,8 @@
 // Vertex shader for the platform-owned three-vertex fullscreen draw.
 // fxc /T vs_5_0 /E main /Fo host/shaders/fullscreen.cso host/shaders/fullscreen.hlsl
 struct VertexOutput {
-    float4 position : SV_Position;
     float2 uv : TEXCOORD0;
+    float4 position : SV_Position;
 };
 
 VertexOutput main(uint vertex : SV_VertexID) {

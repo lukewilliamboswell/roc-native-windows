@@ -280,6 +280,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fullscreen_program_places_normalized_coordinates_in_register_zero() {
+        let chunks = chunks(include_bytes!("../shaders/fullscreen.cso")).unwrap();
+        let signature = chunks[b"OSGN"];
+        let entries = table(signature, 8, word(signature, 0).unwrap(), 24, 2).unwrap();
+        let uv = entries[0];
+        assert_eq!(name(signature, word(uv, 0).unwrap()).unwrap(), "TEXCOORD");
+        assert_eq!(word(uv, 16).unwrap(), 0);
+    }
+
+    #[test]
     fn reads_named_constants_and_texture_slots_from_compiled_examples() {
         let contrast = Reflection::read(include_bytes!(
             "../../examples/files/assets/scan-contrast.cso"
