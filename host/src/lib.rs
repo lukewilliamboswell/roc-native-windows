@@ -40,6 +40,8 @@ mod progress;
 mod raster;
 #[cfg(windows)]
 mod raster_bridge;
+#[cfg(any(test, windows))]
+mod regional;
 #[cfg(windows)]
 #[allow(clippy::all)]
 mod roc_platform_abi;
@@ -53,6 +55,8 @@ mod slider;
 mod spec_effects;
 #[cfg(any(test, windows))]
 mod spec_plan;
+#[cfg(any(test, windows))]
+mod spec_regional;
 #[cfg(any(test, windows))]
 mod style;
 #[cfg(any(test, windows))]

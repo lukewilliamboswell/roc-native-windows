@@ -81,6 +81,53 @@ action even when two consecutive copies have the same text. Native edit
 controls also support their usual Windows clipboard shortcuts.
 
 [#ship-a-windows-app]
+== Read time and regional settings
+
+`boot.now_ms` and `Engine.timer(0)` provide signed Unix milliseconds.
+`Engine.interval(milliseconds)` uses a monotonic schedule and samples the
+Windows wall clock on each tick. For elapsed time, request
+`System.monotonic({})` at both ends and call
+`later.elapsed_ms_since(earlier)`. Marks are meaningful only during the
+current app process. Equal millisecond marks are valid, and reversing
+the order returns `OutOfOrder`.
+
+`boot.languages` contains the user's ordered Windows display languages.
+Use `System.regional_settings({})` for the separate formatting locale
+and optional Windows time-zone key. For local offsets, use
+`boot.zone.offset_at(unix_ms)` and handle `OutsideZone` by requesting a
+fresh `Engine.environment({})` snapshot. The zone table uses minutes
+east of UTC and has inclusive bounds. Windows zone keys are provided in
+regional settings. At boot, Windows may supply coverage for only the
+sample instant when extended rules are unavailable. If that offset
+cannot be read, boot logs a diagnostic and uses UTC. A failed refresh
+returns `Refused`. Use `Engine.utc` when the app wants an explicit
+UTC policy.
+
+`System.format_timestamps(instants, {})` formats up to 64 timestamps
+using the local time zone and the Windows short date format by default.
+Pass `{ zone: Utc, date: LongDate }` to choose both options explicitly.
+The returned date and time are presentation strings. Keep the original
+timestamps for storage and comparison. The formatting call returns
+`OutsideRange` for an unsupported calendar date, `TooLarge` for an
+oversized batch, and `Unavailable` or `Refused` if it cannot provide a
+result. Regional settings and monotonic requests report `Unavailable`
+or `Refused`.
+
+`System.secure_random(count)` draws up to 65,536 bytes from Windows CNG.
+Zero returns an empty list. Handle `TooLarge`, `Unavailable`, and
+`Refused` explicitly. The HTTP example asks for 16 bytes for each
+request and still offers Copy request details when the reference is
+unavailable.
+
+These services read the clock, language and format preferences, and OS
+entropy for the current app. They need no external-resource grant and
+give the app no ability to change settings or query machine or account
+identity. Bound checks precede native allocation and are repeated in
+the host for raw requests. Region and time-zone refreshes run on a
+worker and only the current effect can deliver a response. Regional
+facts, timestamps, and bytes stay in the app until it chooses to share
+them. Clipboard export is a separate user action.
+
 == Package an app for distribution
 
 Set app and MSI metadata in `windows.json` at the app root, beside `windows.roc`.

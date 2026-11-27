@@ -596,7 +596,7 @@ spec_setup = |expr| {
 	at = spec_position(expr)
 	(op, fields) = match expr {
 		Form([Word("live-effects", _)], _) => Ok(("setup-live-effects", []))
-		Form([Word("live-effects", _), Word(scope, _)], _) if ["http", "time"].contains(scope) => Ok(("setup-live-effects", [scope]))
+		Form([Word("live-effects", _), Word(scope, _)], _) if ["http", "time", "entropy"].contains(scope) => Ok(("setup-live-effects", [scope]))
 		Form([Word("window-size", _), width, height], _) => {
 			w = spec_number(width, "window width", 1, 3840)?
 			h = spec_number(height, "window height", 1, 2160)?
@@ -606,6 +606,7 @@ spec_setup = |expr| {
 			time = spec_number(value, "clock time", -9223372036854775808, 9223372036854775807)?
 			Ok(("setup-initial-time", [time]))
 		}
+		Form([Word("regional-fixture", _), Quoted(path, _)], _) => Ok(("setup-regional-fixture", [path]))
 		Form([Word("worker-pool", _), value], _) => {
 			count = spec_number(value, "worker limit", 1, 32)?
 			Ok(("setup-worker-pool", [count]))
@@ -782,6 +783,14 @@ spec_step = |expr| {
 			spec_number(value, "effect number", 1, 4294967295).map_ok(|number| [number])
 		("tick-interval", [value]) | ("fire-timer", [value]) =>
 			spec_number(value, "period in milliseconds", 1, 4294967295).map_ok(|number| [number])
+		("set-wall-time", [value]) =>
+			spec_number(value, "wall clock time", -9223372036854775808, 9223372036854775807).map_ok(|number| [number])
+		("random-bytes", [value, Quoted(path, _)]) =>
+			spec_number(value, "random request number", 1, 4294967295).map_ok(|number| [number, path])
+		("fail-random", [value, Word(reason, _)]) if ["unavailable", "refused", "failed"].contains(reason) =>
+			spec_number(value, "random request number", 1, 4294967295).map_ok(|number| [number, reason])
+		("expect-random-cancelled", [value]) =>
+			spec_number(value, "random request number", 1, 4294967295).map_ok(|number| [number])
 		("advance-time", [value]) =>
 			spec_number(value, "milliseconds to advance", 0, 9223372036854775807).map_ok(|number| [number])
 		("expect-pending-effects", [value]) =>

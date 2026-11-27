@@ -113,6 +113,8 @@ fn read_setup(
         initial_time: 0,
         live_time: demo,
         live_http: demo,
+        live_entropy: demo,
+        regional: crate::spec_regional::Regional::default(),
         worker_limit: 32,
     };
     let mut size = (640, 520);
@@ -129,9 +131,17 @@ fn read_setup(
             ("setup-live-effects", []) => {
                 options.live_time = true;
                 options.live_http = true;
+                options.live_entropy = true;
             }
             ("setup-live-effects", ["time"]) => options.live_time = true,
             ("setup-live-effects", ["http"]) => options.live_http = true,
+            ("setup-live-effects", ["entropy"]) => options.live_entropy = true,
+            ("setup-regional-fixture", [path]) => {
+                let bytes = read_regional_fixture(path).map_err(parse)?;
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|_| step.problem("expected a UTF-8 regional fixture"))?;
+                options.regional = crate::spec_regional::Regional::read(text).map_err(parse)?;
+            }
             ("setup-local-storage", [key, value]) => {
                 options.local.push(((*key).into(), (*value).into()))
             }
@@ -485,6 +495,37 @@ impl App {
                 self.effects.http_failure(*kind == "timeout", detail)
             }
             ("run-effect", [count]) => self.run_simulated(number(count)?),
+            ("set-wall-time", [value]) => {
+                self.effects.simulated.now = number(value)?;
+                Ok(())
+            }
+            ("random-bytes", [count, path]) => {
+                let bytes = read_regional_fixture(path)?;
+                let answer = self
+                    .effects
+                    .simulated
+                    .answer_random(number(count)?, Ok(bytes))?;
+                self.effects.send_simulated(answer);
+                self.poll()
+            }
+            ("fail-random", [count, reason]) => {
+                let code = match *reason {
+                    "unavailable" => 1,
+                    "refused" => 5,
+                    "failed" => 6,
+                    _ => return Err("unknown random refusal".into()),
+                };
+                let answer = self
+                    .effects
+                    .simulated
+                    .answer_random(number(count)?, Err(code))?;
+                self.effects.send_simulated(answer);
+                self.poll()
+            }
+            ("expect-random-cancelled", [count]) => expect(
+                self.effects.simulated.random_cancelled(number(count)?)?,
+                true,
+            ),
             ("advance-time", [milliseconds]) => {
                 self.effects.simulated.advance(number(milliseconds)?)?;
                 while self.effects.expire_simulated_http() {
@@ -1159,6 +1200,20 @@ fn fixture_path(name: &str) -> Result<std::path::PathBuf> {
     std::env::current_dir()
         .map(|root| root.join(path))
         .map_err(|error| format!("cannot resolve fixture directory: {error}"))
+}
+
+fn read_regional_fixture(path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    const MAX_BYTES: u64 = 65_536;
+    let file = std::fs::File::open(fixture_path(path)?).map_err(|error| error.to_string())?;
+    let mut data = Vec::new();
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut data)
+        .map_err(|error| error.to_string())?;
+    if data.len() as u64 > MAX_BYTES {
+        return Err("regional or random fixture exceeds 65,536 bytes".into());
+    }
+    Ok(data)
 }
 
 fn number<T: FromStr>(value: &str) -> Result<T> {

@@ -202,6 +202,30 @@ Clipboard requests in a scenario use a private test clipboard.
 text. `(clipboard-busy)` makes the next plain-text copy return
 `Unavailable`.
 
+Native specs simulate wall time, monotonic time, and entropy independently.
+`(advance-time 1000)` advances both clocks. `(set-wall-time -1000)`
+changes only signed wall time and leaves HTTP timeout deadlines and
+elapsed marks alone. `(live-effects time)` opts into real clocks and
+regional settings, while `(live-effects entropy)` independently uses CNG.
+
+Use `(regional-fixture "tests/fixtures/regional.txt")` in setup to
+supply regional facts. Fixture lines name a `locale`, ordered
+`language` entries, a Windows `zone`, an inclusive `span` of two Unix
+millisecond values, and ascending `offset` entries with a timestamp
+and minutes east of UTC. The first offset starts at the span's start.
+For exact formatting, use `formatted utc|short|0|01/01/1970|00:00:00`.
+The first two fields accept `utc` or `local` and `short` or `long`.
+Simulated formatting requires a matching entry for each timestamp.
+
+Nonzero in-bounds simulated entropy requests wait for a reply. Their
+request numbers are independent of HTTP and timer effect numbers.
+`(random-bytes 1 "tests/fixtures/reference.bin")` delivers exact
+fixture bytes with the requested length. `(fail-random 2 failed)`
+injects a CNG failure. The other failure modes are `unavailable` and
+`refused`. `(expect-random-cancelled 2)` checks that supersession
+retired a request. Cancelled requests cannot receive fixture bytes.
+The native caps on timestamps and entropy also apply under simulation.
+
 == Capture a screenshot or record a demo
 
 Use a Windows desktop session for capture. A

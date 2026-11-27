@@ -1,6 +1,6 @@
 //! The little-endian Roc signals command stream and its retained node tree.
 
-use crate::Result;
+use crate::{Result, regional::Snapshot};
 use std::collections::BTreeMap;
 
 #[cfg(windows)]
@@ -10,6 +10,9 @@ pub(crate) const EFFECT_NODE: u32 = u32::MAX;
 pub(crate) const FOLDER_PORT: &str = "roc-native-windows/folder-files";
 pub(crate) const ATTACH_RASTER_PORT: &str = "roc-native-windows/bind-raster";
 pub(crate) const DECODE_IMAGE_PORT: &str = "roc-native-windows/decode-image";
+pub(crate) const MONOTONIC_PORT: &str = "roc-native-windows/monotonic";
+pub(crate) const REGIONAL_PORT: &str = "roc-native-windows/regional";
+pub(crate) const FORMAT_TIME_PORT: &str = "roc-native-windows/format-time";
 const MAX_DEPTH: usize = 256;
 
 pub(crate) struct Reader<'a> {
@@ -82,7 +85,7 @@ pub(crate) fn put_str(bytes: &mut Vec<u8>, text: &str) {
     bytes.extend_from_slice(text.as_bytes());
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Declarations {
     pub(crate) local_keys: Vec<String>,
     pub(crate) media_queries: Vec<String>,
@@ -107,7 +110,7 @@ impl Declarations {
                 2 => out.local_keys = read_strings(&mut body)?,
                 5 => {
                     let count = body.u32()?;
-                    if count > 3 {
+                    if count > 6 {
                         return Err("too many native port declarations".into());
                     }
                     let mut seen = Vec::new();
@@ -117,7 +120,14 @@ impl Declarations {
                         if seen.contains(&port)
                             || !matches!(
                                 (port, kind),
-                                (FOLDER_PORT | DECODE_IMAGE_PORT, 2) | (ATTACH_RASTER_PORT, 1)
+                                (
+                                    FOLDER_PORT
+                                        | DECODE_IMAGE_PORT
+                                        | MONOTONIC_PORT
+                                        | REGIONAL_PORT
+                                        | FORMAT_TIME_PORT,
+                                    2
+                                ) | (ATTACH_RASTER_PORT, 1)
                             )
                             || body.u8()? != 0
                             || body.u32()? != 0
@@ -146,70 +156,81 @@ impl Declarations {
         Ok(out)
     }
 
-    pub(crate) fn boot(
+    pub(crate) fn environment(
         &self,
-        now: i64,
-        seed: [u8; 16],
-        language: &str,
-        zone_offset: i32,
+        snapshot: &Snapshot,
         mut lookup: impl FnMut(bool, &str) -> Option<String>,
-    ) -> Result<Vec<u8>> {
+    ) -> Vec<u8> {
         let mut result = Vec::new();
-        let mut section = |tag, body: &[u8]| {
-            result.push(tag);
-            result.extend_from_slice(&(body.len() as u32).to_le_bytes());
-            result.extend_from_slice(body);
-        };
         let mut url = Vec::new();
         put_str(&mut url, "/");
-        section(1, &url);
-        section(
+        put_section(&mut result, 1, &url);
+        put_section(
+            &mut result,
             2,
             &storage_pairs(&self.local_keys, |key| lookup(false, key)),
         );
-        section(3, &[1]);
-        section(4, &[1]);
-        section(6, &vec![0; self.media_queries.len()]);
-        section(7, &now.to_le_bytes());
-        section(8, &seed);
-        let mut languages = 1_u32.to_le_bytes().to_vec();
-        put_str(&mut languages, language);
-        section(9, &languages);
+        put_section(&mut result, 3, &[1]);
+        put_section(&mut result, 4, &[1]);
+        put_section(&mut result, 6, &vec![0; self.media_queries.len()]);
+        put_section(&mut result, 7, &snapshot.now.to_le_bytes());
+        put_section(&mut result, 8, &snapshot.seed);
+        let mut languages = (snapshot.languages.len() as u32).to_le_bytes().to_vec();
+        for language in &snapshot.languages {
+            put_str(&mut languages, language);
+        }
+        put_section(&mut result, 9, &languages);
 
-        let reach = i64::from(self.zone_days) * 86_400_000;
-        let from = now.saturating_sub(reach);
         let mut zone = Vec::new();
-        put_str(&mut zone, "");
-        zone.extend_from_slice(&from.to_le_bytes());
-        zone.extend_from_slice(&now.saturating_add(reach).to_le_bytes());
-        zone.extend_from_slice(&1_u32.to_le_bytes());
-        zone.extend_from_slice(&from.to_le_bytes());
-        zone.extend_from_slice(&zone_offset.to_le_bytes());
-        section(10, &zone);
+        put_str(&mut zone, ""); // Windows zone keys are not IANA names.
+        zone.extend_from_slice(&snapshot.zone.from.to_le_bytes());
+        zone.extend_from_slice(&snapshot.zone.until.to_le_bytes());
+        zone.extend_from_slice(&(snapshot.zone.offsets.len() as u32).to_le_bytes());
+        for (at, minutes) in &snapshot.zone.offsets {
+            zone.extend_from_slice(&at.to_le_bytes());
+            zone.extend_from_slice(&minutes.to_le_bytes());
+        }
+        put_section(&mut result, 10, &zone);
 
-        section(
+        put_section(
+            &mut result,
             11,
             &storage_pairs(&self.session_keys, |key| lookup(true, key)),
         );
+        result
+    }
+
+    pub(crate) fn boot(
+        &self,
+        snapshot: &Snapshot,
+        lookup: impl FnMut(bool, &str) -> Option<String>,
+    ) -> Result<Vec<u8>> {
+        let mut result = self.environment(snapshot, lookup);
         let mut startup = Reader::new(&self.startup);
         match startup.u8()? {
             0 => {
                 let mut root = vec![0];
                 put_str(&mut root, "");
                 put_str(&mut root, "div");
-                section(13, &root);
-                section(14, &[0]);
+                put_section(&mut result, 13, &root);
+                put_section(&mut result, 14, &[0]);
             }
             1 => {
                 let start = startup.bytes;
                 startup.name()?;
-                section(13, &start[..start.len() - startup.bytes.len()]);
-                section(14, &[1, 0, 0xff, 0xff, 0xff, 0xff]);
+                put_section(&mut result, 13, &start[..start.len() - startup.bytes.len()]);
+                put_section(&mut result, 14, &[1, 0, 0xff, 0xff, 0xff, 0xff]);
             }
             profile => return Err(format!("unknown startup profile {profile}")),
         }
         Ok(result)
     }
+}
+
+fn put_section(bytes: &mut Vec<u8>, tag: u8, body: &[u8]) {
+    bytes.push(tag);
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(body);
 }
 
 fn read_strings(reader: &mut Reader<'_>) -> Result<Vec<String>> {
@@ -926,7 +947,7 @@ mod tests {
             ..Declarations::default()
         };
         let bytes = source
-            .boot(123, [4; 16], "en-US", 60, |session, key| {
+            .boot(&Snapshot::simulated(123, 3), |session, key| {
                 assert!(!session);
                 assert_eq!(key, "key");
                 Some("value".into())

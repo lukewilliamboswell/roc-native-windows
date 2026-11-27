@@ -18,19 +18,10 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{Receiver, channel};
-use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
 use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOW;
-use windows_sys::Win32::Security::Cryptography::{
-    BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
-};
 use windows_sys::Win32::System::LibraryLoader::{
     FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
-};
-use windows_sys::Win32::System::SystemServices::TIME_ZONE_ID_DAYLIGHT;
-use windows_sys::Win32::System::Time::{
-    GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
 };
 use windows_sys::Win32::UI::Controls::{
     ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES,
@@ -92,14 +83,13 @@ struct App {
 impl App {
     fn start(window: OwnedWindow, options: Option<SpecOptions>) -> Result<Self> {
         let (send, incoming) = channel();
-        let deterministic = options.as_ref().is_some_and(|options| !options.live_time);
-        let initial_time = options.as_ref().map_or(0, |options| options.initial_time);
         let driven = options.is_some();
         crate::shader::configure(driven);
         let pump = create_pump()?;
         let title = app_name(unsafe { GetModuleHandleW(null()) });
-        let effects = Effects::new(pump.0, send);
         let display_settings = DisplaySettings::new();
+        let declarations = Declarations::decode(&Engine::declarations()?)?;
+        let effects = Effects::new(pump.0, send, declarations.clone());
         let mut app = Self {
             engine: Engine::default(),
             tree: Tree::new(),
@@ -123,15 +113,9 @@ impl App {
         if let Some(options) = options {
             app.effects.configure_spec(options)?;
         }
-        let declarations = Declarations::decode(&Engine::declarations()?)?;
-        let (now, seed, locale, zone) = if deterministic {
-            (initial_time, [1; 16], "en-US".into(), 0)
-        } else {
-            live_boot()?
-        };
-        let boot = declarations.boot(now, seed, &locale, zone, |session, key| {
-            app.effects.boot_value(session, key)
-        })?;
+        let facts = app.effects.snapshot(true)?;
+        let boot =
+            declarations.boot(&facts, |session, key| app.effects.boot_value(session, key))?;
         let output = app.engine.mount(&boot);
         app.apply(&output)?;
         app.drain_private()?;
@@ -900,47 +884,6 @@ fn modifiers() -> u8 {
         u8::from(GetKeyState(i32::from(VK_SHIFT)) < 0)
             | u8::from(GetKeyState(i32::from(VK_CONTROL)) < 0) << 1
             | u8::from(GetKeyState(i32::from(VK_MENU)) < 0) << 2
-    }
-}
-
-fn live_boot() -> Result<(i64, [u8; 16], String, i32)> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| err.to_string())?;
-    let mut seed = [0; 16];
-    // SAFETY: The flag selects the system RNG, and the destination buffer is writable.
-    if unsafe {
-        BCryptGenRandom(
-            null_mut(),
-            seed.as_mut_ptr(),
-            seed.len() as u32,
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        )
-    } != 0
-    {
-        return Err("could not obtain random seed from Windows".into());
-    }
-    Ok((now.as_millis() as i64, seed, language(), zone_offset()))
-}
-
-fn language() -> String {
-    let mut locale = [0_u16; 85]; // LOCALE_NAME_MAX_LENGTH
-    // SAFETY: The OS receives the full length of a writable array.
-    let len = unsafe { GetUserDefaultLocaleName(locale.as_mut_ptr(), locale.len() as i32) };
-    if len > 1 {
-        String::from_utf16_lossy(&locale[..len as usize - 1])
-    } else {
-        "en-US".into()
-    }
-}
-
-fn zone_offset() -> i32 {
-    let mut info = TIME_ZONE_INFORMATION::default();
-    // SAFETY: The function initializes the passed timezone record.
-    match unsafe { GetTimeZoneInformation(&mut info) } {
-        TIME_ZONE_ID_INVALID => 0,
-        TIME_ZONE_ID_DAYLIGHT => -(info.Bias + info.DaylightBias),
-        _ => -(info.Bias + info.StandardBias),
     }
 }
 

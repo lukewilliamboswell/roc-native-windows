@@ -24,7 +24,7 @@ pub(crate) enum Status {
 
 struct Entry {
     id: u32,
-    time: i64,
+    time: u64,
     kind: Kind,
     status: Status,
 }
@@ -32,7 +32,9 @@ struct Entry {
 #[derive(Default)]
 pub(crate) struct Simulated {
     pub(crate) now: i64,
+    pub(crate) mono: u64,
     effects: Vec<Entry>,
+    random: Vec<(u32, u64, Status)>,
     staged: Option<(String, Vec<u8>)>,
 }
 
@@ -40,13 +42,21 @@ impl Simulated {
     pub(crate) fn hold(&mut self, id: u32, kind: Kind) {
         self.effects.push(Entry {
             id,
-            time: self.now,
+            time: self.mono,
             kind,
             status: Status::Pending,
         });
     }
 
     pub(crate) fn cancel(&mut self, id: u32) {
+        if let Some((_, _, status)) = self
+            .random
+            .iter_mut()
+            .rev()
+            .find(|(candidate, _, status)| *candidate == id && *status == Status::Pending)
+        {
+            *status = Status::Cancelled;
+        }
         if let Some(entry) = self
             .effects
             .iter_mut()
@@ -55,6 +65,42 @@ impl Simulated {
         {
             entry.status = Status::Cancelled;
         }
+    }
+
+    pub(crate) fn hold_random(&mut self, id: u32, count: u64) {
+        self.random.push((id, count, Status::Pending));
+    }
+
+    pub(crate) fn answer_random(
+        &mut self,
+        number: usize,
+        reply: std::result::Result<Vec<u8>, u8>,
+    ) -> Result<(u32, Vec<u8>)> {
+        let (id, count, status) = self
+            .random
+            .get_mut(index(number)?)
+            .ok_or("unknown random request")?;
+        if *status != Status::Pending {
+            return Err(format!("random request #{number} is {status:?}"));
+        }
+        let bytes = match reply {
+            Ok(bytes) if bytes.len() as u64 == *count => {
+                let mut record = vec![28];
+                record.extend(bytes);
+                record
+            }
+            Ok(_) => return Err("fixture length does not match the random request".into()),
+            Err(code) => vec![30, code],
+        };
+        *status = Status::Answered;
+        Ok((*id, bytes))
+    }
+
+    pub(crate) fn random_cancelled(&self, number: usize) -> Result<bool> {
+        self.random
+            .get(index(number)?)
+            .map(|(_, _, status)| *status == Status::Cancelled)
+            .ok_or_else(|| "unknown random request".into())
     }
 
     pub(crate) fn stage(&mut self, url: &str, payload: Vec<u8>) -> Result<()> {
@@ -115,10 +161,16 @@ impl Simulated {
         if duration < 0 {
             return Err("time cannot move backwards".into());
         }
-        self.now = self
+        let now = self
             .now
             .checked_add(duration)
-            .ok_or("virtual clock overflow")?;
+            .ok_or("wall clock overflow")?;
+        let mono = self
+            .mono
+            .checked_add(duration as u64)
+            .ok_or("monotonic clock overflow")?;
+        self.now = now;
+        self.mono = mono;
         Ok(())
     }
 
@@ -126,7 +178,7 @@ impl Simulated {
         let entry = self.effects.iter_mut().find(|entry| {
             entry.status == Status::Pending
                 && matches!(&entry.kind, Kind::Http(req) if req.timeout != 0 &&
-                    entry.time.saturating_add(i64::from(req.timeout)) <= self.now)
+                    entry.time.saturating_add(u64::from(req.timeout)) <= self.mono)
         })?;
         entry.status = Status::Answered;
         Some(entry.id)
@@ -174,6 +226,37 @@ pub(crate) fn tick(now: i64) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_replies_use_request_identity_and_wall_jumps_do_not_advance_monotonic_time() {
+        let mut sim = Simulated::default();
+        sim.hold_random(7, 2);
+        sim.cancel(7);
+        sim.hold_random(8, 2);
+        assert!(sim.random_cancelled(1).unwrap());
+        assert!(sim.answer_random(1, Ok(vec![1, 2])).is_err());
+        assert!(sim.answer_random(2, Ok(vec![1])).is_err());
+        assert_eq!(
+            sim.answer_random(2, Ok(vec![1, 2])).unwrap(),
+            (8, vec![28, 1, 2])
+        );
+        sim.hold_random(9, 2);
+        assert_eq!(sim.answer_random(3, Err(5)).unwrap(), (9, vec![30, 5]));
+        sim.hold(
+            10,
+            Kind::Http(Request {
+                method: "GET".into(),
+                url: "https://example.test".into(),
+                body: String::new(),
+                timeout: 25,
+            }),
+        );
+        sim.now = 200;
+        assert_eq!(sim.next_timeout(), None);
+        sim.advance(25).unwrap();
+        assert_eq!(sim.next_timeout(), Some(10));
+        assert_eq!((sim.now, sim.mono), (225, 25));
+    }
 
     fn http(timeout: u32) -> Kind {
         Kind::Http(Request {

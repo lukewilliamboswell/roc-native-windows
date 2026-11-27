@@ -4,6 +4,7 @@ mod files;
 mod folders;
 mod http;
 mod images;
+mod system;
 mod workers;
 
 use std::collections::{HashMap, VecDeque};
@@ -11,19 +12,23 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 use windows_sys::Win32::Foundation::HWND;
 
 use crate::clipboard::{self, Format};
+use crate::regional::{self, Snapshot};
 use crate::spec_effects::{self, Simulated};
 use crate::spec_plan::valid_file_name;
-use crate::wire::Reader;
+use crate::wire::{self, Declarations, Reader};
 use crate::{Event, Result};
 
 pub(crate) use files::{register_handle_box, released_box};
 
 const EFFECT_NODE: u32 = u32::MAX;
 const MAX_TIMEOUT: u32 = 600_000;
+// The pinned environment adapter maps any non-environment result to Refused.
+// Timeout is the supported empty wire result for an unsuccessful refresh.
+const REFRESH_FAILED: u8 = 7;
 type Completion = (u32, Arc<AtomicBool>, Outcome);
 type Job = Box<dyn FnOnce(&AtomicBool, &dyn Fn(Vec<u8>)) -> Outcome + Send>;
 
@@ -76,11 +81,15 @@ pub(crate) struct SpecOptions {
     pub(crate) initial_time: i64,
     pub(crate) live_time: bool,
     pub(crate) live_http: bool,
+    pub(crate) live_entropy: bool,
+    pub(crate) regional: crate::spec_regional::Regional,
     pub(crate) worker_limit: usize,
 }
 
 pub(crate) struct Effects {
     window: HWND,
+    started: Instant,
+    declarations: Declarations,
     send: mpsc::Sender<Event>,
     complete: mpsc::Sender<Completion>,
     completed: mpsc::Receiver<Completion>,
@@ -98,7 +107,7 @@ pub(crate) struct Effects {
 }
 
 impl Effects {
-    pub(crate) fn new(window: HWND, send: mpsc::Sender<Event>) -> Self {
+    pub(crate) fn new(window: HWND, send: mpsc::Sender<Event>, declarations: Declarations) -> Self {
         let (complete, completed) = mpsc::channel();
         let local = std::env::var_os("LOCALAPPDATA").and_then(|directory| {
             let executable = std::env::current_exe().ok()?;
@@ -111,6 +120,8 @@ impl Effects {
         });
         Self {
             window,
+            started: Instant::now(),
+            declarations,
             send,
             complete,
             completed,
@@ -219,12 +230,10 @@ impl Effects {
             if now < timer.next {
                 return true;
             }
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            let mut payload = vec![5];
-            payload.extend(timestamp.to_le_bytes());
+            let payload = match regional::unix_ms(SystemTime::now()) {
+                Ok(timestamp) => spec_effects::tick(timestamp),
+                Err(_) => vec![REFRESH_FAILED],
+            };
             answers.push((id, payload));
             timer.next = now + timer.interval;
             timer.recurring
@@ -472,7 +481,21 @@ impl Effects {
                     );
                 }
             }
-            5..=7 | 20 | 22 => {}
+            5..=7 | 20 => {}
+            21 => {
+                let payload = match system::crypto_count(reader)? {
+                    Some(count) if count > regional::MAX_RANDOM => vec![30, 2],
+                    Some(0) => vec![28],
+                    Some(count) if self.spec.as_ref().is_some_and(|spec| !spec.live_entropy) => {
+                        self.simulated.hold_random(id, count);
+                        return Ok(());
+                    }
+                    Some(count) => system::secure_random(count),
+                    None => vec![30, 1],
+                };
+                self.answer(id, payload);
+            }
+            22 => self.environment(id),
             19 => {
                 let (text, format) = clipboard::request(reader)?;
                 let copied = if format == Format::Rich || text.contains('\0') {
@@ -545,6 +568,60 @@ impl Effects {
                         },
                     );
                 }
+                wire::MONOTONIC_PORT => {
+                    let (body, _) = system::port_body(reader)?;
+                    let answer = if !matches!(body, Some("{}" | "null")) {
+                        system::monotonic(2, 0)
+                    } else {
+                        let mark = if self.spec.as_ref().is_some_and(|spec| !spec.live_time) {
+                            Some(self.simulated.mono)
+                        } else {
+                            u64::try_from(self.started.elapsed().as_millis()).ok()
+                        };
+                        system::monotonic(u8::from(mark.is_none()), mark.unwrap_or_default())
+                    };
+                    self.answer(id, answer);
+                }
+                wire::REGIONAL_PORT => {
+                    let (body, timeout) = system::port_body(reader)?;
+                    if !matches!(body, Some("{}" | "null")) {
+                        self.answer(id, system::regional_answer(2, "", None));
+                    } else if let Some(spec) = self.spec.as_ref().filter(|spec| !spec.live_time) {
+                        self.answer(
+                            id,
+                            system::regional_answer(
+                                0,
+                                &spec.regional.locale,
+                                spec.regional.name.as_deref(),
+                            ),
+                        );
+                    } else {
+                        self.system_request(id, timeout, system::regional_settings);
+                    }
+                }
+                wire::FORMAT_TIME_PORT => {
+                    let (body, timeout) = system::port_body(reader)?;
+                    match body.map(system::FormatRequest::read) {
+                        Some(Ok(Some(request))) => {
+                            if let Some(spec) = self.spec.as_ref().filter(|spec| !spec.live_time) {
+                                let result = spec.regional.format(
+                                    &request.instants,
+                                    request.local,
+                                    request.long,
+                                );
+                                let answer = match result {
+                                    Ok(parts) => system::formatted_answer(0, &parts),
+                                    Err(code) => system::formatted_answer(code, &[]),
+                                };
+                                self.answer(id, answer);
+                            } else {
+                                self.system_request(id, timeout, move || request.format());
+                            }
+                        }
+                        Some(Ok(None)) => self.answer(id, system::formatted_answer(3, &[])),
+                        _ => self.answer(id, system::formatted_answer(2, &[])),
+                    }
+                }
                 port => return Err(format!("unsupported native port {port:?}")),
             },
             11 | 13 | 14 => {
@@ -566,6 +643,77 @@ impl Effects {
             _ => return Err(format!("unsupported effect kind {kind}")),
         }
         Ok(())
+    }
+
+    pub(crate) fn snapshot(&self, boot: bool) -> Result<Snapshot> {
+        let span = self.declarations.zone_days;
+        let live_entropy = self.spec.as_ref().is_none_or(|spec| spec.live_entropy);
+        if let Some(spec) = self.spec.as_ref().filter(|spec| !spec.live_time) {
+            let mut snapshot = spec
+                .regional
+                .snapshot(self.simulated.now, span)
+                .or_else(|| boot.then(|| Snapshot::simulated(self.simulated.now, span)))
+                .ok_or("the regional fixture does not cover the wall sample")?;
+            if live_entropy && !regional::random(&mut snapshot.seed) {
+                return Err("could not obtain random seed from Windows".into());
+            }
+            Ok(snapshot)
+        } else {
+            regional::snapshot(span, boot, live_entropy)
+        }
+    }
+
+    fn environment(&mut self, id: u32) {
+        let declarations = self.declarations.clone();
+        let sampled = |session, keys: &[String]| {
+            keys.iter()
+                .filter_map(|key| Some((key.clone(), self.boot_value(session, key)?)))
+                .collect::<HashMap<_, _>>()
+        };
+        let local = sampled(false, &declarations.local_keys);
+        let session = sampled(true, &declarations.session_keys);
+        let encode = move |facts: Result<Snapshot>| match facts {
+            Ok(facts) => {
+                let mut payload = vec![31];
+                payload.extend(declarations.environment(&facts, |is_session, key| {
+                    if is_session {
+                        session.get(key)
+                    } else {
+                        local.get(key)
+                    }
+                    .cloned()
+                }));
+                payload
+            }
+            Err(_) => vec![REFRESH_FAILED],
+        };
+        if self.spec.as_ref().is_some_and(|spec| !spec.live_time) {
+            self.answer(id, encode(self.snapshot(false)));
+        } else {
+            let live_entropy = self.spec.as_ref().is_none_or(|spec| spec.live_entropy);
+            let span = self.declarations.zone_days;
+            self.system_request(id, 15_000, move || {
+                encode(regional::snapshot(span, false, live_entropy))
+            });
+        }
+    }
+
+    fn system_request(
+        &mut self,
+        id: u32,
+        timeout: u32,
+        work: impl FnOnce() -> Vec<u8> + Send + 'static,
+    ) {
+        self.spawn(
+            id,
+            WorkOptions {
+                timeout,
+                timeout_tag: REFRESH_FAILED,
+                finish_on_cancel: false,
+                unavailable: vec![REFRESH_FAILED],
+            },
+            move |_, _| Outcome::Bytes(work()),
+        );
     }
 
     pub(crate) fn boot_value(&self, session: bool, key: &str) -> Option<String> {

@@ -9,7 +9,7 @@ platform ""
 	requires {
 		[Store : st] for main : Engine.Program(st)
 	}
-	exposes [Clipboard, Engine, Files, Layout, Ui, Wire, Worker]
+	exposes [Clipboard, Engine, Files, Layout, System, Ui, Wire, Worker]
 	packages { engine: "https://github.com/lukewilliamboswell/roc-signals/releases/download/0.8.0-rc2/engine-GKiw1oqhZ1Q3sWgo1mSinHwACzFUCU8cCZPRY7SXYSgh.tar.zst" }
 	provides {
 		"roc_engine_ask": ask_for_host!,
@@ -45,6 +45,7 @@ import Engine
 import Files
 import Hosted
 import Layout
+import System
 import Ui
 import Wire
 import Worker
@@ -59,7 +60,7 @@ Step : { cmds : List(U8), state : Handle, work : List(U8) }
 Handle : Box(EngineHost.App(Store))
 
 native_ports : () -> List(Engine.PortRegistration)
-native_ports = || Files.folder_ports().concat(Ui.image_ports({}))
+native_ports = || Files.folder_ports().concat(Ui.image_ports({})).concat(System.ports({}))
 
 ## The wire protocol version the engine speaks (design.md, Appendix B).
 version_for_host : () -> U32
