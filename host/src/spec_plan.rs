@@ -69,6 +69,13 @@ impl<'a> Plan<'a> {
             if step.args.len() != count - 1 {
                 return Err(step.problem("truncated arguments"));
             }
+            if command == "expect-exit"
+                && (!step.args.is_empty() || fields.clone().next().is_some())
+            {
+                return Err(step.problem(
+                    "expect-exit takes no arguments and must be the final scenario step",
+                ));
+            }
             if command.starts_with("setup-") {
                 if setup_ended {
                     return Err(step.problem("setup must precede scenario steps"));
@@ -82,6 +89,53 @@ impl<'a> Plan<'a> {
             return Err("spec plan lacks scenario steps".into());
         }
         Ok(Self { mode, name, steps })
+    }
+}
+
+/// The first locator components can name native surfaces. The remaining
+/// pairs describe ordinary Win32 controls in one surface's content tree.
+#[derive(Clone, Default)]
+pub(crate) struct Locator<'a> {
+    pub(crate) window: Option<&'a str>,
+    pub(crate) dialog: Option<&'a str>,
+    pub(crate) controls: Vec<(&'a str, &'a str)>,
+}
+
+impl<'a> Locator<'a> {
+    pub(crate) fn read<'fields>(fields: &'fields [&'a str]) -> Result<(Self, &'fields [&'a str])> {
+        let (count, rest) = fields.split_first().ok_or("step needs a locator")?;
+        let width = positive(Some(count))
+            .and_then(|count| count.checked_mul(2))
+            .ok_or("invalid locator size")?;
+        let (encoded, args) = rest.split_at_checked(width).ok_or("truncated locator")?;
+        let mut selectors = encoded.as_chunks::<2>().0;
+        let mut locator = Self::default();
+        if let [["window", title], rest @ ..] = selectors {
+            locator.window = Some(*title);
+            selectors = rest;
+        }
+        if let [["dialog", title], rest @ ..] = selectors {
+            locator.dialog = Some(*title);
+            selectors = rest;
+        }
+        if [locator.window, locator.dialog]
+            .into_iter()
+            .flatten()
+            .any(str::is_empty)
+        {
+            return Err("window and dialog locators need a title".into());
+        }
+        for &[kind, label] in selectors {
+            if matches!(kind, "window" | "dialog") {
+                return Err("a window or dialog scope must precede control locators".into());
+            }
+            locator.controls.push((kind, label));
+        }
+        Ok((locator, args))
+    }
+
+    pub(crate) fn names_surface(&self) -> bool {
+        self.window.is_some() || self.dialog.is_some()
     }
 }
 
@@ -154,6 +208,63 @@ mod tests {
         for name in ["Welcome screen", "approved.v2", "résumé"] {
             assert!(valid_file_name(name));
         }
+    }
+
+    #[test]
+    fn separates_surface_scopes_from_controls_and_arguments() {
+        let (locator, args) = Locator::read(&[
+            "3",
+            "window",
+            "Main",
+            "dialog",
+            "Notes",
+            "text-area",
+            "Notes",
+            "draft",
+        ])
+        .unwrap();
+        assert_eq!(locator.window, Some("Main"));
+        assert_eq!(locator.dialog, Some("Notes"));
+        assert_eq!(locator.controls, [("text-area", "Notes")]);
+        assert_eq!(args, ["draft"]);
+        assert!(locator.names_surface());
+        assert!(Locator::read(&["2", "button", "Open", "window", "Main"]).is_err());
+        assert!(Locator::read(&["1", "window", ""]).is_err());
+        assert!(Locator::read(&["2", "dialog", "Unfinished"]).is_err());
+        let (legacy, _) = Locator::read(&["1", "button", "dialog"]).unwrap();
+        assert!(!legacy.names_surface());
+        assert_eq!(legacy.controls, [("button", "dialog")]);
+    }
+
+    #[test]
+    fn accepts_exit_only_as_a_final_argument_free_step() {
+        let terminal = plan(&[PROTOCOL, "test", "close", "1", "2", "1", "expect-exit"]);
+        assert!(Plan::read(&terminal).is_ok());
+        let early = plan(&[
+            PROTOCOL,
+            "test",
+            "close",
+            "1",
+            "2",
+            "1",
+            "expect-exit",
+            "2",
+            "2",
+            "1",
+            "await-work",
+        ]);
+        assert!(Plan::read(&early).is_err());
+        let extra = plan(&[
+            PROTOCOL,
+            "test",
+            "close",
+            "1",
+            "2",
+            "2",
+            "expect-exit",
+            "later",
+        ]);
+        assert!(Plan::read(&extra).is_err());
     }
 
     #[test]

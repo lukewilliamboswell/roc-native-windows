@@ -1,14 +1,16 @@
 //! Execute a checked spec on the app's own UI thread.
 
-use super::{APP, App, FAILURE, last_error, mount};
+use super::{APP, App, FAILURE, SpecSurface, last_error, mount};
 use crate::Result;
 use crate::capture::{self, Recorder};
 use crate::civil::{Kind as CivilKind, Value as CivilValue};
 use crate::effects::SpecOptions;
 use crate::progress::Progress;
-use crate::spec_plan::{MAX_PLAN_BYTES, Mode, PROTOCOL, Plan, Step, valid_file_name};
+use crate::spec_plan::{Locator, MAX_PLAN_BYTES, Mode, PROTOCOL, Plan, Step, valid_file_name};
 use crate::view::Control;
-use crate::wire::{Key, Kind, ROOT};
+use crate::windows::OwnedWindow;
+use crate::wire::{Key, Kind};
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::Read;
@@ -23,8 +25,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const SAMPLE_RATE: u32 = 10;
 const WORK_LIMIT: Duration = Duration::from_secs(30);
+const EXIT_LIMIT: Duration = Duration::from_secs(5);
 
-pub(super) fn run(window: HWND, plan_path: &Path) -> Result<()> {
+pub(super) fn run(window: OwnedWindow, plan_path: &Path) -> Result<()> {
     let mut text = String::new();
     File::open(plan_path)
         .and_then(|file| file.take(MAX_PLAN_BYTES + 1).read_to_string(&mut text))
@@ -39,32 +42,40 @@ pub(super) fn run(window: HWND, plan_path: &Path) -> Result<()> {
         std::env::var("ROC_WINDOWS_SPEC_FAILURE_SCREENSHOT").is_ok_and(|value| value == "1");
     let recording = std::env::var("ROC_WINDOWS_SPEC_RECORD").unwrap_or_default();
     let mut capture = Capture::new(&recording, &plan.mode, output)?;
-    size_window(window, size)?;
+    size_window(window.0, size)?;
     mount(window, Some(options))?;
-    if plan.mode == Mode::Demo
+    let visible = plan.mode == Mode::Demo
         || failure_picture
-        || plan.steps.iter().any(|step| step.command == "screenshot")
-    {
-        // SAFETY: The runner owns this window throughout the scenario.
-        unsafe {
-            ShowWindow(window, SW_SHOWNOACTIVATE);
-            UpdateWindow(window);
-        }
-    }
+        || plan.steps.iter().any(|step| step.command == "screenshot");
+    let mut windows = Windows::new(size, visible);
+    windows.refresh()?;
 
     let started = Instant::now();
-    capture.checkpoint(window, started, 0)?;
-    for (index, step) in plan
+    if let Some(window) = windows.recording_window() {
+        capture.checkpoint(window, started, 0)?;
+    }
+    let mut steps = plan
         .steps
         .iter()
         .filter(|step| !step.command.starts_with("setup-"))
-        .enumerate()
-    {
-        let result = perform(window, step, &mut capture, started)
-            .and_then(|()| pump(window, &mut capture, started))
-            .and_then(|()| capture.checkpoint(window, started, index + 1));
+        .peekable();
+    let mut index = 0;
+    while let Some(step) = steps.next() {
+        index += 1;
+        // The close request in the preceding step can post WM_QUIT before
+        // the explicit terminal assertion runs.
+        windows.expect_exit = step.command == "expect-exit"
+            || steps
+                .peek()
+                .is_some_and(|next| next.command == "expect-exit");
+        let result = perform(&mut windows, step, &mut capture, started)
+            .and_then(|()| pump(&mut windows, &mut capture, started))
+            .and_then(|()| match windows.recording_window() {
+                Some(window) => capture.checkpoint(window, started, index),
+                None => Ok(()),
+            });
         if let Err(problem) = result {
-            if failure_picture {
+            if failure_picture && let Some(window) = windows.failure_window(step) {
                 let path = capture.output.join("failure.png");
                 match capture::screenshot(window, &path) {
                     Ok(()) => eprintln!("Failure screenshot: {}", path.display()),
@@ -185,27 +196,133 @@ fn with_app<T>(run: impl FnOnce(&mut App) -> Result<T>) -> Result<T> {
     })
 }
 
-fn pump(window: HWND, capture: &mut Capture, started: Instant) -> Result<()> {
-    let mut message = MSG::default();
-    // SAFETY: We are on the app UI thread with an initialized message record.
-    unsafe {
-        while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-            if message.message == WM_QUIT {
-                return Err(FAILURE
-                    .with(|slot| slot.borrow_mut().take())
-                    .unwrap_or_else(|| "spec window closed before completion".into()));
-            }
-            if !(WM_KEYFIRST..=WM_KEYLAST).contains(&message.message) {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        }
-    }
-    with_app(App::poll)?;
-    capture.sample(window, started)
+struct Windows {
+    size: (i32, i32),
+    visible: bool,
+    mounted: BTreeMap<Key, HWND>,
+    first: Option<(Key, HWND)>,
+    default: Option<HWND>,
+    expect_exit: bool,
+    exited: bool,
 }
 
-fn perform(window: HWND, step: &Step<'_>, capture: &mut Capture, started: Instant) -> Result<()> {
+impl Windows {
+    fn new(size: (i32, i32), visible: bool) -> Self {
+        Self {
+            size,
+            visible,
+            mounted: BTreeMap::new(),
+            first: None,
+            default: None,
+            expect_exit: false,
+            exited: false,
+        }
+    }
+
+    fn refresh(&mut self) -> Result<()> {
+        let surfaces = with_app(|app| Ok(app.spec_surfaces()))?;
+        let first = surfaces.iter().find(|surface| !surface.is_dialog);
+        self.default = first.map(|surface| surface.handle);
+        if self.first.is_none() {
+            self.first = first.map(|surface| (surface.id, surface.handle));
+        }
+
+        let mut mounted = BTreeMap::new();
+        for surface in surfaces {
+            let handle = surface.handle;
+            if self.mounted.get(&surface.id) != Some(&handle) {
+                if !surface.is_dialog {
+                    size_window(handle, self.size)?;
+                }
+                if self.visible {
+                    // Showing a window can synchronously send its window
+                    // procedure a message. No App borrow is held here.
+                    unsafe {
+                        ShowWindow(handle, SW_SHOWNOACTIVATE);
+                        UpdateWindow(handle);
+                    }
+                }
+            }
+            mounted.insert(surface.id, handle);
+        }
+        self.mounted = mounted;
+        Ok(())
+    }
+
+    fn recording_window(&self) -> Option<HWND> {
+        let (id, handle) = self.first?;
+        // Automatic recordings keep their original window and frame size.
+        (!self.exited && self.mounted.get(&id) == Some(&handle)).then_some(handle)
+    }
+
+    fn failure_window(&self, step: &Step<'_>) -> Option<HWND> {
+        if self.exited {
+            return None;
+        }
+        let scoped = Locator::read(&step.args).ok().and_then(|(locator, _)| {
+            if !locator.names_surface() {
+                return None;
+            }
+            with_app(|app| app.one_surface(&locator).map(|surface| surface.handle)).ok()
+        });
+        scoped.or(self.default).filter(|&window| {
+            // SAFETY: IsWindow accepts a possibly destroyed HWND.
+            (unsafe { IsWindow(window) }) != 0
+        })
+    }
+
+    fn messages(&mut self) -> Result<()> {
+        let mut message = MSG::default();
+        // SAFETY: We are on the UI thread with an initialized message record.
+        unsafe {
+            while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                if message.message == WM_QUIT {
+                    if let Some(error) = FAILURE.with(|slot| slot.borrow_mut().take()) {
+                        return Err(error);
+                    }
+                    if message.wParam != 0 {
+                        return Err(format!("application exited with status {}", message.wParam));
+                    }
+                    if !self.expect_exit || !with_app(|app| Ok(app.exited()))? {
+                        return Err("spec window closed before completion".into());
+                    }
+                    self.exited = true;
+                    return Ok(());
+                }
+                if !(WM_KEYFIRST..=WM_KEYLAST).contains(&message.message) {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn pump(windows: &mut Windows, capture: &mut Capture, started: Instant) -> Result<()> {
+    if windows.exited {
+        return Ok(());
+    }
+    windows.messages()?;
+    if !windows.exited {
+        with_app(App::poll)?;
+        windows.messages()?;
+    }
+    if !windows.exited {
+        windows.refresh()?;
+        if let Some(window) = windows.recording_window() {
+            capture.sample(window, started)?;
+        }
+    }
+    Ok(())
+}
+
+fn perform(
+    windows: &mut Windows,
+    step: &Step<'_>,
+    capture: &mut Capture,
+    started: Instant,
+) -> Result<()> {
     match (step.command, step.args.as_slice()) {
         ("wait", [value]) => {
             let duration = Duration::from_millis(number(value)?);
@@ -213,8 +330,8 @@ fn perform(window: HWND, step: &Step<'_>, capture: &mut Capture, started: Instan
                 return Err("wait exceeds 60 seconds".into());
             }
             let begin = Instant::now();
-            while begin.elapsed() < duration {
-                pump(window, capture, started)?;
+            while begin.elapsed() < duration && !windows.exited {
+                pump(windows, capture, started)?;
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(())
@@ -222,12 +339,15 @@ fn perform(window: HWND, step: &Step<'_>, capture: &mut Capture, started: Instan
         ("await-work", []) => {
             let begin = Instant::now();
             loop {
-                pump(window, capture, started)?;
+                pump(windows, capture, started)?;
+                if windows.exited {
+                    return Ok(());
+                }
                 if with_app(|app| Ok(app.effects.work_done()))? {
                     // The worker publishes its answer before lowering running;
-                    // this drain catches racing completions and their follow-up work.
-                    pump(window, capture, started)?;
-                    if with_app(|app| Ok(app.effects.work_done()))? {
+                    // this drain catches racing completions and follow-up work.
+                    pump(windows, capture, started)?;
+                    if windows.exited || with_app(|app| Ok(app.effects.work_done()))? {
                         return Ok(());
                     }
                 }
@@ -237,7 +357,31 @@ fn perform(window: HWND, step: &Step<'_>, capture: &mut Capture, started: Instan
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        ("screenshot", [stem]) => capture.screenshot(window, stem),
+        ("expect-exit", []) => {
+            let begin = Instant::now();
+            while !windows.exited {
+                pump(windows, capture, started)?;
+                if windows.exited {
+                    break;
+                }
+                if begin.elapsed() >= EXIT_LIMIT {
+                    return Err("the application did not exit within five seconds".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        }
+        ("screenshot", [stem]) => {
+            capture.screenshot(windows.default.ok_or("no live window to capture")?, stem)
+        }
+        ("screenshot", _) => {
+            let (locator, args) = Locator::read(&step.args)?;
+            let [stem] = args else {
+                return Err("screenshot needs a surface and filename stem".into());
+            };
+            let surface = with_app(|app| app.one_surface(&locator))?;
+            capture.screenshot(surface.handle, stem)
+        }
         _ => with_app(|app| app.spec_step(step)),
     }
 }
@@ -302,7 +446,23 @@ impl App {
     fn spec_step(&mut self, step: &Step<'_>) -> Result<()> {
         match (step.command, step.args.as_slice()) {
             ("files", _) => self.spec_files(&step.args),
-            ("drop-files-outside", _) => self.spec_drop(None, &step.args),
+            ("drop-files-outside", _) => {
+                let surface = self.default_spec_surface()?;
+                self.prepare_surface(&surface, true)?;
+                self.spec_drop(None, &step.args)
+            }
+            ("close-window" | "dismiss", _) => {
+                let (locator, args) = Locator::read(&step.args)?;
+                if !args.is_empty() {
+                    return Err("close gestures take one surface locator".into());
+                }
+                let surface = self.one_surface(&locator)?;
+                if surface.is_dialog != (step.command == "dismiss") {
+                    return Err("close-window needs a window and dismiss needs a dialog".into());
+                }
+                self.prepare_surface(&surface, true)?;
+                self.request_close(surface.id)
+            }
             ("folder", []) => Ok(()),
             ("folder", [name]) => self.spec_folder(name),
             ("clipboard-busy", []) => {
@@ -354,9 +514,13 @@ impl App {
             }
             ("expect-cancelled", [count]) => expect(self.effects.cancelled(number(count)?)?, true),
             ("expect-taskbar-progress", [wanted]) => {
+                let surface = self.default_spec_surface()?;
+                self.prepare_surface(&surface, false)?;
                 expect(self.surface.taskbar_progress(), Progress::parse(wanted)?)
             }
             ("expect-status", panes) => {
+                let surface = self.default_spec_surface()?;
+                self.prepare_surface(&surface, false)?;
                 let texts = self.surface.status_texts();
                 expect(
                     texts
@@ -428,7 +592,7 @@ impl App {
     }
 
     fn spec_files(&mut self, args: &[&str]) -> Result<()> {
-        let key = self.one_control(&[("file-button", "")])?;
+        let key = self.spec_picker("file-button")?;
         if self.surface.spec_disabled(key)? {
             return Err("the file picker is disabled".into());
         }
@@ -464,7 +628,7 @@ impl App {
     }
 
     fn spec_folder(&mut self, fixture: &str) -> Result<()> {
-        let key = self.one_control(&[("folder-button", "")])?;
+        let key = self.spec_picker("folder-button")?;
         if self.surface.spec_disabled(key)? {
             return Err("the folder picker is disabled".into());
         }
@@ -478,23 +642,23 @@ impl App {
     }
 
     fn control_step(&mut self, step: &Step<'_>) -> Result<()> {
-        let (count, rest) = step.args.split_first().ok_or("step needs a locator")?;
-        let count: usize = number(count)?;
-        let width = count
-            .checked_mul(2)
-            .filter(|&width| width != 0)
-            .ok_or("invalid locator size")?;
-        let (encoded, args) = rest.split_at_checked(width).ok_or("truncated locator")?;
-        let selectors: Vec<_> = encoded
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| (pair[0], pair[1]))
-            .collect();
-        if step.command == "expect-absent" && args.is_empty() {
-            return expect(self.controls(&selectors)?.len(), 0);
+        let (locator, args) = Locator::read(&step.args)?;
+        if locator.controls.is_empty() {
+            if step.command == "expect-absent" && args.is_empty() {
+                return expect(self.located_surfaces(&locator)?.len(), 0);
+            }
+            let surface = self.one_surface(&locator)?;
+            return match (step.command, args) {
+                ("expect-visible", []) => Ok(()),
+                ("expect-disabled", [value]) => expect(surface.blocked, number(value)?),
+                _ => Err("this step needs a control within its window or dialog scope".into()),
+            };
         }
-        let key = self.one_control(&selectors)?;
+        if step.command == "expect-absent" && args.is_empty() {
+            return expect(self.controls(&locator)?.len(), 0);
+        }
+        let (surface, key) = self.one_control(&locator)?;
+        self.prepare_surface(&surface, !step.command.starts_with("expect-"))?;
         match (step.command, args) {
             ("expect-visible", []) => Ok(()),
             ("drop-files", files) => self.spec_drop(Some(key), files),
@@ -704,39 +868,155 @@ impl App {
         }
     }
 
-    fn one_control(&self, selectors: &[(&str, &str)]) -> Result<Key> {
-        let controls = self.controls(selectors)?;
-        match controls.as_slice() {
-            [key] => Ok(*key),
-            [] => {
-                if let [(kind, label)] = selectors
-                    && *kind != "test-id"
-                    && !label.is_empty()
-                {
-                    let seen: Vec<_> = self
-                        .controls(&[(kind, "")])?
-                        .into_iter()
-                        .filter_map(|key| self.surface.spec_label(key, kind))
-                        .take(12)
-                        .collect();
-                    return Err(format!(
-                        "no control matches {selectors:?}, observed {seen:?}"
-                    ));
+    fn default_spec_surface(&self) -> Result<SpecSurface> {
+        self.spec_surfaces()
+            .into_iter()
+            .find(|surface| !surface.is_dialog)
+            .ok_or_else(|| "no live application window".into())
+    }
+
+    fn prepare_surface(&mut self, surface: &SpecSurface, action: bool) -> Result<()> {
+        if action && surface.blocked {
+            return Err(format!(
+                "window {:?} is blocked by its modal dialog",
+                surface.title
+            ));
+        }
+        self.select_surface(surface.id)
+    }
+
+    fn spec_picker(&mut self, kind: &str) -> Result<Key> {
+        let locator = Locator {
+            controls: vec![(kind, "")],
+            ..Locator::default()
+        };
+        let (surface, key) = self.one_control(&locator)?;
+        self.prepare_surface(&surface, true)?;
+        Ok(key)
+    }
+
+    fn located_surfaces(&self, locator: &Locator<'_>) -> Result<Vec<SpecSurface>> {
+        let surfaces = self.spec_surfaces();
+        if let Some(title) = locator.window {
+            let mut windows = surfaces
+                .iter()
+                .filter(|surface| !surface.is_dialog && surface.title == title);
+            if let Some(dialog_title) = locator.dialog {
+                let window = windows.next().map(|surface| surface.id);
+                if windows.next().is_some() {
+                    return Err(format!("more than one window matches {title:?}"));
                 }
-                Err(format!("no control matches {selectors:?}"))
+                return Ok(surfaces
+                    .into_iter()
+                    .filter(|surface| {
+                        window.is_some()
+                            && surface.is_dialog
+                            && surface.title == dialog_title
+                            && surface.owner == window
+                    })
+                    .collect());
             }
-            _ => Err(format!("{} controls match {selectors:?}", controls.len())),
+            return Ok(surfaces
+                .into_iter()
+                .filter(|surface| !surface.is_dialog && surface.title == title)
+                .collect());
+        }
+        Ok(surfaces
+            .into_iter()
+            .filter(|surface| {
+                locator
+                    .dialog
+                    .is_none_or(|title| surface.is_dialog && surface.title == title)
+            })
+            .collect())
+    }
+
+    fn one_surface(&self, locator: &Locator<'_>) -> Result<SpecSurface> {
+        if !locator.names_surface() || !locator.controls.is_empty() {
+            return Err("expected a window or dialog locator".into());
+        }
+        let mut found = self.located_surfaces(locator)?.into_iter();
+        let result = found.next().ok_or_else(|| {
+            format!(
+                "no live window or dialog matches {:?}",
+                locator.dialog.or(locator.window)
+            )
+        })?;
+        if found.next().is_some() {
+            return Err(format!(
+                "more than one window or dialog matches {:?}",
+                locator.dialog.or(locator.window)
+            ));
+        }
+        Ok(result)
+    }
+
+    fn one_control(&mut self, locator: &Locator<'_>) -> Result<(SpecSurface, Key)> {
+        let matches = self.controls(locator)?;
+        if let [(id, key)] = matches.as_slice() {
+            let surface = self
+                .spec_surfaces()
+                .into_iter()
+                .find(|surface| surface.id == *id)
+                .ok_or("the selected surface is no longer mounted")?;
+            return Ok((surface, *key));
+        }
+        let selectors = &locator.controls;
+        if matches.is_empty() {
+            if let [(kind, label)] = selectors.as_slice()
+                && *kind != "test-id"
+                && !label.is_empty()
+            {
+                let wild = Locator {
+                    controls: vec![(*kind, "")],
+                    ..locator.clone()
+                };
+                let mut seen = Vec::new();
+                for (surface, key) in self.controls(&wild)?.into_iter().take(12) {
+                    self.select_surface(surface)?;
+                    seen.extend(self.surface.spec_label(key, kind));
+                }
+                return Err(format!(
+                    "no control matches {selectors:?}, observed {seen:?}"
+                ));
+            }
+            Err(format!("no control matches {selectors:?}"))
+        } else {
+            Err(format!(
+                "{} controls match {selectors:?}; scope the locator to one window or dialog",
+                matches.len()
+            ))
         }
     }
 
-    fn controls(&self, selectors: &[(&str, &str)]) -> Result<Vec<Key>> {
-        let mut origin = ROOT;
+    fn controls(&mut self, locator: &Locator<'_>) -> Result<Vec<(Key, Key)>> {
+        let mut result = Vec::new();
+        for surface in self.located_surfaces(locator)? {
+            self.select_surface(surface.id)?;
+            for key in self.controls_in(surface.root, &locator.controls)? {
+                result.push((surface.id, key));
+            }
+        }
+        Ok(result)
+    }
+
+    fn controls_in(&self, root: Key, selectors: &[(&str, &str)]) -> Result<Vec<Key>> {
+        let mut origin = root;
         let mut found = Vec::new();
         for (index, &(kind, label)) in selectors.iter().enumerate() {
-            let mut walk = self.tree.node(origin).children.clone();
+            let mut walk = if index == 0 {
+                vec![origin]
+            } else {
+                self.tree.node(origin).children.clone()
+            };
             found.clear();
             while let Some(key) = walk.pop() {
                 let node = self.tree.node(key);
+                if key != root
+                    && matches!(&node.kind, Kind::Element(tag) if matches!(tag.as_str(), "ui-window" | "ui-windows" | "ui-dialog"))
+                {
+                    continue;
+                }
                 walk.extend(&node.children);
                 let matches = if kind == "test-id" {
                     !label.is_empty() && node.attr("test-id") == Some(label)
@@ -753,13 +1033,16 @@ impl App {
                 }
             }
             if index + 1 < selectors.len() {
-                let [parent] = found.as_slice() else {
-                    return Err(format!(
-                        "within scope ({kind} {label:?}) matches {} controls",
-                        found.len()
-                    ));
-                };
-                origin = *parent;
+                match found.as_slice() {
+                    [parent] => origin = *parent,
+                    [] => return Ok(Vec::new()),
+                    _ => {
+                        return Err(format!(
+                            "within scope ({kind} {label:?}) matches {} controls",
+                            found.len()
+                        ));
+                    }
+                }
             }
         }
         Ok(found)

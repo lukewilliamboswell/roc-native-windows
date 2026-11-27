@@ -470,6 +470,11 @@ spec_parse = |path, source| {
 			for line in steps {
 				$compiled = $compiled.append(spec_step(line)?)
 			}
+			match $compiled.find_first(|entry| entry.op == "expect-exit") {
+				Ok(exit_step) if ($compiled.last().map_ok(|entry| entry.pos) != Ok(exit_step.pos)) =>
+					return Err(spec_error(exit_step.pos, "expect-exit must be the final scenario step"))
+				_ => {}
+			}
 			Ok({ path, mode, name, steps: $compiled })
 		}
 		_ => Err(spec_error(spec_position(expr), "Expected (test \"name\" (steps ...)) or (demo \"name\" (steps ...))"))
@@ -720,11 +725,17 @@ spec_step = |expr| {
 		}
 		("files", _) | ("drop-files-outside", _) => spec_texts(args, "Expected a fixture path in quotes")
 		("folder", []) | ("folder", [Quoted(_, _)]) => spec_texts(args, "Expected a fixture directory in quotes")
-		("await-work", []) | ("clipboard-busy", []) => Ok([])
+		("await-work", []) | ("clipboard-busy", []) | ("expect-exit", []) => Ok([])
+		("close-window", [locator]) => spec_native_surface(locator, "window")
+		("dismiss", [locator]) => spec_native_surface(locator, "dialog")
 		("expect-clipboard", [count, Quoted(value, _)]) =>
 			spec_number(count, "clipboard writes", 0, 4294967295).map_ok(|number| [number, value])
-		("screenshot", [Quoted(name, pos)]) =>
-			if (valid_asset_name(name)) Ok([name]) else Err(spec_error(pos, "Expected a Windows-safe screenshot name"))
+		("screenshot", [Quoted(name, pos)]) => spec_screenshot_name(name, pos).map_ok(|stem| [stem])
+		("screenshot", [locator, Quoted(name, pos)]) => {
+			surface = spec_native_surface(locator, "")?
+			stem = spec_screenshot_name(name, pos)?
+			Ok(surface.append(stem))
+		}
 		("wait", [value]) => spec_number(value, "wait in milliseconds", 0, 30000).map_ok(|number| [number])
 		("run-effect", [value]) | ("expect-cancelled", [value]) =>
 			spec_number(value, "effect number", 1, 4294967295).map_ok(|number| [number])
@@ -831,8 +842,48 @@ spec_texts = |nodes, problem| {
 spec_locator : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator = |expr| {
 	parts = spec_locator_parts(expr)?
+	remaining = spec_control_parts(parts)
+	# Only selector-kind positions can name a surface. Labels can be any text.
+	var $at = 0
+	for piece in remaining {
+		if $at % 2 == 0 and spec_is_surface(piece) {
+			return Err(spec_error(spec_position(expr), "A window or dialog scope must precede control locators"))
+		}
+		$at = $at + 1
+	}
 	Ok([(parts.len() // 2).to_str()].concat(parts))
 }
+
+spec_control_parts : List(Str) -> List(Str)
+spec_control_parts = |parts| {
+	after_window = match parts {
+		["window", _, .. as rest] => rest
+		_ => parts
+	}
+	match after_window {
+		["dialog", _, .. as rest] => rest
+		_ => after_window
+	}
+}
+
+spec_is_surface : Str -> Bool
+spec_is_surface = |kind| kind == "window" or kind == "dialog"
+
+spec_native_surface : SpecExpr, Str -> Try(List(Str), SpecIssue)
+spec_native_surface = |expr, expected| {
+	parts = spec_locator(expr)?
+	kinds = parts.drop_first(1)
+	last_kind = kinds.get(kinds.len() - 2) ?? ""
+	if spec_is_surface(last_kind) and (expected.is_empty() or last_kind == expected) and spec_control_parts(kinds).is_empty() {
+		Ok(parts)
+	} else {
+		Err(spec_error(spec_position(expr), if (expected.is_empty()) "Expected a window or dialog locator" else "Expected a ${expected} locator"))
+	}
+}
+
+spec_screenshot_name : Str, SpecPos -> Try(Str, SpecIssue)
+spec_screenshot_name = |name, pos|
+	if (valid_asset_name(name)) Ok(name) else Err(spec_error(pos, "Expected a Windows-safe screenshot name"))
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
@@ -843,6 +894,7 @@ spec_locator_parts = |expr| {
 			right = spec_locator_parts(inner)?
 			Ok(left.concat(right))
 		}
+		Form([Word(kind, _), Quoted(title, _)], _) if spec_is_surface(kind) and !title.is_empty() => Ok([kind, title])
 		Form([Word(kind, _), Quoted(label, _)], _) if kinds.contains(kind) and (kind != "test-id" or !label.is_empty()) => Ok([kind, label])
 		Form([Word(kind, _)], _) if kinds.contains(kind) and kind != "test-id" => Ok([kind, ""])
 		_ => Err(spec_error(spec_position(expr), "Expected a control locator, optionally scoped with within"))
@@ -1984,3 +2036,17 @@ expect {
 }
 
 expect merge_resources([display_name_resource("One")], [display_name_resource("Two")]).is_err()
+
+expect spec_parse("test.scm", "(test \"a\" (steps (fill (within (window \"Main\") (within (dialog \"Notes\") (text-area \"Notes\"))) \"draft\") (dismiss (dialog \"Notes\")) (screenshot (window \"Main\") \"frame\") (close-window (window \"Main\")) (expect-exit)))").is_ok()
+
+expect {
+	invalid = [
+		"(test \"a\" (steps (expect-exit) (wait 1)))",
+		"(test \"a\" (steps (expect-exit) (expect-exit)))",
+		"(test \"a\" (steps (close-window (dialog \"Notes\"))))",
+		"(test \"a\" (steps (screenshot (button \"Open\") \"image\")))",
+		"(test \"a\" (steps (expect-visible (window \"\"))))",
+		"(test \"a\" (steps (click (within (button \"Open\") (window \"Main\")))))",
+	]
+	invalid.all(|source| spec_parse("test.scm", source).is_err())
+}

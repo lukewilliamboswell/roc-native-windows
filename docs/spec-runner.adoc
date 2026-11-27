@@ -110,6 +110,32 @@ labeled target and outside every target in the window.
 (drop-files-outside "tests/fixtures/elsewhere.txt")
 ----
 
+== Scope actions to a window or dialog
+
+Use the native title to scope a locator when a label appears in more than
+one window or dialog. A dialog title can also be scoped to its owner.
+Unscoped control locators still work when they match one live control.
+
+[source,scheme]
+----
+(expect-visible (window "File Inspector"))
+(select (within (window "File Inspector") (tabs "File details")) "preview")
+(fill (within (dialog "Notes for First") (text-area "Notes")) "Remember this")
+(dismiss (within (window "Todos") (dialog "Notes for First")))
+(expect-absent (dialog "Notes for First"))
+----
+
+`close-window` issues a close request to an independent or main window.
+`dismiss` issues the same title-bar request to a dialog. The app may
+keep the surface open. Use `expect-visible` or `expect-absent` with its
+locator to assert the result. Actions against a window blocked by a modal
+dialog fail. `(expect-disabled (window "Todos") true)` can check that
+the owner is blocked while a dialog is open.
+
+When the scenario closes the last window, place `(expect-exit)` as its final
+step. The runner waits for the application's successful quit message.
+Omitting the assertion makes an early application exit a failed scenario.
+
 == Simulate and run effects
 
 Tests start with isolated storage and hold HTTP requests, timers and
@@ -154,7 +180,9 @@ text. `(clipboard-busy)` makes the next plain-text copy return
 Use a Windows desktop session for capture. A
 `(setup (window-size 640 520))` form sets client size. Use
 `(screenshot "after-add")` for a PNG checkpoint or
-`test --screenshot-on-failure` for a diagnostic image. Results are written
+`(screenshot (window "File Inspector") "main-preview")` to capture
+a particular window. A dialog locator can select a dialog screenshot.
+Use `test --screenshot-on-failure` for a diagnostic image. Results are written
 under `build/specs/`. Use a test's control assertions for repeatable
 checks across themes and display settings.
 
@@ -168,7 +196,8 @@ roc windows.roc -- record tests/specs/demo.scm --format gif
 ----
 
 GIF is the default. Use `--format png` for frames. The artifacts are under
-`build/specs/`. Recordings use the app's fixed-size window. Capture of
+`build/specs/`. Automatic recordings follow the first app window until it
+closes. Use explicit screenshot checkpoints to capture other windows. Capture of
 minimized, occluded, locked or noninteractive sessions requires separate
 verification.
 

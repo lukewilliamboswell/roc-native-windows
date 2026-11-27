@@ -53,7 +53,8 @@ pub(crate) mod native {
     use super::{Command, Replay};
     use crate::Result;
     use crate::progress::Progress;
-    use std::cell::Cell;
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
     use std::sync::OnceLock;
     use windows::Win32::Foundation::HWND as ShellWindow;
     use windows::Win32::System::Com::{
@@ -69,7 +70,7 @@ pub(crate) mod native {
 
     static BUTTON_CREATED: OnceLock<u32> = OnceLock::new();
     thread_local! {
-        static REPLAY_PENDING: Cell<bool> = const { Cell::new(false) };
+        static REPLAY_PENDING: RefCell<BTreeSet<usize>> = const { RefCell::new(BTreeSet::new()) };
     }
 
     pub(crate) struct Taskbar {
@@ -78,6 +79,12 @@ pub(crate) mod native {
         shell: Option<ITaskbarList3>,
         apartment: Option<Apartment>,
         warned: bool,
+    }
+
+    impl Drop for Taskbar {
+        fn drop(&mut self) {
+            REPLAY_PENDING.with(|pending| pending.borrow_mut().remove(&(self.window.0 as usize)));
+        }
     }
 
     impl Taskbar {
@@ -94,11 +101,11 @@ pub(crate) mod native {
             }
         }
 
-        pub(crate) fn queue_if_button_created(message: u32) -> bool {
+        pub(crate) fn queue_if_button_created(hwnd: HWND, message: u32) -> bool {
             if message != 0 && BUTTON_CREATED.get() == Some(&message) {
                 // A registered message can arrive during a shell callback or
                 // another UI update. Reconcile when the event pump owns App.
-                REPLAY_PENDING.with(|pending| pending.set(true));
+                REPLAY_PENDING.with(|pending| pending.borrow_mut().insert(hwnd as usize));
                 true
             } else {
                 false
@@ -106,7 +113,8 @@ pub(crate) mod native {
         }
 
         pub(crate) fn poll(&mut self) {
-            if REPLAY_PENDING.with(|pending| pending.replace(false)) {
+            if REPLAY_PENDING.with(|pending| pending.borrow_mut().remove(&(self.window.0 as usize)))
+            {
                 self.shell = None;
                 self.playback.button_created();
                 self.reconcile();

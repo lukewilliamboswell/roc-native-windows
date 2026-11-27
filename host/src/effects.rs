@@ -588,13 +588,19 @@ impl Effects {
         Some(self.local.as_ref()?.join(file))
     }
 
-    pub(crate) fn pick(&mut self, node: u32, handler: u32, multiple: bool) -> Result<()> {
-        let paths = files::open_dialog(self.window, multiple)?;
+    pub(crate) fn pick(
+        &mut self,
+        owner: HWND,
+        node: u32,
+        handler: u32,
+        multiple: bool,
+    ) -> Result<()> {
+        let paths = files::open_dialog(owner, multiple)?;
         self.deliver_paths(node, handler, paths)
     }
 
-    pub(crate) fn pick_folder(&mut self, node: u32, handler: u32) -> Result<()> {
-        match folders::pick(self.window) {
+    pub(crate) fn pick_folder(&mut self, owner: HWND, node: u32, handler: u32) -> Result<()> {
+        match folders::pick(owner) {
             Ok(Some(path)) => self.deliver_folder(node, handler, Some(path)),
             Ok(None) => Ok(()),
             Err(_) => self.deliver_folder(node, handler, None),
@@ -642,7 +648,14 @@ impl Effects {
         Ok(())
     }
 
-    pub(crate) fn save(&mut self, token: u64, start: u64, len: u64, name: &str) -> Result<()> {
+    pub(crate) fn save(
+        &mut self,
+        owner: HWND,
+        token: u64,
+        start: u64,
+        len: u64,
+        name: &str,
+    ) -> Result<()> {
         if let Some(spec) = &self.spec {
             if !valid_file_name(name) {
                 return Err("spec save needs an ordinary file name without a path".into());
@@ -651,7 +664,7 @@ impl Effects {
             std::fs::create_dir_all(&saved).map_err(storage_error)?;
             files::save_to(token, start, len, saved.join(name))
         } else {
-            files::save(self.window, token, start, len, name)
+            files::save(owner, token, start, len, name)
         }
     }
 }

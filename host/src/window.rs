@@ -2,10 +2,11 @@ use crate::abi::Engine;
 use crate::civil::{self, Value as CivilValue};
 use crate::effects::{Effects, SpecOptions};
 use crate::grid::Intent as GridIntent;
+use crate::modal;
 use crate::taskbar::native::Taskbar;
 use crate::tree_view::TreeIntent;
-use crate::view::{Surface, wide};
-use crate::window_icons::WindowIcons;
+use crate::view::{composing, wide};
+use crate::windows::{OwnedWindow, SpecSurface, SurfaceRegistry};
 use crate::wire::{Declarations, EFFECT_NODE, Key, Reader, Tree};
 use crate::{Event, Result};
 use std::cell::RefCell;
@@ -43,7 +44,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
-use windows_sys::core::w;
+use windows_sys::core::{PCWSTR, w};
 
 #[path = "spec_run.rs"]
 mod spec_run;
@@ -51,6 +52,8 @@ mod spec_run;
 const PUMP: usize = 1;
 const REPORT_EVENTS: u32 = WM_APP + 1;
 const GRID_EVENTS: u32 = WM_APP + 2;
+const CLOSE_EVENTS: u32 = WM_APP + 6;
+const WINDOW_CLASS: PCWSTR = w!("RocSignalsWindow");
 
 thread_local! {
     // User32 is allowed to send synchronous child notifications during a
@@ -62,8 +65,10 @@ thread_local! {
 struct App {
     engine: Engine,
     tree: Tree,
-    surface: Surface,
-    icons: WindowIcons,
+    surface: SurfaceRegistry,
+    pump: OwnedWindow,
+    close_requests: VecDeque<(Key, usize)>,
+    quit_posted: bool,
     effects: Effects,
     incoming: Receiver<Event>,
     private: VecDeque<Event>,
@@ -73,20 +78,25 @@ struct App {
     grid_intents: VecDeque<GridIntent>,
     focus_departures: BTreeSet<Key>,
     driven: bool,
-    taskbar: Option<Taskbar>,
 }
 
 impl App {
-    fn start(window: HWND, options: Option<SpecOptions>) -> Result<Self> {
+    fn start(window: OwnedWindow, options: Option<SpecOptions>) -> Result<Self> {
         let (send, incoming) = channel();
         let deterministic = options.as_ref().is_some_and(|options| !options.live_time);
         let initial_time = options.as_ref().map_or(0, |options| options.initial_time);
+        let driven = options.is_some();
+        let pump = create_pump()?;
+        let title = app_name(unsafe { GetModuleHandleW(null()) });
+        let effects = Effects::new(pump.0, send);
         let mut app = Self {
             engine: Engine::default(),
             tree: Tree::new(),
-            surface: Surface::new(window)?,
-            icons: WindowIcons::new(window),
-            effects: Effects::new(window, send),
+            surface: SurfaceRegistry::new(window, title, driven),
+            pump,
+            close_requests: VecDeque::new(),
+            quit_posted: false,
+            effects,
             incoming,
             private: VecDeque::new(),
             opportunity: None,
@@ -94,8 +104,7 @@ impl App {
             report_actions: VecDeque::new(),
             grid_intents: VecDeque::new(),
             focus_departures: BTreeSet::new(),
-            driven: options.is_some(),
-            taskbar: options.is_none().then(|| Taskbar::new(window)),
+            driven,
         };
         if let Some(options) = options {
             app.effects.configure_spec(options)?;
@@ -121,16 +130,19 @@ impl App {
     }
 
     fn drain_private(&mut self) -> Result<()> {
-        while let Some(event) = self.private.pop_front() {
+        while !self.exited()
+            && let Some(event) = self.private.pop_front()
+        {
             self.deliver(event)?;
         }
         Ok(())
     }
 
     fn poll(&mut self) -> Result<()> {
-        if let Some(taskbar) = &mut self.taskbar {
-            taskbar.poll();
+        if self.exited() {
+            return Ok(());
         }
+        self.surface.poll();
         self.effects.poll();
         if let Some(generation) = self.opportunity.take() {
             let mut payload = vec![255];
@@ -138,7 +150,9 @@ impl App {
             self.deliver(effect_event(payload))?;
             self.drain_private()?;
         }
-        while let Ok(event) = self.incoming.try_recv() {
+        while !self.exited()
+            && let Ok(event) = self.incoming.try_recv()
+        {
             self.deliver(event)?;
             self.drain_private()?;
         }
@@ -181,7 +195,7 @@ impl App {
                     };
                     self.effects.storage(op, key, value)?;
                 }
-                17 => self.surface.title(reader.string()?),
+                17 => self.surface.set_legacy_title(reader.str()?),
                 18 => {
                     let op = reader.u8()?;
                     let id = reader.u32()?;
@@ -192,7 +206,12 @@ impl App {
                     let token = reader.u64()?;
                     let start = reader.u64()?;
                     let length = reader.u64()?;
-                    self.effects.save(token, start, length, reader.string()?)?;
+                    let owner = self
+                        .surface
+                        .legacy_handle()
+                        .ok_or("Save As needs an explicit owner in a managed window collection")?;
+                    self.effects
+                        .save(owner, token, start, length, reader.string()?)?;
                 }
                 24 => {
                     for _ in 0..reader.u32()? {
@@ -224,15 +243,113 @@ impl App {
             }
         }
         self.surface.sync(&self.tree)?;
-        if let Some(taskbar) = &mut self.taskbar {
-            taskbar.update(self.surface.taskbar_progress());
-        }
-        self.surface
-            .register_file_drop(self.tree.event(crate::wire::ROOT, "drop").is_some());
         for (op, id) in references {
-            if let Some(key) = self.tree.reference(id) {
-                self.surface.reference(op, key);
+            if let Some(key) = self.tree.reference(id)
+                && let Some(owner) = self.surface.for_key(key)
+                && !self.surface.blocked(owner)
+                && let Some(surface) = self.surface.at_mut(owner)
+            {
+                surface.reference(op, key);
             }
+        }
+        self.finish_exit();
+        Ok(())
+    }
+
+    fn spec_surfaces(&self) -> Vec<SpecSurface> {
+        self.surface.all()
+    }
+
+    fn select_surface(&mut self, id: Key) -> Result<()> {
+        if self.surface.select(id) {
+            Ok(())
+        } else {
+            Err("the selected window is no longer mounted".into())
+        }
+    }
+
+    fn surface_for_key(&self, key: Key) -> Option<Key> {
+        self.tree
+            .contains(key)
+            .then(|| self.surface.for_key(key))
+            .flatten()
+    }
+
+    fn select_key(&mut self, key: Key) -> bool {
+        self.surface_for_key(key)
+            .is_some_and(|id| !self.surface.blocked(id) && self.surface.select(id))
+    }
+
+    fn select_message(&mut self, handle: HWND) -> bool {
+        self.surface
+            .for_handle(handle)
+            .is_some_and(|id| self.select_surface(id).is_ok())
+    }
+
+    fn request_close(&mut self, id: Key) -> Result<()> {
+        let Some(hwnd) = self
+            .surface
+            .handle(id)
+            .filter(|_| !self.surface.blocked(id))
+        else {
+            return Ok(());
+        };
+        let request = (id, hwnd as usize);
+        if !self.close_requests.contains(&request) {
+            self.close_requests.push_back(request);
+        }
+        if self.driven {
+            self.drain_closes()
+        } else {
+            self.queue(CLOSE_EVENTS, "queue window close request")
+        }
+    }
+
+    fn drain_closes(&mut self) -> Result<()> {
+        while let Some((id, address)) = self.close_requests.pop_front() {
+            if self.surface.handle(id).map(|hwnd| hwnd as usize) != Some(address)
+                || self.surface.blocked(id)
+                || self.select_surface(id).is_err()
+            {
+                continue;
+            }
+            match self.surface.target(id) {
+                Some(Some(key)) => {
+                    if let Some((node, listener)) = self.tree.mounted_event(key, "close-request") {
+                        self.deliver(Event::Turn {
+                            node,
+                            handler: listener.handler,
+                            payload: Vec::new(),
+                        })?;
+                        self.drain_private()?;
+                    }
+                }
+                Some(None) => {
+                    self.surface.shutdown();
+                    self.finish_exit();
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn exited(&self) -> bool {
+        self.surface.exited()
+    }
+
+    fn finish_exit(&mut self) {
+        if self.exited() && !self.quit_posted {
+            self.quit_posted = true;
+            // SAFETY: The host owns the UI thread queue, and there are no app surfaces.
+            unsafe { PostQuitMessage(0) };
+        }
+    }
+
+    fn queue(&self, event: u32, trace: &str) -> Result<()> {
+        // SAFETY: The process-lifetime message HWND belongs to this UI thread.
+        if unsafe { PostMessageW(self.pump.0, event, 0, 0) } == 0 {
+            return Err(last_error(trace));
         }
         Ok(())
     }
@@ -294,13 +411,15 @@ impl App {
                         .node(key)
                         .attr("multiple")
                         .is_some_and(enabled_flag);
-                    self.effects.pick(node, listener.handler, multiple)?;
+                    let (owner, _, _) = self.surface.grid_coordinates();
+                    self.effects.pick(owner, node, listener.handler, multiple)?;
                 }
                 return Ok(());
             }
             (Control::FolderButton, BN_CLICKED) => {
                 if let Some((node, listener)) = self.tree.event(key, "change") {
-                    self.effects.pick_folder(node, listener.handler)?;
+                    let (owner, _, _) = self.surface.grid_coordinates();
+                    self.effects.pick_folder(owner, node, listener.handler)?;
                 }
                 return Ok(());
             }
@@ -354,7 +473,9 @@ impl App {
             })?;
             self.drain_private()?;
         }
-        self.surface.restore_controlled_value(key)?;
+        if self.select_key(key) {
+            self.surface.restore_controlled_value(key)?;
+        }
         Ok(())
     }
 
@@ -371,7 +492,7 @@ impl App {
 
     /// Win32 sends native notifications synchronously. Read report selection
     /// after the input message finishes, when the selected-state pair settles.
-    unsafe fn report_notify(&mut self, window: HWND, address: LPARAM) -> Result<()> {
+    unsafe fn report_notify(&mut self, address: LPARAM) -> Result<()> {
         // SAFETY: A nonzero WM_NOTIFY lParam points to its originating NMHDR.
         let header = unsafe { &*(address as *const NMHDR) };
         let Some(key) = self.surface.key(header.hwndFrom) else {
@@ -423,10 +544,7 @@ impl App {
             _ => {}
         }
         if was_idle && !(self.report_selection.is_empty() && self.report_actions.is_empty()) {
-            // SAFETY: The registered root HWND lives on this thread.
-            if unsafe { PostMessageW(window, REPORT_EVENTS, 0, 0) } == 0 {
-                return Err(last_error("queue report input"));
-            }
+            self.queue(REPORT_EVENTS, "queue report input")?;
         }
         Ok(())
     }
@@ -442,13 +560,18 @@ impl App {
     }
 
     pub(crate) fn report_selected(&mut self, key: Key) -> Result<()> {
+        if !self.select_key(key) {
+            return Ok(());
+        }
         let Some((hwnd, report)) = self.surface.report(key) else {
             return Ok(());
         };
         if report.selection_changed(hwnd) {
             let value = report.selection(hwnd).unwrap_or("").to_owned();
             self.report_event(key, "change", value)?;
-            if let Some((hwnd, report)) = self.surface.report(key) {
+            if self.select_key(key)
+                && let Some((hwnd, report)) = self.surface.report(key)
+            {
                 report.restore(hwnd)?;
             }
         }
@@ -456,7 +579,7 @@ impl App {
     }
 
     pub(crate) fn report_event(&mut self, key: Key, name: &str, value: String) -> Result<()> {
-        if self.surface.report(key).is_none() {
+        if !self.select_key(key) || self.surface.report(key).is_none() {
             return Ok(());
         }
         if let Some((node, listener)) = self.tree.event(key, name) {
@@ -474,17 +597,14 @@ impl App {
     }
 
     fn queue_grid(&self) -> Result<()> {
-        let (root, _, _) = self.surface.grid_coordinates();
-        // SAFETY: The root HWND belongs to this thread.
-        if unsafe { PostMessageW(root, GRID_EVENTS, 0, 0) } == 0 {
-            return Err(last_error("queue grid input"));
-        }
-        Ok(())
+        self.queue(GRID_EVENTS, "queue grid input")
     }
 
     fn drain_grid(&mut self) -> Result<()> {
         for key in std::mem::take(&mut self.focus_departures) {
-            if let Some((hwnd, grid)) = self.surface.grid_mut(key) {
+            if self.select_key(key)
+                && let Some((hwnd, grid)) = self.surface.grid_mut(key)
+            {
                 // SAFETY: Query the focus of the calling UI thread.
                 if !grid.editing(unsafe { GetFocus() }) {
                     grid.cancel(hwnd, false);
@@ -498,6 +618,9 @@ impl App {
     }
 
     fn deliver_grid(&mut self, intent: GridIntent) -> Result<()> {
+        if !self.select_key(intent.grid) {
+            return Ok(());
+        }
         let Some((_, grid)) = self.surface.grid(intent.grid) else {
             return Ok(());
         };
@@ -599,7 +722,7 @@ impl App {
     fn dropped(&mut self, point: Option<POINT>, paths: Vec<PathBuf>) -> Result<()> {
         let target = point
             .and_then(|point| self.surface.drop_target(&self.tree, point))
-            .unwrap_or(crate::wire::ROOT);
+            .unwrap_or(self.surface.selected());
         if let Some((node, listener)) = self.tree.event(target, "drop") {
             self.effects.deliver_paths(node, listener.handler, paths)?;
         }
@@ -779,10 +902,63 @@ fn last_error(operation: &str) -> String {
     format!("{operation}: {}", std::io::Error::last_os_error())
 }
 
-fn run() -> Result<()> {
-    // SAFETY: This entry point runs once on the process's UI thread. All
-    // Win32 input/output pointers below are valid for the called function.
+pub(crate) fn create_window(title: &str) -> Result<OwnedWindow> {
+    let title = wide(title);
+    // SAFETY: The class and caption are valid terminated strings on this UI thread.
+    let handle = unsafe {
+        CreateWindowExW(
+            WS_EX_CONTROLPARENT,
+            WINDOW_CLASS,
+            title.as_ptr(),
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            640,
+            520,
+            null_mut(),
+            null_mut(),
+            GetModuleHandleW(null()),
+            null::<c_void>(),
+        )
+    };
+    if handle.is_null() {
+        Err(last_error("create Roc window"))
+    } else {
+        Ok(OwnedWindow(handle))
+    }
+}
+
+fn create_pump() -> Result<OwnedWindow> {
+    // SAFETY: The message-only HWND and timer live for the entire app.
     unsafe {
+        let pump = CreateWindowExW(
+            0,
+            WINDOW_CLASS,
+            w!(""),
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            null_mut(),
+            GetModuleHandleW(null()),
+            null(),
+        );
+        if pump.is_null() {
+            return Err(last_error("create the Roc event pump"));
+        }
+        let pump = OwnedWindow(pump);
+        if SetTimer(pump.0, PUMP, 15, None) == 0 {
+            return Err(last_error("start the Roc event pump"));
+        }
+        Ok(pump)
+    }
+}
+
+fn run() -> Result<()> {
+    // SAFETY: Register the class once on the UI thread, before mounting.
+    let title = unsafe {
         let instance = GetModuleHandleW(null());
         let controls = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
@@ -797,119 +973,112 @@ fn run() -> Result<()> {
         if InitCommonControlsEx(&controls) == 0 {
             return Err(last_error("initialize Windows common controls"));
         }
-        let class = w!("RocSignalsWindow");
         let window_class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             hbrBackground: (COLOR_WINDOW + 1) as _,
-            lpszClassName: class,
+            lpszClassName: WINDOW_CLASS,
             ..WNDCLASSEXW::default()
         };
         if RegisterClassExW(&window_class) == 0 {
             return Err(last_error("register Roc window class"));
         }
-        let title = wide(&app_name(instance));
-        let window = CreateWindowExW(
-            WS_EX_CONTROLPARENT,
-            class,
-            title.as_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            640,
-            520,
-            null_mut(),
-            null_mut(),
-            instance,
-            null::<c_void>(),
-        );
-        if window.is_null() {
-            return Err(last_error("create Roc window"));
-        }
+        app_name(instance)
+    };
+    let window = create_window(&title)?;
+    let result = if let Some(path) = std::env::var_os("ROC_WINDOWS_SPEC") {
+        spec_run::run(window, &PathBuf::from(path))
+    } else {
+        mount(window, None).and_then(|()| run_message_loop())
+    };
+    clear_app();
+    if let Some(error) = FAILURE.with(|failure| failure.borrow_mut().take()) {
+        return Err(error);
+    }
+    result
+}
 
-        if let Some(path) = std::env::var_os("ROC_WINDOWS_SPEC") {
-            let result = spec_run::run(window, &PathBuf::from(path));
-            clear_app();
-            DestroyWindow(window);
-            return result;
-        }
-
-        mount(window, None)?;
-        if SetTimer(window, PUMP, 15, None) == 0 {
-            return Err(last_error("start Roc event pump"));
-        }
-        ShowWindow(window, SW_SHOWNORMAL);
-
-        let mut message = MSG::default();
+fn run_message_loop() -> Result<()> {
+    let mut message = MSG::default();
+    // SAFETY: Translate and dispatch messages from this thread's own queue.
+    unsafe {
         loop {
             match GetMessageW(&mut message, null_mut(), 0, 0) {
                 -1 => return Err(last_error("read the Windows message queue")),
-                0 => break,
-                _ => {
-                    let native_key = control_receives_key(&message);
-                    if message.message == WM_KEYDOWN
-                        && !native_key
-                        && APP.with(|state| {
-                            state.borrow_mut().as_mut().map_or(Ok(false), |app| {
-                                if app.grid_keyboard(message.hwnd, message.wParam as u16)? {
-                                    return Ok(true);
-                                }
-                                if message.wParam == usize::from(VK_RETURN) && modifiers() == 0 {
-                                    app.enter(GetFocus(), Some(&message))
-                                } else {
-                                    Ok(false)
-                                }
-                            })
-                        })?
-                    {
-                        continue;
-                    }
-                    if !(WM_KEYFIRST..=WM_KEYLAST).contains(&message.message)
-                        || native_key
-                        || IsDialogMessageW(window, &message) == 0
-                    {
-                        TranslateMessage(&message);
-                        DispatchMessageW(&message);
-                    }
-                }
+                0 if message.wParam == 0 => return Ok(()),
+                0 => return Err("Windows event loop terminated with an error".into()),
+                _ => {}
+            }
+            let (owner, native, handled) = route_key(&message)?;
+            if handled {
+                continue;
+            }
+            if owner.is_null() || native || IsDialogMessageW(owner, &message) == 0 {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
             }
         }
-        clear_app();
-        if let Some(error) = FAILURE.with(|failure| failure.borrow_mut().take()) {
-            return Err(error);
-        }
-        if message.wParam != 0 {
-            return Err("Windows event loop terminated with an error".into());
-        }
-        Ok(())
     }
 }
 
-/// Dialog navigation otherwise consumes the keys handled by these controls.
-fn control_receives_key(message: &MSG) -> bool {
-    if message.message != WM_KEYDOWN {
-        return false;
+fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
+    let unrelated = (null_mut(), false, false);
+    if !(WM_KEYFIRST..=WM_KEYLAST).contains(&message.message) {
+        return Ok(unrelated);
     }
-    let key = message.wParam as u16;
     APP.with(|state| {
-        let state = state.borrow();
-        let Some(app) = state.as_ref() else {
-            return false;
+        let mut state = state.borrow_mut();
+        let Some(app) = state.as_mut() else {
+            return Ok(unrelated);
         };
-        let Some(id) = app.surface.key(message.hwnd) else {
-            return false;
-        };
-        (key == VK_RETURN && app.surface.report(id).is_some())
+        if !app.select_message(message.hwnd) {
+            return Ok(unrelated);
+        }
+        let id = app.surface.selected();
+        let owner = app.surface.handle(id).expect("native route is mounted");
+        if app.surface.blocked(id) {
+            return Ok((owner, false, true));
+        }
+        if message.message != WM_KEYDOWN {
+            return Ok((owner, false, false));
+        }
+        let key = message.wParam as u16;
+        if app.grid_keyboard(message.hwnd, key)? {
+            return Ok((owner, false, true));
+        }
+        if key == VK_ESCAPE && app.surface.is_dialog(id) && modifiers() == 0 {
+            // SAFETY: The calling UI thread owns the focused edit, if any.
+            let focus = unsafe { GetFocus() };
+            if modal::takes_escape(focus, message, composing(focus)) {
+                return Ok((owner, true, false));
+            }
+            if message.lParam & (1 << 30) == 0 {
+                app.request_close(id)?;
+            }
+            return Ok((owner, false, true));
+        }
+        let native = (key == VK_RETURN
+            && app
+                .surface
+                .key(message.hwnd)
+                .is_some_and(|view| app.surface.report(view).is_some()))
             || (matches!(
                 key,
                 VK_RETURN | VK_SPACE | VK_LEFT | VK_UP | VK_RIGHT | VK_DOWN
-            ) && app.surface.toolbar(message.hwnd).is_some())
+            ) && app.surface.toolbar(message.hwnd).is_some());
+        let handled = if !native && key == VK_RETURN && modifiers() == 0 {
+            // SAFETY: Query focus on the target surface's UI thread.
+            app.enter(unsafe { GetFocus() }, Some(message))?
+        } else {
+            false
+        };
+        Ok((owner, native, handled))
     })
 }
 
-fn mount(window: HWND, options: Option<SpecOptions>) -> Result<()> {
+fn mount(window: OwnedWindow, options: Option<SpecOptions>) -> Result<()> {
     APP.with(|state| {
         // The borrow suppresses synchronous notifications during mount.
         let mut state = state.borrow_mut();
@@ -938,13 +1107,13 @@ extern "C" fn main(_argc: i32, _argv: *mut *mut u8) -> i32 {
     }
 }
 
-unsafe extern "system" fn window_proc(
+pub(crate) unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if Taskbar::queue_if_button_created(message) {
+    if Taskbar::queue_if_button_created(hwnd, message) {
         return 0;
     }
     // SAFETY: The OS calls this on its window's UI thread with documented
@@ -956,8 +1125,10 @@ unsafe extern "system" fn window_proc(
                 let drawn = APP.with(|state| {
                     let state = state.try_borrow().ok()?;
                     let app = state.as_ref()?;
-                    let key = app.surface.key(header.hwndFrom)?;
-                    let (report, grid) = app.surface.grid(key)?;
+                    let id = app.surface.for_handle(hwnd)?;
+                    let surface = app.surface.at(id)?;
+                    let key = surface.key(header.hwndFrom)?;
+                    let (report, grid) = surface.grid(key)?;
                     let details = &*(lparam as *const NMCUSTOMDRAW);
                     Some(grid.draw(report, details))
                 });
@@ -967,9 +1138,9 @@ unsafe extern "system" fn window_proc(
             }
         }
         match message {
-            WM_COMMAND | WM_NOTIFY | REPORT_EVENTS | GRID_EVENTS | WM_SIZE | WM_TIMER
-            | WM_DPICHANGED | WM_VSCROLL | WM_MOUSEWHEEL | WM_DROPFILES | APPLY_PENDING_EDIT
-            | APPLY_TREE_INTENT => {
+            WM_CLOSE | WM_COMMAND | WM_NOTIFY | REPORT_EVENTS | GRID_EVENTS | CLOSE_EVENTS
+            | WM_SIZE | WM_TIMER | WM_DPICHANGED | WM_VSCROLL | WM_MOUSEWHEEL | WM_DROPFILES
+            | APPLY_PENDING_EDIT | APPLY_TREE_INTENT => {
                 let paths = (message == WM_DROPFILES).then(|| paths_from_drop(wparam as HDROP));
                 let handled = APP.with(|state| {
                     let Ok(mut state) = state.try_borrow_mut() else {
@@ -978,7 +1149,42 @@ unsafe extern "system" fn window_proc(
                     let Some(app) = &mut *state else {
                         return Ok(false);
                     };
+                    if hwnd == app.pump.0 {
+                        match message {
+                            WM_TIMER if wparam == PUMP => app.poll()?,
+                            REPORT_EVENTS => app.drain_reports()?,
+                            GRID_EVENTS => app.drain_grid()?,
+                            CLOSE_EVENTS => app.drain_closes()?,
+                            APPLY_TREE_INTENT => {
+                                if app.select_key(wparam)
+                                    && let Some(intent) = app.surface.tree_intent(wparam)
+                                {
+                                    app.tree_event(wparam, intent)?;
+                                }
+                            }
+                            _ => return Ok(false),
+                        }
+                        return Ok(true);
+                    }
+                    if !app.select_message(hwnd) {
+                        return Ok(false);
+                    }
+                    let id = app.surface.selected();
+                    if app.surface.blocked(id)
+                        && matches!(
+                            message,
+                            WM_CLOSE
+                                | WM_COMMAND
+                                | WM_NOTIFY
+                                | WM_VSCROLL
+                                | WM_MOUSEWHEEL
+                                | WM_DROPFILES
+                        )
+                    {
+                        return Ok(true);
+                    }
                     match message {
+                        WM_CLOSE => app.request_close(id)?,
                         WM_COMMAND if lparam != 0 && !app.driven => {
                             let source = lparam as HWND;
                             let notification = (wparam >> 16) as u16;
@@ -988,11 +1194,6 @@ unsafe extern "system" fn window_proc(
                                 app.toolbar_command(source, wparam as u16)?;
                             } else {
                                 app.command(source, notification)?;
-                            }
-                        }
-                        APPLY_TREE_INTENT => {
-                            if let Some(intent) = app.surface.tree_intent(wparam) {
-                                app.tree_event(wparam, intent)?;
                             }
                         }
                         APPLY_PENDING_EDIT => app.surface.settle_edit(lparam as HWND),
@@ -1009,7 +1210,8 @@ unsafe extern "system" fn window_proc(
                                             header.code,
                                             native.itemNew.hItem,
                                             native.action,
-                                        ) && PostMessageW(hwnd, APPLY_TREE_INTENT, key, 0) == 0
+                                        ) && PostMessageW(app.pump.0, APPLY_TREE_INTENT, key, 0)
+                                            == 0
                                         {
                                             return Err(last_error("dispatch native tree intent"));
                                         }
@@ -1025,13 +1227,11 @@ unsafe extern "system" fn window_proc(
                                     }
                                 }
                                 _ => {
-                                    app.report_notify(hwnd, lparam)?;
+                                    app.report_notify(lparam)?;
                                     app.grid_notify(lparam)?;
                                 }
                             }
                         }
-                        GRID_EVENTS => app.drain_grid()?,
-                        REPORT_EVENTS => app.drain_reports()?,
                         WM_SIZE => app.surface.arrange(&app.tree)?,
                         WM_DPICHANGED => {
                             let rect = &*(lparam as *const RECT);
@@ -1045,9 +1245,8 @@ unsafe extern "system" fn window_proc(
                                 SWP_NOZORDER | SWP_NOACTIVATE,
                             );
                             app.surface.dpi_changed(&app.tree)?;
-                            app.icons.sync();
+                            app.surface.sync_icons(id);
                         }
-                        WM_TIMER if wparam == PUMP => app.poll()?,
                         WM_VSCROLL => app.surface.scroll(&app.tree, wparam as u16, None)?,
                         WM_MOUSEWHEEL => {
                             app.surface
@@ -1063,29 +1262,44 @@ unsafe extern "system" fn window_proc(
                 });
                 match handled {
                     Ok(true) => return 0,
+                    Ok(false) if message == WM_CLOSE => return 0,
                     Ok(false) => {}
                     Err(error) => {
-                        FAILURE.with(|failure| failure.borrow_mut().replace(error));
-                        clear_app();
-                        DestroyWindow(hwnd);
+                        fail_thread(error);
                         return 0;
                     }
                 }
             }
-            WM_DESTROY => {
-                KillTimer(hwnd, PUMP);
-                APP.with(|state| {
-                    if let Ok(mut state) = state.try_borrow_mut()
-                        && let Some(taskbar) = state.as_mut().and_then(|app| app.taskbar.as_mut())
-                    {
-                        taskbar.clear();
-                    }
+            WM_NCDESTROY => {
+                let unexpected = APP.with(|state| {
+                    state
+                        .try_borrow_mut()
+                        .ok()
+                        .and_then(|mut state| {
+                            state.as_mut().map(|app| app.surface.forget_destroyed(hwnd))
+                        })
+                        .unwrap_or(false)
                 });
-                PostQuitMessage(0);
-                return 0;
+                if unexpected {
+                    fail_thread(
+                        "a native window was destroyed outside the mounted lifecycle".into(),
+                    );
+                }
             }
             _ => {}
         }
-        DefWindowProcW(hwnd, message, wparam, lparam)
+        modal::dialog_default(hwnd, message, wparam, lparam)
+            .unwrap_or_else(|| DefWindowProcW(hwnd, message, wparam, lparam))
     }
+}
+
+fn fail_thread(error: String) {
+    FAILURE.with(|failure| {
+        let mut failure = failure.borrow_mut();
+        if failure.is_none() {
+            *failure = Some(error);
+        }
+    });
+    // SAFETY: Quit is posted only on the host's UI thread.
+    unsafe { PostQuitMessage(1) };
 }

@@ -532,6 +532,23 @@ impl Surface {
         })
     }
 
+    pub(crate) fn dialog_size(&self, tree: &Tree) -> (i32, i32) {
+        // SAFETY: The surface owns the live HWND and font on its UI thread.
+        let dc = unsafe { GetDC(self.window) };
+        let width = scale(self.dpi, 480);
+        if dc.is_null() {
+            return (width, scale(self.dpi, 320));
+        }
+        let height = unsafe {
+            let previous = SelectObject(dc, self.font);
+            let (_, height) = self.layout(tree, self.content, dc, width, 0, 0, &mut Vec::new());
+            SelectObject(dc, previous);
+            ReleaseDC(self.window, dc);
+            height
+        };
+        (width, height.max(scale(self.dpi, 96)))
+    }
+
     pub(crate) fn title(&self, title: &str) {
         set_text(self.window, title);
     }
@@ -1040,9 +1057,15 @@ impl Surface {
         self.arrange(tree)
     }
 
-    pub(crate) fn sync(&mut self, tree: &Tree) -> Result<()> {
-        self.focus_surviving_tab(tree);
-        let wrapper = WindowDeclaration::read(tree)?;
+    pub(crate) fn sync(
+        &mut self,
+        tree: &Tree,
+        wrapper: WindowDeclaration<'_>,
+        scopes: &BTreeMap<Key, Key>,
+        owner: Key,
+    ) -> Result<()> {
+        let owns = |key: &Key| scopes.get(key) == Some(&owner);
+        self.focus_surviving_tab(&owns);
         self.content = wrapper.content;
         self.taskbar_progress = wrapper.taskbar_progress;
         if let Some(declaration) = wrapper.status {
@@ -1054,7 +1077,7 @@ impl Surface {
             self.status = None;
         }
         self.views.retain(|key, view| {
-            if tree.contains(*key) {
+            if owns(key) {
                 true
             } else {
                 self.handles.remove(&(view.handle as usize));
@@ -1074,16 +1097,16 @@ impl Surface {
         self.arrange(tree)
     }
 
-    fn focus_surviving_tab(&self, tree: &Tree) {
+    fn focus_surviving_tab(&self, owns: &impl Fn(&Key) -> bool) {
         // SAFETY: The HWNDs come from our UI thread and surface.
         let focus = unsafe { GetFocus() };
-        let Some(dead) = self.key(focus).filter(|&key| !tree.contains(key)) else {
+        let Some(dead) = self.key(focus).filter(|&key| !owns(&key)) else {
             return;
         };
         let mut owner = self.views[&dead].tab_owner;
         while let Some(key) = owner {
             let view = &self.views[&key];
-            if tree.contains(key) {
+            if owns(&key) {
                 unsafe { SetFocus(view.handle) };
                 return;
             }
@@ -1094,6 +1117,9 @@ impl Surface {
     fn sync_node(&mut self, tree: &Tree, key: Key, tab_owner: Option<Key>) -> Result<()> {
         let node = tree.node(key);
         if let Kind::Element(tag) = &node.kind {
+            if tag == "ui-dialog" {
+                return Ok(());
+            }
             if let Some(kind) = Control::from_tag(tag)? {
                 if let std::collections::btree_map::Entry::Vacant(slot) = self.views.entry(key) {
                     let view = View::new(self.window, self.font, kind)?;
@@ -1373,6 +1399,9 @@ impl Surface {
         let Kind::Element(tag) = &node.kind else {
             return (0, 0);
         };
+        if tag == "ui-dialog" {
+            return (0, 0);
+        }
         if let Some(view) = self.views.get(&key) {
             if view.kind == Control::FileDropTarget {
                 let inset = scale(self.dpi, 12);
@@ -1460,7 +1489,9 @@ impl Surface {
             .children
             .iter()
             .copied()
-            .filter(|&child| matches!(tree.node(child).kind, Kind::Element(_)))
+            .filter(
+                |&child| matches!(&tree.node(child).kind, Kind::Element(tag) if tag != "ui-dialog"),
+            )
             .collect();
         let mut width = 0;
         let mut height = 0;
@@ -1662,7 +1693,7 @@ thread_local! {
     static COMPOSING: RefCell<BTreeSet<usize>> = const { RefCell::new(BTreeSet::new()) };
 }
 
-fn composing(hwnd: HWND) -> bool {
+pub(crate) fn composing(hwnd: HWND) -> bool {
     COMPOSING.with(|active| active.borrow().contains(&(hwnd as usize)))
 }
 

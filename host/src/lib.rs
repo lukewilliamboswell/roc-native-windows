@@ -21,6 +21,8 @@ mod grid;
 mod grid_clipboard;
 #[cfg(any(test, windows))]
 mod list_view;
+#[cfg(windows)]
+mod modal;
 #[cfg(any(test, windows))]
 mod progress;
 #[cfg(windows)]
@@ -46,6 +48,8 @@ mod window;
 mod window_chrome;
 #[cfg(windows)]
 mod window_icons;
+#[cfg(any(test, windows))]
+mod windows;
 #[cfg(any(test, windows))]
 pub(crate) mod wire;
 

@@ -417,7 +417,6 @@ impl Tree {
         }
     }
 
-    #[cfg(windows)]
     pub(crate) fn mounted_event(&self, key: Key, name: &str) -> Option<(u32, Listener)> {
         let node = self.nodes.get(&key)?;
         let listener = *node.listeners.get(name)?;

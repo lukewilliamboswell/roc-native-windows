@@ -1,6 +1,6 @@
 use crate::Result;
 use crate::progress::Progress;
-use crate::wire::{Key, Kind, ROOT, Tree};
+use crate::wire::{Key, Kind, Tree};
 
 pub(crate) struct WindowDeclaration<'a> {
     pub(crate) content: Key,
@@ -14,18 +14,14 @@ pub(crate) struct StatusDeclaration<'a> {
 }
 
 impl<'a> WindowDeclaration<'a> {
-    pub(crate) fn read(tree: &'a Tree) -> Result<Self> {
-        let roots = elements(tree, ROOT);
-        let Some((wrapper, _)) = roots.clone().find(|(_, tag)| *tag == "ui-window") else {
+    pub(crate) fn read(tree: &'a Tree, wrapper: Option<Key>, content_root: Key) -> Result<Self> {
+        let Some(wrapper) = wrapper else {
             return Ok(Self {
-                content: ROOT,
+                content: content_root,
                 status: None,
                 taskbar_progress: Progress::Idle,
             });
         };
-        if roots.count() != 1 {
-            return Err("Ui.window must be the single outermost element".into());
-        }
 
         let mut content = None;
         let mut status = None;
@@ -74,7 +70,7 @@ impl<'a> StatusDeclaration<'a> {
     }
 }
 
-fn elements(tree: &Tree, parent: Key) -> impl Iterator<Item = (Key, &str)> + Clone {
+pub(crate) fn elements(tree: &Tree, parent: Key) -> impl Iterator<Item = (Key, &str)> + Clone {
     tree.node(parent)
         .children
         .iter()
@@ -262,7 +258,7 @@ pub(crate) mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{Reader, put_str};
+    use crate::wire::{ROOT, Reader, put_str};
 
     fn add_element(tree: &mut Tree, id: u32, parent: u32, tag: &str) {
         let mut command = Vec::new();
@@ -283,7 +279,7 @@ mod tests {
         add_element(&mut tree, 2, 1, "ui-window-content");
         add_element(&mut tree, 3, 1, "ui-status-bar");
         add_element(&mut tree, 4, 3, "ui-status-part");
-        let window = WindowDeclaration::read(&tree).unwrap();
+        let window = WindowDeclaration::read(&tree, Some(1), ROOT).unwrap();
         assert_eq!(window.content, tree.node(1).children[0]);
         let status = window.status.unwrap();
         assert_eq!(status.primary, "");
@@ -291,24 +287,20 @@ mod tests {
 
         tree.command(5, &mut Reader::new(&1u32.to_le_bytes()))
             .unwrap();
-        let window = WindowDeclaration::read(&tree).unwrap();
+        let window = WindowDeclaration::read(&tree, None, ROOT).unwrap();
         assert_eq!(window.content, ROOT);
         assert!(window.status.is_none());
         assert_eq!(window.taskbar_progress, Progress::Idle);
     }
 
     #[test]
-    fn rejects_window_siblings_and_multiple_chrome_declarations() {
+    fn rejects_multiple_chrome_declarations() {
         let mut tree = Tree::new();
         add_element(&mut tree, 1, 0, "ui-window");
-        add_element(&mut tree, 2, 0, "ui-text");
-        assert!(WindowDeclaration::read(&tree).is_err());
-        tree.command(5, &mut Reader::new(&2u32.to_le_bytes()))
-            .unwrap();
         add_element(&mut tree, 3, 1, "ui-window-content");
         add_element(&mut tree, 4, 1, "ui-status-bar");
         add_element(&mut tree, 5, 1, "ui-status-bar");
-        assert!(WindowDeclaration::read(&tree).is_err());
+        assert!(WindowDeclaration::read(&tree, Some(1), ROOT).is_err());
     }
 
     #[test]
