@@ -181,6 +181,10 @@ jobs:
         if: matrix.suite == 'scenarios'
         shell: pwsh
         run: tests/run-staged-scenarios.ps1 -Directory "$env:RUNNER_TEMP/windows-arm64-validation/scenarios"
+      - name: Prepare the hosted ARM64 desktop
+        if: matrix.suite == 'accessibility'
+        shell: powershell
+        run: tests/accessibility/prepare-hosted-desktop.ps1
       - name: Probe Windows UI Automation
         if: matrix.suite == 'accessibility'
         shell: powershell
