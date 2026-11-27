@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::accessibility::{ElementProvider, NativeName, Role, Semantics};
 use crate::choice::Choices;
 use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
 use crate::command_icon::ButtonIcon;
@@ -82,7 +83,7 @@ impl Control {
                 return Ok(None);
             }
             "ui-window" => return Err("Ui.window must be the single outermost element".into()),
-            "ui-text" => Self::Text,
+            "ui-text" | "ui-status-text" => Self::Text,
             "ui-panel" => Self::Panel,
             "ui-button" => Self::Button,
             "ui-file-button" => Self::FileButton,
@@ -228,6 +229,8 @@ impl Control {
 struct View {
     handle: HWND,
     label: HWND,
+    native_name: Option<NativeName>,
+    semantics: Option<ElementProvider>,
     kind: Control,
     props: Props,
     styled: Option<StyledWindow>,
@@ -318,6 +321,8 @@ impl View {
         let view = Self {
             handle,
             label: null_mut(),
+            native_name: None,
+            semantics: None,
             kind,
             styled: None,
             label_style: None,
@@ -382,6 +387,7 @@ impl View {
             }
         }
         if self.kind.separate_label() && self.props.label != desired.label {
+            NativeName::annotate(self.handle, &desired.label, &mut self.native_name);
             if self.label.is_null() && !desired.label.is_empty() {
                 self.label = child(window, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?;
             }
@@ -466,7 +472,10 @@ impl View {
 
 impl Drop for View {
     fn drop(&mut self) {
+        drop(self.semantics.take());
+        drop(self.native_name.take());
         drop(self.picture.take());
+        drop(self.grid.take());
         // SAFETY: Children are owned by this surface and were created on
         // this thread. DestroyWindow also tolerates an already closed HWND.
         unsafe {
@@ -837,11 +846,7 @@ impl Surface {
         }
         let view = self.views.get(&key)?;
         if matches!(kind, "text-field" | "text-area") {
-            return Some(if view.label.is_null() {
-                view.props.placeholder.clone()
-            } else {
-                window_text(view.label)
-            });
+            return Some(view.props.label.clone());
         }
         if view.kind.separate_label() {
             return Some(view.props.label.clone());
@@ -854,6 +859,9 @@ impl Surface {
 
     pub(crate) fn poll_shaders(&mut self) {
         for view in self.views.values_mut() {
+            if let Some(semantics) = &mut view.semantics {
+                semantics.announce();
+            }
             if let Some(shader) = &mut view.shader {
                 shader.poll(self.window);
             }
@@ -986,6 +994,18 @@ impl Surface {
     pub(crate) fn grid_mut(&mut self, key: Key) -> Option<(HWND, &mut Grid)> {
         let view = self.views.get_mut(&key)?;
         Some((view.handle, view.grid.as_mut()?))
+    }
+
+    pub(crate) fn automation_actions(
+        &mut self,
+    ) -> impl Iterator<Item = (Key, crate::accessibility_grid::Action)> + '_ {
+        self.views.iter_mut().flat_map(|(&key, view)| {
+            let hwnd = view.handle;
+            view.grid.iter_mut().flat_map(move |grid| {
+                grid.refresh_automation_focus(hwnd);
+                grid.take_automation().map(move |action| (key, action))
+            })
+        })
     }
 
     pub(crate) fn grid_coordinates(&self) -> (HWND, HFONT, u32) {
@@ -1323,6 +1343,29 @@ impl Surface {
                         ellipsize: node.attr("ellipsize-end").is_some_and(enabled_flag),
                     },
                 )?;
+                if matches!(kind, Control::Image | Control::ShaderView) || tag == "ui-status-text" {
+                    let role = if tag == "ui-status-text" {
+                        Role::Status {
+                            polite: node.attr("announcement") == Some("polite"),
+                        }
+                    } else {
+                        Role::Graphic {
+                            included: node.attr("graphic-kind") != Some("decorative")
+                                && node.attr("graphic-present") != Some("false")
+                                && !view.props.caption.trim().is_empty(),
+                        }
+                    };
+                    let semantic = Semantics {
+                        name: view.props.caption.clone(),
+                        details: node.attr("graphic-details").unwrap_or("").into(),
+                        role,
+                    };
+                    if let Some(provider) = &view.semantics {
+                        provider.update(semantic);
+                    } else {
+                        view.semantics = Some(ElementProvider::new(view.handle, semantic)?);
+                    }
+                }
                 let keys = node.listens("keydown") || node.listens("keyup");
                 if !view.input_attached && (keys || node.attr("pointer-zone").is_some()) {
                     surface_input::attach(view.handle, keys)?;
@@ -1363,6 +1406,7 @@ impl Surface {
                     );
                 }
                 if let Some(grid) = &mut view.grid {
+                    grid.mount_automation(view.handle, &view.props.label)?;
                     return grid.sync(
                         tree,
                         key,

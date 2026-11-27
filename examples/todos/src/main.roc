@@ -41,7 +41,7 @@ view = || {
 			Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("todos.bmp", { label: "A three-item checklist", width: 32, height: 32 }),
+					Ui.asset_image("todos.bmp", { description: Decorative, width: 32, height: 32 }),
 					Ui.text_with("To-do list", { style: Heading }),
 				],
 			),

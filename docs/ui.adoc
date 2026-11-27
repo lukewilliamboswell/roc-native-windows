@@ -71,9 +71,9 @@ for state, stores, and worker tasks.
 | `Ui.file_button` | System file picker | Title, `on_files` handler, and optional `selection` (`SingleFile` or `MultipleFiles`)
 | `Ui.list_view` | Single-selection report | Label, columns, rows, selected key and handlers
 | `Ui.data_grid` | Editable report grid | Label, columns and table rows
-| `Ui.asset_image` | Packaged image | Asset path, accessible `label`, `width`, `height` and optional `fit`
-| `Ui.image` | Raster image | Raster source signal, accessible `label`, `width`, `height` and optional `fit`
-| `Ui.shader_view` | Shader-drawn surface | Packaged pixel shader, accessible `label`, size, optional textures and parameter signals
+| `Ui.asset_image` | Packaged image | Asset path, `description`, `width`, `height` and optional `fit`
+| `Ui.image` | Raster image | Raster source signal, `description`, `width`, `height` and optional `fit`
+| `Ui.shader_view` | Shader-drawn surface | Packaged pixel shader, `description`, size, optional textures and parameter signals
 | `Ui.slider` | Horizontal trackbar | Integer value signal, accessible `label`, `on_change`, optional range, step and focus reference
 |===
 
@@ -84,6 +84,8 @@ value. The default of 0 keeps a horizontal layout at every width.
 An image path is relative to the app's `assets/` directory. Give each
 interactive control a meaningful caption or label. The test runner uses
 those names to locate controls.
+See xref:accessibility.adoc#labels-and-graphics[the accessibility chapter]
+for field labels, descriptions and status announcements.
 
 Each `Ui.Choice` contains a string `key` and `label`. Use a nonempty key
 unique within the control and keep it stable when renaming or reordering
@@ -328,7 +330,7 @@ shader and supplies a second raster generated in Roc.
 [#shader-views]
 == Shader views
 
-Use `Ui.shader_view({ label, shader, width, height, ... })` for one
+Use `Ui.shader_view({ description, shader, width, height, ... })` for one
 Direct3D 11 pixel pass. Put precompiled shader-model 5.0 DXBC (`.cso`) in
 the app's assets directory. Keep the HLSL source alongside the app source.
 To compile the Files example shader on Windows, run this command from

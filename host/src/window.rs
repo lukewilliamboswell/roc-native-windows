@@ -158,6 +158,7 @@ impl App {
             return Ok(());
         }
         self.surface.poll();
+        self.automation_actions()?;
         self.effects.poll();
         let (images, resized) = self.rasters.poll()?;
         self.publish_rasters(images)?;
@@ -689,6 +690,30 @@ impl App {
         Ok(())
     }
 
+    fn automation_actions(&mut self) -> Result<()> {
+        let actions: Vec<_> = self
+            .surface
+            .surfaces_mut()
+            .flat_map(crate::view::Surface::automation_actions)
+            .collect();
+        let previous = self.surface.selected();
+        for (key, action) in actions {
+            if !self.select_key(key) {
+                continue;
+            }
+            let (root, font, dpi) = self.surface.grid_coordinates();
+            if let Some((hwnd, grid)) = self.surface.grid_mut(key) {
+                if let Some(intent) = grid.automation_action(key, hwnd, action)? {
+                    self.deliver_grid(intent)?;
+                } else {
+                    grid.arrange(hwnd, root, font, dpi)?;
+                }
+            }
+        }
+        self.surface.select(previous);
+        Ok(())
+    }
+
     fn deliver_grid(&mut self, intent: GridIntent) -> Result<()> {
         if !self.select_key(intent.grid) {
             return Ok(());
@@ -784,7 +809,10 @@ impl App {
                     grid.begin(hwnd, root, font)?;
                 }
             }
-            LVN_ENDSCROLL => grid.position_editor(hwnd, root),
+            LVN_ENDSCROLL => {
+                grid.position_editor(hwnd, root);
+                grid.publish_automation(hwnd);
+            }
             _ => return Ok(()),
         }
         grid.arrange(hwnd, root, font, dpi)?;
@@ -1029,6 +1057,7 @@ fn create_pump() -> Result<OwnedWindow> {
 }
 
 fn run() -> Result<()> {
+    let _accessibility = crate::accessibility::Apartment::new()?;
     // SAFETY: Register the class once on the UI thread, before mounting.
     let title = unsafe {
         let instance = GetModuleHandleW(null());

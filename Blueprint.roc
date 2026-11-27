@@ -39,6 +39,7 @@ config = [
 	Shell("default", [Use("dev")]),
 	Task("check", [Use("dev"), Run(["roc-stable", "scripts/build.roc", "--", "check"])]),
 	Task("test-native", [Use("release"), Run(["roc-stable", "scripts/build.roc", "--", "test-native"])]),
+	Task("test-accessibility", [Use("release"), Run(["roc-stable", "scripts/build.roc", "--", "test-accessibility"])]),
 	Task("build", [Use("dev"), Run(["roc-stable", "scripts/build.roc", "--", "build"])]),
 	Task("bundle", [Use("dev"), Run(["roc-stable", "scripts/build.roc", "--", "bundle"])]),
 	Task("packager", [Use("dev"), Run(["cargo", "build", "--locked", "--release", "--manifest-path", "packaging/Cargo.toml"])]),

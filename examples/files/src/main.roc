@@ -202,7 +202,7 @@ main_inspector = || {
 								on_press: Engine.handle_by(checksum, |text, _| if (text.is_empty()) [] else [cells.copies.update(|outbox| outbox.post(text))]),
 							},
 						),
-						Ui.text(cells.copy_status.signal()),
+						Ui.status_text(cells.copy_status.signal(), {}),
 					],
 				),
 			),
@@ -214,7 +214,7 @@ main_inspector = || {
 			Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("files.png", { label: "A document in a folder", width: 36, height: 36, fit: Contain }),
+					Ui.asset_image("files.png", { description: Described({ label: "A document in a folder" }), width: 36, height: 36, fit: Contain }),
 					Ui.text_with("Files", { style: Title }),
 				],
 			),
@@ -418,7 +418,7 @@ photo_preview = || {
 					"compare" => compare_photo(photo)
 					"calibration" => Ui.image(
 						Engine.const(calibration.map_ok(|raster| RasterImage(raster)) ?? NoImage),
-						{ label: "Calibration reference", width: 300, height: 150, fit: Contain },
+						{ description: Described({ label: "Calibration reference" }), width: 300, height: 150, fit: Contain },
 					)
 					_ => original_photo(photo)
 				},
@@ -438,7 +438,7 @@ original_photo = |photo| Ui.vstack(
 					_ => NoImage
 				},
 			),
-			{ label: "Original image", width: 300, height: 150, fit: Contain },
+			{ description: Described({ label: "Original image" }), width: 300, height: 150, fit: Contain },
 		),
 		Ui.text_with(photo.map(photo_status), { style: Caption, tone: SecondaryText }),
 	],
@@ -464,7 +464,7 @@ contrast_photo = |photo| {
 		{},
 		[
 			Ui.shader_view({
-				label: "Contrast-adjusted image",
+				description: Described({ label: "Contrast-adjusted image" }),
 				shader: "scan-contrast.cso",
 				width: 300,
 				height: 150,
@@ -503,7 +503,7 @@ compare_photo = |photo| Engine.state(
 			{},
 			[
 				Ui.shader_view({
-					label: "Image comparison",
+					description: Described({ label: "Image comparison" }),
 					shader: "image-compare.cso",
 					width: 300,
 					height: 150,

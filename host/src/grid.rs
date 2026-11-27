@@ -1,4 +1,6 @@
 use crate::Result;
+use crate::accessibility::NativeName;
+use crate::accessibility_grid::{self as automation, Action, Operation, Projection, Snapshot};
 use crate::grid_clipboard::ClipboardText;
 use crate::list_view::{ListView, Report};
 use crate::view::{child, position, scale, set_text, window_text};
@@ -49,10 +51,12 @@ enum IntentSource {
 struct Editing {
     handle: HWND,
     cell: Cell,
+    name: Option<NativeName>,
 }
 
 impl Drop for Editing {
     fn drop(&mut self) {
+        drop(self.name.take());
         // SAFETY: The grid owns this live EDIT HWND on the UI thread.
         unsafe { DestroyWindow(self.handle) };
     }
@@ -69,6 +73,8 @@ pub(crate) struct Grid {
     editing: Option<Editing>,
     status: HWND,
     enabled: bool,
+    automation: Option<Projection>,
+    automation_name: String,
 }
 
 impl Grid {
@@ -270,26 +276,219 @@ impl Grid {
         self.revision = self.revision.wrapping_add(1);
         self.active = Some(*record.mounted.get(column).ok_or("unknown grid column")?);
         self.report.select(hwnd, Some(&record.key))?;
-        // SAFETY: The live report is owned by this grid on the UI thread.
-        unsafe {
-            SendMessageW(hwnd, LVM_ENSUREVISIBLE, row, 0);
-            if let Some(rect) = subitem_rect(hwnd, row, column) {
-                let mut client = RECT::default();
-                GetClientRect(hwnd, &mut client);
-                let scroll = if rect.left < 0 {
-                    rect.left
-                } else {
-                    (rect.right - client.right).clamp(0, rect.left)
-                };
-                if scroll != 0 {
-                    SendMessageW(hwnd, LVM_SCROLL, scroll as usize, 0);
-                }
-            }
-            InvalidateRect(hwnd, null_mut(), 0);
+        reveal_cell(hwnd, row, column);
+        Ok(())
+    }
+
+    pub(crate) fn mount_automation(&mut self, hwnd: HWND, name: &str) -> Result<()> {
+        if self.automation.is_none() {
+            self.automation = Some(Projection::new(hwnd)?);
+        }
+        if self.automation_name != name {
+            self.automation_name = name.to_owned();
         }
         Ok(())
     }
 
+    pub(crate) fn take_automation(&mut self) -> impl Iterator<Item = Action> + use<> {
+        self.automation
+            .as_mut()
+            .map_or_else(Default::default, |automation| {
+                automation.announce();
+                automation.drain()
+            })
+            .into_iter()
+    }
+
+    pub(crate) fn automation_action(
+        &mut self,
+        key: Key,
+        hwnd: HWND,
+        action: Action,
+    ) -> Result<Option<Intent>> {
+        let Some(cell) = self.cells.get(&action.cell).filter(|_| self.enabled) else {
+            return Ok(None);
+        };
+        let (row, column) = cell.position;
+        match action.operation {
+            Operation::SetValue(text) => {
+                return Ok(self
+                    .editable(action.cell)
+                    .filter(|_| self.editing.is_none())
+                    .map(|cell| Intent {
+                        grid: key,
+                        source: IntentSource::Edit(cell),
+                        text,
+                    }));
+            }
+            Operation::Select => self.activate(hwnd, row, column)?,
+            Operation::ExtendSelection => {
+                if self.anchor.is_none() {
+                    self.anchor = self.active;
+                }
+                self.move_to(hwnd, row, column)?;
+            }
+            Operation::Reveal => reveal_cell(hwnd, row, column),
+            Operation::Focus => {
+                self.activate(hwnd, row, column)?;
+                // SAFETY: The grid is live, enabled, and on this UI thread.
+                unsafe { SetFocus(hwnd) };
+            }
+            Operation::Scroll([x, y]) => {
+                let horizontal = scroll_axis(hwnd, SB_HORZ);
+                let vertical = scroll_axis(hwnd, SB_VERT);
+                let row_height =
+                    subitem_rect(hwnd, 0, 0).map_or(1, |rect| (rect.bottom - rect.top).max(1));
+                // SAFETY: Report-mode horizontal scrolling uses device pixels and vertical scrolling uses row heights.
+                unsafe {
+                    SendMessageW(
+                        hwnd,
+                        LVM_SCROLL,
+                        (x - horizontal.position) as usize,
+                        ((y - vertical.position) * row_height) as isize,
+                    )
+                };
+            }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn publish_automation(&mut self, hwnd: HWND) {
+        let Some(automation) = &self.automation else {
+            return;
+        };
+        let report = self.report.projection();
+        // SAFETY: This native control and its header live on our UI thread.
+        let (header, first, limit, focus) = unsafe {
+            let first = SendMessageW(hwnd, LVM_GETTOPINDEX, 0, 0).max(0) as usize;
+            let count = SendMessageW(hwnd, LVM_GETCOUNTPERPAGE, 0, 0).max(0) as usize;
+            (
+                SendMessageW(hwnd, LVM_GETHEADER, 0, 0) as HWND,
+                first,
+                first.saturating_add(count).saturating_add(1),
+                GetFocus(),
+            )
+        };
+        let headers = report
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(column, info)| {
+                let mut rect = RECT::default();
+                // SAFETY: The header fills this RECT for its current column.
+                unsafe {
+                    if SendMessageW(header, HDM_GETITEMRECT, column, address(&mut rect)) != 0 {
+                        MapWindowPoints(header, null_mut(), (&mut rect as *mut RECT).cast(), 2);
+                    }
+                }
+                (info.heading.clone(), rect_to_uia(rect))
+            })
+            .collect();
+        let mut order = Vec::new();
+        let mut cells = BTreeMap::new();
+        for (row, rendered) in report.rows.iter().enumerate() {
+            for (column, &key) in rendered.mounted.iter().enumerate() {
+                let meta = &self.cells[&key];
+                let mut bounds = windows::Win32::UI::Accessibility::UiaRect::default();
+                if (first..limit).contains(&row)
+                    && let Some(mut rect) = visible_rect(hwnd, row, column)
+                {
+                    // SAFETY: Map the live cell's client RECT to screen coordinates.
+                    unsafe {
+                        MapWindowPoints(hwnd, null_mut(), (&mut rect as *mut RECT).cast(), 2)
+                    };
+                    bounds = rect_to_uia(rect);
+                }
+                order.push(key);
+                cells.insert(
+                    key,
+                    automation::Cell {
+                        row,
+                        column,
+                        value: rendered.cells[column].clone(),
+                        feedback: meta.feedback.clone(),
+                        read_only: meta.commit.is_none(),
+                        bounds,
+                    },
+                );
+            }
+        }
+        automation.update(Snapshot {
+            name: self.automation_name.clone(),
+            headers,
+            order,
+            cells,
+            bounds: rect_to_uia(win_rect(hwnd)),
+            active: self.active,
+            range: self.range(),
+            focused: focus == hwnd || self.editing(focus),
+            enabled: self.enabled,
+            editor: self
+                .editing
+                .as_ref()
+                .map(|editing| (editing.cell.key, editing.handle as usize)),
+            scroll: [scroll_axis(hwnd, SB_HORZ), scroll_axis(hwnd, SB_VERT)],
+        });
+    }
+
+    pub(crate) fn refresh_automation_focus(&self, hwnd: HWND) {
+        if let Some(automation) = &self.automation {
+            // SAFETY: GetFocus refers to the UI thread that owns the live grid.
+            let focus = unsafe { GetFocus() };
+            automation.set_focus(focus == hwnd || self.editing(focus));
+        }
+    }
+}
+
+fn reveal_cell(hwnd: HWND, row: usize, column: usize) {
+    // SAFETY: The live report is owned by this grid on the UI thread.
+    unsafe {
+        SendMessageW(hwnd, LVM_ENSUREVISIBLE, row, 0);
+        if let Some(rect) = subitem_rect(hwnd, row, column) {
+            let mut client = RECT::default();
+            GetClientRect(hwnd, &mut client);
+            let scroll = if rect.left < 0 {
+                rect.left
+            } else {
+                (rect.right - client.right).clamp(0, rect.left)
+            };
+            if scroll != 0 {
+                SendMessageW(hwnd, LVM_SCROLL, scroll as usize, 0);
+            }
+        }
+        InvalidateRect(hwnd, null_mut(), 0);
+    }
+}
+
+fn rect_to_uia(rect: RECT) -> windows::Win32::UI::Accessibility::UiaRect {
+    windows::Win32::UI::Accessibility::UiaRect {
+        left: f64::from(rect.left),
+        top: f64::from(rect.top),
+        width: f64::from((rect.right - rect.left).max(0)),
+        height: f64::from((rect.bottom - rect.top).max(0)),
+    }
+}
+
+fn scroll_axis(hwnd: HWND, axis: i32) -> automation::ScrollAxis {
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_PAGE | SIF_POS | SIF_RANGE,
+        ..SCROLLINFO::default()
+    };
+    // SAFETY: The report lives on our UI thread and supplies the scrollbar state.
+    if unsafe { GetScrollInfo(hwnd, axis, &mut info) } == 0 {
+        return automation::ScrollAxis::default();
+    }
+    let length = (info.nMax - info.nMin + 1).max(0);
+    let page = (info.nPage as i32).clamp(0, length);
+    automation::ScrollAxis {
+        position: (info.nPos - info.nMin).clamp(0, length - page),
+        length,
+        page,
+    }
+}
+
+impl Grid {
     pub(crate) fn navigate(&mut self, hwnd: HWND, key: u16, extend: bool) -> Result<()> {
         let report = self.report.projection();
         let Some(meta) = self.active.and_then(|id| self.cells.get(&id)) else {
@@ -345,7 +544,14 @@ impl Grid {
             SendMessageW(handle, EM_LIMITTEXT, TEXT_LIMIT, 0);
             SendMessageW(handle, EM_SETSEL, 0, -1);
         }
-        self.editing = Some(Editing { handle, cell });
+        let (_, column) = self.cells[&cell.key].position;
+        let mut name = None;
+        NativeName::annotate(
+            handle,
+            &self.report.projection().columns[column].heading,
+            &mut name,
+        );
+        self.editing = Some(Editing { handle, cell, name });
         self.position_editor(hwnd, window);
         if self.editing.is_some() {
             // SAFETY: The transient editor is live and arranged.
@@ -485,6 +691,7 @@ impl Grid {
             scale(dpi, 22),
         );
         self.position_editor(hwnd, window);
+        self.publish_automation(hwnd);
         Ok(self.status)
     }
 

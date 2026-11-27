@@ -1,0 +1,95 @@
+= Windows accessibility
+
+[#labels-and-graphics]
+== Labels, graphics, and status
+
+Give a field a visible `label` signal that says what the user can enter.
+Keep the placeholder for an example or format hint. A label remains the
+field's name as its value changes. The host keeps the label beside the
+control and preserves the system's edit and selection patterns.
+
+Supply a `description` for asset images, raster images, and shader views.
+Use `Described({ label })` for an informative graphic and add
+`details: Details(text)` through a signal for supplemental information.
+Use `Decorative` for an image whose information is already available
+nearby. A described image is available in the accessibility tree.
+Decorative graphics and empty raster views stay out of its control and
+content views. Both stay out of Tab traversal by default.
+
+Files uses a native slider as the keyboard and automation route for
+its image comparison. The slider and pointer events update one value.
+Workers displays its variance as text alongside its meter.
+
+Mount `Ui.status_text(message, {})` once around each workflow that
+reports a meaningful result. The initial text is available for
+navigation. A later nonempty change can raise a polite live-region
+event without moving focus. `announcement: Quiet` makes the status
+available for reading without an announcement. Use ordinary text for
+frequent counts. Use the native progress control for progress. When
+Windows has disabled client-area animations, an indeterminate
+operation provides a steady busy caption.
+
+[#editable-grid]
+== Editable grid semantics
+
+The grid's UI Automation provider exposes mounted cells with their
+current row, column, column header, selection, and committed value.
+An invalid edit leaves the value intact and makes the validation
+message available with the affected cell. A surviving mounted cell
+keeps its runtime identity when displayed at another index. The
+provider for a removed cell returns an unavailable-element error.
+
+An automation edit requests the same typed commit as a keyboard
+edit. UI Automation observes the model after the app accepts or
+rejects the draft. The provider accepts bounded text for an editable
+cell and routes it through the owning UI thread. It rejects reads
+from retired providers and changes to disabled or read-only cells.
+The host rechecks the mount, window, and editor state before applying
+queued work. These checks cover the app's own controls. Windows
+governs which desktop processes can use accessibility APIs.
+
+[#verify-uia]
+== Verify UI Automation on Windows
+
+Run `blueprint run build` once from the checkout to stage the host, then
+run the following command from an interactive Windows desktop.
+
+[source,powershell]
+----
+blueprint run test-accessibility
+----
+
+The contributor probe launches the real examples, queries UI Automation
+from a separate MTA process, and checks names, patterns, state changes,
+and focus. Each app and client are terminated after the check. For a
+focused run or a generated Starter, invoke the same script directly.
+
+[source,powershell]
+----
+powershell.exe -NoProfile -File tests/accessibility/run.ps1 -Example workers
+powershell.exe -NoProfile -File tests/accessibility/run.ps1 -Example starter -Starter C:\work\reading-list
+----
+
+Record the Windows version, architecture, and display preferences with
+results. Then use the keyboard and Narrator for these checks.
+
+* Reading List and Counter. Tab and Shift+Tab through all commands.
+  Add, select, mark, and remove a title. Check the editable field's
+  name and value and the counter's displayed value.
+* Todos. Set and clear dates and times. Open Notes by keyboard, enter a
+  new line, and close it. Check that focus returns to the opener or to
+  an eligible control if the opener has gone.
+* Files. Use the native picker, navigate tree and tabs, and compare photos
+  with the keyboard on the comparison slider. Check the value and
+  notice when a fingerprint is copied.
+* HTTP. Check that completion, cancellation, and failure announce a
+  useful status while keyboard focus stays where the user left it.
+  Repeat with client animations disabled.
+* Workers. Traverse the grid, select a range, and reject an invalid
+  Counted edit. Check the column, value, and feedback, then reconcile
+  and read its status.
+
+Repeat with a Windows contrast theme, larger Text size, and mixed
+monitor DPI when available. Run the core Reading List check on a fresh
+app from the standalone initializer. Keep native Windows evidence
+distinct from cross-build and Wine results.

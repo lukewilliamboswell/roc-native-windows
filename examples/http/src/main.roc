@@ -32,7 +32,7 @@ view = || {
 			Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("http.bmp", { label: "A request arrow and a response arrow", width: 28, height: 28 }),
+					Ui.asset_image("http.bmp", { description: Decorative, width: 28, height: 28 }),
 					Ui.text_with("HTTP", { style: Title }),
 				],
 			),
@@ -50,7 +50,7 @@ view = || {
 				Ui.vstack(
 					{},
 					[
-						Ui.text_with(cells.status.signal(), { style: Heading }),
+						Ui.status_text(cells.status.signal(), { text: { style: Heading } }),
 						Ui.text_with(cells.body.signal(), { style: Monospace }),
 					],
 				),

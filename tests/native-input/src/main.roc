@@ -83,7 +83,7 @@ uncaptured_view = || bitmap(
 
 bitmap = |label, input| {
 	raster = Ui.raster({ width: 1, height: 1, rgba: [48, 98, 144, 255] })
-	Ui.image(Engine.const(raster.map_ok(|value| RasterImage(value)) ?? NoImage), { label, width: 101, height: 103, input })
+	Ui.image(Engine.const(raster.map_ok(|value| RasterImage(value)) ?? NoImage), { description: Described({ label: Engine.const(label) }), width: 101, height: 103, input })
 }
 
 uncaptured_move : Engine.Pointer -> List(Engine.Write(_))

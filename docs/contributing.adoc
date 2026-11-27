@@ -41,6 +41,9 @@ the MSI on a clean machine. Cross-builds and Wine compatibility checks
 provide separate evidence from native Windows runs. Hosted CI is currently
 disabled.
 
+Run xref:accessibility.adoc#verify-uia[the accessibility probe and desktop
+walkthroughs] before recording accessibility verification for a release.
+
 [#review-host-authority]
 == Review each feature's security model
 

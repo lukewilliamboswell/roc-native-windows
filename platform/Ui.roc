@@ -137,38 +137,19 @@ Ui := [].{
 	text_with = |value, props|
 		Engine.element(
 			"ui-text",
-			[
-				Engine.attr("ellipsize-end", bool_word(props.overflow == EllipsizeEnd)),
-				Engine.attr(
-					"text-style",
-					match props.style {
-						Body => "body"
-						Caption => "caption"
-						Heading => "heading"
-						Title => "title"
-						Display => "display"
-						Monospace => "monospace"
-					},
-				),
-				Engine.attr(
-					"text-tone",
-					match props.tone {
-						PrimaryText => "primary"
-						SecondaryText => "secondary"
-						AccentText => "accent"
-					},
-				),
-				Engine.attr(
-					"text-align",
-					match props.align {
-						Start => "start"
-						Center => "center"
-						End => "end"
-					},
-				),
-			],
+			text_attributes(props),
 			[Engine.text_s(value)],
 		)
+
+	StatusTextProps := { announcement : [Polite, Quiet] ?? Polite, text : TextProps ?? {} }
+
+	## Persistent feedback that can announce a changed message without moving focus.
+	status_text : Signal(ctx, Str), StatusTextProps -> Elem(ctx)
+	status_text = |message, props| Engine.element(
+		"ui-status-text",
+		text_attributes(props.text).append(Engine.attr("announcement", if (props.announcement == Polite) "polite" else "quiet")),
+		[Engine.text_s(message)],
+	)
 
 	## An optional ICO asset beside a command's text.
 	CommandIcon := [NoIcon, IconAsset(Str)]
@@ -196,7 +177,7 @@ Ui := [].{
 		)
 
 	## The accessible name of a toolbar.
-	ToolbarProps := { label : Str }
+	ToolbarProps(ctx) := { label : Signal(ctx, Str) }
 
 	## A toolbar command's stable key, click handler and controlled availability.
 	ToolbarButtonProps(ctx) := {
@@ -228,7 +209,7 @@ Ui := [].{
 	toolbar_separator = || ToolbarSeparator
 
 	## A native command group that wraps as its width changes.
-	toolbar : ToolbarProps, List(ToolbarItem(ctx)) -> Elem(ctx)
+	toolbar : ToolbarProps(ctx), List(ToolbarItem(ctx)) -> Elem(ctx)
 	toolbar = |props, items| {
 		children = items.map(
 			|item| match item {
@@ -236,14 +217,14 @@ Ui := [].{
 				ToolbarSeparator => Engine.element("ui-toolbar-separator", [], [])
 			},
 		)
-		Engine.element("ui-toolbar", [Engine.attr("label", props.label)], children)
+		Engine.element("ui-toolbar", [Engine.attr_s("label", props.label)], children)
 	}
 
 	## A text field sends the current value after each edit.
 	TextFieldProps(ctx) := {
 		on_input : Handler(ctx),
 		placeholder : Str ?? "",
-		label : Str ?? "",
+		label : Signal(ctx, Str),
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
 	}
 
@@ -255,7 +236,7 @@ Ui := [].{
 			[
 				Engine.attr_s("value", value),
 				Engine.attr("placeholder", props.placeholder),
-				Engine.attr("label", props.label),
+				Engine.attr_s("label", props.label),
 				Engine.attr_s("enabled", props.enabled.map(bool_word)),
 				Engine.on("input", props.on_input),
 			],
@@ -264,7 +245,7 @@ Ui := [].{
 
 	## A read-only preview or an editor that sends its entire LF-delimited draft.
 	TextAreaProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		rows : U32 ?? 5,
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
 		mode : [ReadOnly, Editable(HandlerOf(ctx, Str))] ?? ReadOnly,
@@ -276,7 +257,7 @@ Ui := [].{
 	text_area = |value, props| {
 		base = [
 			Engine.prop_s(Engine.Prop.value, value),
-			Engine.attr("label", props.label),
+			Engine.attr_s("label", props.label),
 			Engine.attr("rows", props.rows.to_str()),
 			Engine.attr_s("enabled", props.enabled.map(bool_word)),
 			Engine.ref(props.reference),
@@ -433,18 +414,18 @@ Ui := [].{
 	## Presentation progress for work with optional measurable counts.
 	Progress := [Idle, Indeterminate, Determinate({ completed : U64, total : U64 })]
 
-	ProgressBarProps := {
-		label : Str,
+	ProgressBarProps(ctx) := {
+		label : Signal(ctx, Str),
 		height : U32 ?? 16,
 	}
 
 	## Show a native progress indicator. Idle keeps its space and hides the indicator.
-	progress_bar : Signal(ctx, Progress), ProgressBarProps -> Elem(ctx)
+	progress_bar : Signal(ctx, Progress), ProgressBarProps(ctx) -> Elem(ctx)
 	progress_bar = |progress, props|
 		Engine.element(
 			"ui-progress-bar",
 			[
-				Engine.attr("label", props.label),
+				Engine.attr_s("label", props.label),
 				Engine.attr("height", props.height.to_str()),
 				Engine.attr_s("progress", progress.map(progress_word)),
 			],
@@ -503,7 +484,7 @@ Ui := [].{
 	}
 
 	SliderProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		on_change : HandlerOf(ctx, I32),
 		range : { min : I32, max : I32 } ?? { min: 0, max: 100 },
 		step : I32 ?? 1,
@@ -518,7 +499,7 @@ Ui := [].{
 			"ui-slider",
 			[
 				Engine.ref(props.reference),
-				Engine.attr("label", props.label),
+				Engine.attr_s("label", props.label),
 				Engine.attr("range-min", props.range.min.to_str()),
 				Engine.attr("range-max", props.range.max.to_str()),
 				Engine.attr("step", props.step.to_str()),
@@ -536,7 +517,7 @@ Ui := [].{
 	Selection := [NoSelection, Selected(Str)]
 
 	ComboBoxProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		choices : Signal(ctx, List(Choice)),
 		selected : Signal(ctx, Selection),
 		on_select : HandlerOf(ctx, Selection),
@@ -549,7 +530,7 @@ Ui := [].{
 		choice_control("ui-combo-box", props.label, props.choices, props.selected, props.on_select, props.enabled, 1)
 
 	ListBoxProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		choices : Signal(ctx, List(Choice)),
 		selected : Signal(ctx, Selection),
 		on_select : HandlerOf(ctx, Selection),
@@ -563,7 +544,7 @@ Ui := [].{
 		choice_control("ui-list-box", props.label, props.choices, props.selected, props.on_select, props.enabled, props.visible_rows)
 
 	RadioGroupProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		choices : List(Choice),
 		selected : Signal(ctx, Str),
 		on_select : HandlerOf(ctx, Str),
@@ -576,7 +557,7 @@ Ui := [].{
 		Engine.element(
 			"ui-radio-group",
 			[
-				Engine.attr("label", props.label),
+				Engine.attr_s("label", props.label),
 				Engine.attr_s("enabled", props.enabled.map(bool_word)),
 				Engine.attr_s("selected", props.selected),
 				Engine.on("change", props.on_select),
@@ -591,7 +572,7 @@ Ui := [].{
 	TreeExpansion : { key : Str, expansion : Expansion }
 
 	TreeViewProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		nodes : Signal(ctx, List(TreeNode)),
 		selected : Signal(ctx, Selection),
 		on_select : HandlerOf(ctx, Selection),
@@ -621,7 +602,7 @@ Ui := [].{
 		Engine.element(
 			"ui-tree-view",
 			[
-				Engine.attr("label", props.label),
+				Engine.attr_s("label", props.label),
 				Engine.attr("visible-rows", props.visible_rows.to_str()),
 				Engine.attr_s("enabled", props.enabled.map(bool_word)),
 				Engine.attr_s("selected", props.selected.map(selection_key)),
@@ -661,7 +642,7 @@ Ui := [].{
 
 	## A native tab strip with an app-owned selection and active page.
 	TabsProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		tabs : List(Choice),
 		selected : Signal(ctx, Str),
 		on_select : HandlerOf(ctx, Str),
@@ -673,7 +654,7 @@ Ui := [].{
 		Engine.element(
 			"ui-tabs",
 			[
-				Engine.attr("label", props.label),
+				Engine.attr_s("label", props.label),
 				Engine.attr_s("selected", props.selected),
 				Engine.on("change", props.on_select),
 			],
@@ -681,7 +662,7 @@ Ui := [].{
 		)
 
 	## A labeled area that receives Explorer file drops.
-	FileDropTargetProps(ctx) := { label : Str, on_files : Engine.FilesHandler(ctx) }
+	FileDropTargetProps(ctx) := { label : Signal(ctx, Str), on_files : Engine.FilesHandler(ctx) }
 
 	## Mount content inside a native file drop target.
 	file_drop_target : FileDropTargetProps(ctx), Elem(ctx) -> Elem(ctx)
@@ -689,7 +670,7 @@ Ui := [].{
 		Engine.element(
 			"ui-file-drop-target",
 			[
-				Engine.attr("label", props.label),
+				Engine.attr_s("label", props.label),
 				Engine.on_files(Drop, props.on_files),
 			],
 			[content],
@@ -721,7 +702,7 @@ Ui := [].{
 
 	## A single-select report with optional row activation and header actions.
 	ListViewProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		columns : List(Column),
 		selected : Signal(ctx, Selection),
 		on_select : HandlerOf(ctx, Selection),
@@ -745,7 +726,7 @@ Ui := [].{
 		Engine.element(
 			"ui-list-view",
 			[
-				Engine.attr("label", props.label),
+				Engine.attr_s("label", props.label),
 				Engine.attr_s("selected", props.selected.map(selection_key)),
 				Engine.attr_s("enabled", props.enabled.map(bool_word)),
 				Engine.attr("visible-rows", props.visible_rows.to_str()),
@@ -775,7 +756,7 @@ Ui := [].{
 
 	## A report grid whose cells can receive typed text edits.
 	DataGridProps(ctx) := {
-		label : Str,
+		label : Signal(ctx, Str),
 		columns : List(Column),
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
 		visible_rows : U32 ?? 8,
@@ -786,7 +767,7 @@ Ui := [].{
 	data_grid : DataGridProps(ctx), Elem(ctx) -> Elem(ctx)
 	data_grid = |props, rows| {
 		attrs = [
-			Engine.attr("label", props.label),
+			Engine.attr_s("label", props.label),
 			Engine.attr_s("enabled", props.enabled.map(bool_word)),
 			Engine.attr("visible-rows", props.visible_rows.to_str()),
 		]
@@ -840,8 +821,16 @@ Ui := [].{
 
 	ShaderParameter := { name : Str, value : F32 }
 
+	## Describe an informative graphic or omit a decorative graphic from accessibility views.
+	GraphicDescription(ctx) := [Described(GraphicDescriptionProps(ctx)), Decorative]
+
+	GraphicDescriptionProps(ctx) := {
+		label : Signal(ctx, Str),
+		details : Signal(ctx, [NoDetails, Details(Str)]) ?? Engine.const(NoDetails),
+	}
+
 	ShaderViewProps(ctx) := {
-		label : Str,
+		description : GraphicDescription(ctx),
 		shader : Str,
 		width : U32,
 		height : U32,
@@ -857,7 +846,6 @@ Ui := [].{
 	shader_view = |props| Engine.element(
 		"ui-shader-view",
 		[
-			Engine.attr("label", props.label),
 			Engine.attr("shader", props.shader),
 			Engine.attr("width", props.width.to_str()),
 			Engine.attr("height", props.height.to_str()),
@@ -865,19 +853,21 @@ Ui := [].{
 			Engine.attr_s("second-texture", props.second_texture.map(shader_texture)),
 			Engine.attr_s("parameters", props.parameters.map(shader_parameters)),
 			Engine.attr("sampling", if (props.sampling == Nearest) "nearest" else "linear"),
-		].concat(Ui.surface_input(props.input)),
+		].concat(graphic_attributes(props.description)).concat(Ui.surface_input(props.input)),
 		[shader_raster("0", props.texture), shader_raster("1", props.second_texture)],
 	)
 
 	## An image's accessible label and dimensions in device-independent pixels.
-	AssetImageProps := { label : Str, width : U32, height : U32, fit : [Stretch, Contain] ?? Stretch }
+	AssetImageProps(ctx) := { description : GraphicDescription(ctx), width : U32, height : U32, fit : [Stretch, Contain] ?? Stretch }
 
 	## Show a packaged PNG, JPEG or BMP. An empty path clears the image.
-	asset_image : Signal(ctx, Str), AssetImageProps -> Elem(ctx)
+	asset_image : Signal(ctx, Str), AssetImageProps(ctx) -> Elem(ctx)
 	asset_image = |path, props|
 		Engine.element(
 			"ui-asset-image",
-			[Engine.attr_s("asset", path)].concat(image_attributes(props.label, props.width, props.height, props.fit == Contain)),
+			[Engine.attr_s("asset", path), Engine.attr_s("graphic-present", path.map(|name| bool_word(!name.is_empty())))]
+				.concat(image_attributes(props.width, props.height, props.fit == Contain))
+				.concat(graphic_attributes(props.description)),
 			[],
 		)
 
@@ -913,7 +903,7 @@ Ui := [].{
 
 	ImageSource : [NoImage, RasterImage(Raster)]
 	ImageProps(ctx) := {
-		label : Str,
+		description : GraphicDescription(ctx),
 		width : U32,
 		height : U32,
 		fit : [Stretch, Contain] ?? Stretch,
@@ -924,8 +914,9 @@ Ui := [].{
 	image : Signal(ctx, ImageSource), ImageProps(ctx) -> Elem(ctx)
 	image = |source, props| {
 		raster_input = Ui.with_raster_binding(source, |bind, attachment| Engine.element("ui-image-raster", [bind], [attachment]))
-		attrs = image_attributes(props.label, props.width, props.height, props.fit == Contain)
-		Engine.element("ui-image", attrs.concat(Ui.surface_input(props.input)), [raster_input])
+		attrs = image_attributes(props.width, props.height, props.fit == Contain)
+		present = Engine.attr_s("graphic-present", source.map(|current| bool_word(current != NoImage)))
+		Engine.element("ui-image", attrs.append(present).concat(graphic_attributes(props.description)).concat(Ui.surface_input(props.input)), [raster_input])
 	}
 
 	## The input identity crosses as a private typed port attachment.
@@ -949,13 +940,30 @@ Ui := [].{
 
 }
 
-image_attributes : Str, U32, U32, Bool -> List(Engine.Attr(ctx))
-image_attributes = |label, width, height, contain| [
-	Engine.attr("label", label),
+image_attributes : U32, U32, Bool -> List(Engine.Attr(ctx))
+image_attributes = |width, height, contain| [
 	Engine.attr("width", width.to_str()),
 	Engine.attr("height", height.to_str()),
 	Engine.attr("fit", if (contain) "contain" else "stretch"),
 ]
+
+graphic_attributes : Ui.GraphicDescription(ctx) -> List(Engine.Attr(ctx))
+graphic_attributes = |description| match description {
+	Decorative => [Engine.attr("graphic-kind", "decorative")]
+	Described(props) => [
+		Engine.attr("graphic-kind", "described"),
+		Engine.attr_s("label", props.label),
+		Engine.attr_s(
+			"graphic-details",
+			props.details.map(
+				|current| match current {
+					NoDetails => ""
+					Details(details) => details
+				},
+			),
+		),
+	]
+}
 
 RasterAttachment : { binding : U64, bytes : ImageWire.Bytes, files : List(Engine.File), height : U32, width : U32 }
 
@@ -1030,12 +1038,12 @@ static_choice : Ui.Choice -> Elem(ctx)
 static_choice = |choice|
 	Engine.element("ui-choice", [Engine.attr("key", choice.key), Engine.attr("label", choice.label)], [])
 
-choice_control : Engine.Tag, Str, Signal(ctx, List(Ui.Choice)), Signal(ctx, Ui.Selection), HandlerOf(ctx, Ui.Selection), Signal(ctx, Bool), U32 -> Elem(ctx)
+choice_control : Engine.Tag, Signal(ctx, Str), Signal(ctx, List(Ui.Choice)), Signal(ctx, Ui.Selection), HandlerOf(ctx, Ui.Selection), Signal(ctx, Bool), U32 -> Elem(ctx)
 choice_control = |tag, label, choices, selected, on_select, enabled, rows|
 	Engine.element(
 		tag,
 		[
-			Engine.attr("label", label),
+			Engine.attr_s("label", label),
 			Engine.attr("visible-rows", rows.to_str()),
 			Engine.attr_s("enabled", enabled.map(bool_word)),
 			Engine.attr_s("selected", selected.map(selection_key)),
@@ -1228,3 +1236,35 @@ shader_parameters = |parameters| Str.join_with(
 	),
 	"\n",
 )
+
+text_attributes : Ui.TextProps -> List(Engine.Attr(ctx))
+text_attributes = |props| [
+	Engine.attr("ellipsize-end", bool_word(props.overflow == EllipsizeEnd)),
+	Engine.attr(
+		"text-style",
+		match props.style {
+			Body => "body"
+			Caption => "caption"
+			Heading => "heading"
+			Title => "title"
+			Display => "display"
+			Monospace => "monospace"
+		},
+	),
+	Engine.attr(
+		"text-tone",
+		match props.tone {
+			PrimaryText => "primary"
+			SecondaryText => "secondary"
+			AccentText => "accent"
+		},
+	),
+	Engine.attr(
+		"text-align",
+		match props.align {
+			Start => "start"
+			Center => "center"
+			End => "end"
+		},
+	),
+]

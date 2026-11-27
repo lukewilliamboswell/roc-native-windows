@@ -16,7 +16,7 @@ view = |count|
 				Ui.hstack(
 					{ spacing: 12 },
 					[
-						Ui.asset_image("counter.bmp", { label: "Five tally marks", width: 32, height: 32 }),
+						Ui.asset_image("counter.bmp", { description: Decorative, width: 32, height: 32 }),
 						Ui.text_with("Counter", { style: Heading }),
 					],
 				),

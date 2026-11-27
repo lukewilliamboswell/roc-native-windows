@@ -48,7 +48,7 @@ view = || {
 			Ui.hstack(
 				{},
 				[
-					Ui.asset_image("reading-list.bmp", { label: "A checklist", width: 40, height: 40 }),
+					Ui.asset_image("reading-list.bmp", { description: Decorative, width: 40, height: 40 }),
 					Ui.text_with("Reading list", { style: Title, tone: AccentText }),
 				],
 			),

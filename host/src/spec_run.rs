@@ -1100,6 +1100,7 @@ impl App {
                     let expected = if kind == "image" { "asset-image" } else { kind };
                     matches!(&node.kind, Kind::Element(tag) if tag.strip_prefix("ui-") == Some(expected)
                         || (kind == "image" && tag == "ui-image")
+                        || (kind == "text" && tag == "ui-status-text")
                         || (expected == "checkbox" && tag == "ui-aggregate-checkbox")
                         || (expected == "text-area" && tag == "textarea"))
                         && (label.is_empty()

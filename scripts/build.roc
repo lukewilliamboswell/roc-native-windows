@@ -41,11 +41,12 @@ dispatch! = |args, roc| match args {
 	["build"] => build!(roc)
 	["test-native"] => test_native!(roc, [])
 	["test-native", "--target", target] if ["x64mingw", "arm64mingw"].contains(target) => test_native!(roc, ["--target", target])
+	["test-accessibility", .. as options] => test_accessibility!(roc, options)
 	["bundle"] => {
 		hosts!()?
 		bundle!(roc)
 	}
-	_ => Err("Usage: scripts/build.roc -- check | build | bundle | test-native [--target TARGET]")
+	_ => Err("Usage: scripts/build.roc -- check | build | bundle | test-native [--target TARGET] | test-accessibility")
 }
 
 bundle! = |roc| {
@@ -127,6 +128,14 @@ test_native! = |roc, options| {
 	app_tool!(roc, "tests/native-input", ["test"].concat(options))
 }
 
+test_accessibility! = |roc, options| {
+	system = System.target!()
+	match system.os() {
+		Windows(_) => step!("powershell.exe", ["-NoProfile", "-File", "tests/accessibility/run.ps1", "-Roc", roc].concat(options))
+		_ => Err("Run test-accessibility in an interactive Windows desktop session")
+	}
+}
+
 check_glue! = |roc| {
 	spec = Env.var_str!("ROC_WINDOWS_GLUE_SPEC") ?? "host/glue/RustGlue.roc"
 	step!("roc-stable", ["scripts/check_glue.roc", "--", "--roc", roc, "--spec", spec])
@@ -163,7 +172,7 @@ stage! = |target| {
 	# The resource compiler resolves the manifest relative to the source's directory.
 	run!(resource, "compile the Windows manifest for ${target.roc}")?
 	probe_args = ["cc", "-target", target.zig, "-O2", "-fno-sanitize=all", "-s", "-v", "-mwindows", "host/windows/link_probe.c", "-o", "${scratch}/probe.exe"]
-	libraries = ["unwind", "comctl32", "comdlg32", "ole32", "oleaut32", "shell32", "user32", "gdi32", "winhttp", "bcrypt", "windowscodecs", "d3d11", "dwmapi", "shlwapi", "ws2_32", "advapi32", "ntdll", "userenv", "psapi"]
+	libraries = ["unwind", "comctl32", "comdlg32", "ole32", "oleaut32", "shell32", "user32", "gdi32", "winhttp", "bcrypt", "windowscodecs", "d3d11", "uiautomationcore", "oleacc", "dwmapi", "shlwapi", "ws2_32", "advapi32", "ntdll", "userenv", "psapi"]
 	probe = command("zig", probe_args.concat(libraries.map(|name| "-l${name}"))).stdout(Null).stderr(Capture).output_limit(MaxBytes(16_000_000)).run!() ? |error| "Could not run the Zig link probe: ${Str.inspect(error)}"
 	trace = Str.from_utf8(probe.stderr_bytes) ? |_| "The Zig link probe emitted invalid UTF-8"
 	if (probe.status != Exited(0)) return Err("Zig link probe failed: ${trace}")

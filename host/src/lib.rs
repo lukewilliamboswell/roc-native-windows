@@ -2,6 +2,11 @@
 //! the allocator ABI and HWNDs are confined to the Windows host.
 
 #[cfg(windows)]
+mod accessibility;
+#[cfg(windows)]
+mod accessibility_grid;
+
+#[cfg(windows)]
 mod abi;
 #[cfg(any(test, windows))]
 mod capture;

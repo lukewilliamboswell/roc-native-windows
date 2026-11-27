@@ -97,7 +97,7 @@ view = || {
 			Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("workers.bmp", { label: "Work splitting into two threads", width: 28, height: 28 }),
+					Ui.asset_image("workers.bmp", { description: Decorative, width: 28, height: 28 }),
 					Ui.text_with("Stock count reconciliation", { style: Heading }),
 				],
 			),
@@ -196,7 +196,7 @@ view = || {
 				Ui.vstack(
 					{},
 					[
-						Ui.text_with(cells.status.signal(), { tone: AccentText }),
+						Ui.status_text(cells.status.signal(), { text: { tone: AccentText } }),
 						variance_meter(cells.variance.signal()),
 					],
 				),
@@ -238,7 +238,7 @@ variance_meter = |variance| Engine.when(
 				{ style: Caption, tone: SecondaryText },
 			),
 			Ui.shader_view({
-				label: "Share of submitted lines with a count variance",
+				description: Described({ label: "Share of submitted lines with a count variance" }),
 				shader: "stock-variance.cso",
 				width: 264,
 				height: 12,

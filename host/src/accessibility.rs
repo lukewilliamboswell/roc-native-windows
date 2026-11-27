@@ -1,0 +1,361 @@
+//! Accessibility state follows committed view state and never calls into Roc from COM.
+
+#![allow(non_upper_case_globals)] // UI Automation identifiers follow the Windows SDK spelling.
+
+use crate::Result;
+use crate::view::wide;
+use std::mem::ManuallyDrop;
+use std::sync::{Arc, Mutex};
+use windows::Win32::Foundation::{E_NOINTERFACE, HWND, LPARAM, VARIANT_BOOL, WPARAM};
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoUninitialize,
+};
+use windows::Win32::System::Variant::*;
+use windows::Win32::UI::Accessibility::*;
+use windows::core::{BSTR, Error, HRESULT, IUnknown, PCWSTR, implement};
+use windows_sys::Win32::Foundation::{
+    HWND as RawHwnd, LPARAM as RawLparam, LRESULT, WPARAM as RawWparam,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GA_ROOT, GetAncestor, IsWindowVisible, OBJID_CLIENT, WM_GETOBJECT, WM_NCDESTROY,
+};
+
+pub(crate) struct Apartment;
+
+impl Apartment {
+    pub(crate) fn new() -> Result<Self> {
+        // SAFETY: Paired with CoUninitialize on the UI thread.
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .map_err(|error| format!("initialize Windows accessibility: {error}"))?;
+        Ok(Self)
+    }
+}
+
+impl Drop for Apartment {
+    fn drop(&mut self) {
+        // SAFETY: This guard lives on the thread that initialized the apartment.
+        unsafe { CoUninitialize() };
+    }
+}
+
+pub(crate) struct NativeName {
+    hwnd: HWND,
+    service: IAccPropServices,
+}
+
+impl NativeName {
+    pub(crate) fn annotate(hwnd: RawHwnd, name: &str, current: &mut Option<Self>) {
+        if name.trim().is_empty() {
+            *current = None;
+            return;
+        }
+        // SAFETY: This is a live UI-thread HWND and COM is initialized there.
+        unsafe {
+            if current.is_none()
+                && let Ok(service) =
+                    CoCreateInstance(&CLSID_AccPropServices, None, CLSCTX_INPROC_SERVER)
+            {
+                *current = Some(Self {
+                    hwnd: HWND(hwnd),
+                    service,
+                });
+            }
+            if let Some(current) = current {
+                let name = wide(name);
+                for property in [PROPID_ACC_NAME, Name_Property_GUID] {
+                    let _ = current.service.SetHwndPropStr(
+                        current.hwnd,
+                        OBJID_CLIENT as u32,
+                        0,
+                        property,
+                        PCWSTR(name.as_ptr()),
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl Drop for NativeName {
+    fn drop(&mut self) {
+        // SAFETY: Clearing the native annotation is safe before window teardown.
+        unsafe {
+            let _ = self.service.ClearHwndProps(
+                self.hwnd,
+                OBJID_CLIENT as u32,
+                0,
+                &[PROPID_ACC_NAME, Name_Property_GUID],
+            );
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Role {
+    Graphic { included: bool },
+    Status { polite: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Semantics {
+    pub(crate) name: String,
+    pub(crate) details: String,
+    pub(crate) role: Role,
+}
+
+#[implement(IRawElementProviderSimple)]
+struct Element {
+    hwnd: usize,
+    semantics: Arc<Mutex<Option<Semantics>>>,
+}
+
+impl IRawElementProviderSimple_Impl for Element_Impl {
+    fn ProviderOptions(&self) -> windows::core::Result<ProviderOptions> {
+        Ok(ProviderOptions_ServerSideProvider)
+    }
+
+    fn GetPatternProvider(&self, _: UIA_PATTERN_ID) -> windows::core::Result<IUnknown> {
+        Err(Error::from_hresult(E_NOINTERFACE))
+    }
+
+    fn GetPropertyValue(&self, property: UIA_PROPERTY_ID) -> windows::core::Result<VARIANT> {
+        let state = self.semantics.lock().unwrap();
+        let state = state.as_ref().ok_or_else(unavailable)?;
+        Ok(match (property, &state.role) {
+            (UIA_NamePropertyId, _) => string(&state.name),
+            (UIA_ControlTypePropertyId, Role::Graphic { .. }) => integer(UIA_ImageControlTypeId.0),
+            (UIA_ControlTypePropertyId, Role::Status { .. }) => integer(UIA_TextControlTypeId.0),
+            (
+                UIA_IsControlElementPropertyId | UIA_IsContentElementPropertyId,
+                Role::Graphic { included },
+            ) => boolean(*included),
+            (
+                UIA_IsControlElementPropertyId | UIA_IsContentElementPropertyId,
+                Role::Status { .. },
+            ) => boolean(true),
+            (UIA_FullDescriptionPropertyId, _) if !state.details.is_empty() => {
+                string(&state.details)
+            }
+            (UIA_LiveSettingPropertyId, Role::Status { polite }) => {
+                integer(if *polite { Polite.0 } else { Off.0 })
+            }
+            _ => VARIANT::default(),
+        })
+    }
+
+    fn HostRawElementProvider(&self) -> windows::core::Result<IRawElementProviderSimple> {
+        if self.semantics.lock().unwrap().is_none() {
+            return Err(unavailable());
+        }
+        // SAFETY: UIA resolves the native provider from the live HWND. It can
+        // return an error if the surface was retired during this call.
+        unsafe { UiaHostProviderFromHwnd(HWND(self.hwnd as _)) }
+    }
+}
+
+pub(crate) fn unavailable() -> Error {
+    Error::from_hresult(HRESULT(UIA_E_ELEMENTNOTAVAILABLE as i32))
+}
+
+pub(crate) fn integer(value: i32) -> VARIANT {
+    variant(VT_I4, VARIANT_0_0_0 { lVal: value })
+}
+
+pub(crate) fn boolean(value: bool) -> VARIANT {
+    variant(
+        VT_BOOL,
+        VARIANT_0_0_0 {
+            boolVal: VARIANT_BOOL(if value { -1 } else { 0 }),
+        },
+    )
+}
+
+pub(crate) fn string(value: &str) -> VARIANT {
+    variant(
+        VT_BSTR,
+        VARIANT_0_0_0 {
+            bstrVal: ManuallyDrop::new(BSTR::from(value)),
+        },
+    )
+}
+
+pub(crate) fn variant(vt: VARENUM, value: VARIANT_0_0_0) -> VARIANT {
+    VARIANT {
+        Anonymous: VARIANT_0 {
+            Anonymous: ManuallyDrop::new(VARIANT_0_0 {
+                vt,
+                Anonymous: value,
+                ..Default::default()
+            }),
+        },
+    }
+}
+
+pub(crate) fn text_changed(
+    provider: &IRawElementProviderSimple,
+    property: UIA_PROPERTY_ID,
+    old: &str,
+    new: &str,
+) {
+    let mut old = string(old);
+    let mut new = string(new);
+    // SAFETY: The variants are initialized as BSTRs and are cleared after the synchronous call.
+    unsafe {
+        let _ = UiaRaiseAutomationPropertyChangedEvent(provider, property, &old, &new);
+        let _ = VariantClear(&mut old);
+        let _ = VariantClear(&mut new);
+    }
+}
+
+pub(crate) struct ElementProvider {
+    mount: Mount,
+    semantics: Arc<Mutex<Option<Semantics>>>,
+    announced: Semantics,
+}
+
+impl ElementProvider {
+    pub(crate) fn new(hwnd: RawHwnd, initial: Semantics) -> Result<Self> {
+        let semantics = Arc::new(Mutex::new(Some(initial.clone())));
+        let provider = Element {
+            hwnd: hwnd as usize,
+            semantics: semantics.clone(),
+        }
+        .into();
+        Ok(Self {
+            mount: Mount::new(hwnd, provider)?,
+            semantics,
+            announced: initial,
+        })
+    }
+
+    pub(crate) fn update(&self, next: Semantics) {
+        *self.semantics.lock().unwrap() = Some(next);
+    }
+
+    pub(crate) fn announce(&mut self) {
+        let current = self.semantics.lock().unwrap().as_ref().unwrap().clone();
+        if current == self.announced {
+            return;
+        }
+        let old = std::mem::replace(&mut self.announced, current);
+        let new = &self.announced;
+        if !self.mount.events_allowed() {
+            return;
+        }
+        if let Role::Status { polite: true } = new.role {
+            if !new.name.trim().is_empty() && new.name != old.name {
+                // SAFETY: The provider is retained for this synchronous event call.
+                unsafe {
+                    let _ = UiaRaiseAutomationEvent(
+                        self.mount.provider(),
+                        UIA_LiveRegionChangedEventId,
+                    );
+                }
+            }
+        } else if matches!(new.role, Role::Graphic { .. }) {
+            if old.name != new.name {
+                text_changed(
+                    self.mount.provider(),
+                    UIA_NamePropertyId,
+                    &old.name,
+                    &new.name,
+                );
+            }
+            if old.details != new.details {
+                text_changed(
+                    self.mount.provider(),
+                    UIA_FullDescriptionPropertyId,
+                    &old.details,
+                    &new.details,
+                );
+            }
+            if old.role != new.role {
+                // SAFETY: The semantic node membership changed on this HWND.
+                unsafe {
+                    let _ = UiaRaiseStructureChangedEvent(
+                        self.mount.provider(),
+                        StructureChangeType_ChildrenInvalidated,
+                        std::ptr::null_mut(),
+                        0,
+                    );
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ElementProvider {
+    fn drop(&mut self) {
+        *self.semantics.lock().unwrap() = None;
+    }
+}
+
+pub(crate) struct Mount {
+    hwnd: RawHwnd,
+    provider: Box<IRawElementProviderSimple>,
+}
+
+impl Mount {
+    pub(crate) fn new(hwnd: RawHwnd, provider: IRawElementProviderSimple) -> Result<Self> {
+        let provider = Box::new(provider);
+        let pointer = std::ptr::from_ref(provider.as_ref()) as usize;
+        // SAFETY: The Box outlives the subclass and the owning View stays on the UI thread.
+        if unsafe { SetWindowSubclass(hwnd, Some(serve), 1, pointer) } == 0 {
+            return Err("could not attach Windows accessibility provider".into());
+        }
+        Ok(Self { hwnd, provider })
+    }
+
+    pub(crate) fn provider(&self) -> &IRawElementProviderSimple {
+        &self.provider
+    }
+
+    pub(crate) fn events_allowed(&self) -> bool {
+        // SAFETY: The mounted window and its owner are queried on the UI thread.
+        unsafe {
+            UiaClientsAreListening().as_bool()
+                && IsWindowVisible(self.hwnd) != 0
+                && IsWindowEnabled(GetAncestor(self.hwnd, GA_ROOT)) != 0
+        }
+    }
+}
+
+impl Drop for Mount {
+    fn drop(&mut self) {
+        // SAFETY: Remove the subclass before releasing its owned data pointer.
+        unsafe {
+            RemoveWindowSubclass(self.hwnd, Some(serve), 1);
+            let _ = UiaDisconnectProvider(self.provider());
+        }
+    }
+}
+
+unsafe extern "system" fn serve(
+    hwnd: RawHwnd,
+    message: u32,
+    wp: RawWparam,
+    lp: RawLparam,
+    id: usize,
+    data: usize,
+) -> LRESULT {
+    // SAFETY: The subclass data is owned by Mount on this UI thread.
+    unsafe {
+        if message == WM_GETOBJECT && lp as i32 == UiaRootObjectId {
+            return UiaReturnRawElementProvider(
+                HWND(hwnd),
+                WPARAM(wp),
+                LPARAM(lp),
+                &*(data as *const IRawElementProviderSimple),
+            )
+            .0;
+        }
+        if message == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(serve), id);
+        }
+        DefSubclassProc(hwnd, message, wp, lp)
+    }
+}
