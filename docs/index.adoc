@@ -11,6 +11,9 @@ App authors can start at xref:apps.adoc#get-started[Create a Windows app]
 and refer to xref:ui.adoc#controls[the control reference]. Contributors can
 start at xref:contributing.adoc#verify-native-windows[Run the examples on Windows].
 
+Browse the https://github.com/lukewilliamboswell/roc-native-windows[source repository]
+and the https://github.com/lukewilliamboswell/roc-native-windows/releases[platform releases].
+
 include::apps.adoc[leveloffset=+1]
 
 include::ui.adoc[leveloffset=+1]

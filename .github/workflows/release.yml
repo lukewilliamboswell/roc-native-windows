@@ -1,0 +1,140 @@
+name: Release Windows platform
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release.roc
+      - tests/accessibility/standalone.ps1
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without a v prefix
+        type: string
+        required: true
+      publish:
+        description: Publish the verified assets from main
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ inputs.version || '0.0.1' }}
+
+jobs:
+  stage:
+    name: Stage release and loopback preview
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: roc-lang/setup-roc@dd81390553b0a1236aedb61cdd4c0ed7cf7eaec4
+        with:
+          version: nightly
+          nightly-tag: nightly-2026-11-26-890d6c8
+          cache: 'false'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Build the platform and packagers
+        env:
+          RELEASE_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_VERSION }}
+        run: |
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          roc scripts/build.roc -- bundle
+          shopt -s nullglob
+          bundles=(dist/platform/*.tar.zst)
+          test "${#bundles[@]}" -eq 1
+          roc scripts/release.roc -- "$RELEASE_VERSION" "${bundles[0]}" "$RELEASE_BASE_URL" dist/release
+          roc scripts/release.roc -- --local --packagers dist/release "$RELEASE_VERSION" "${bundles[0]}" dist/release-preview
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-release
+          path: dist/release/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-release-preview
+          path: dist/release-preview/
+          if-no-files-found: error
+
+  smoke:
+    name: Verify generated app and installer
+    needs: stage
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: roc-lang/setup-roc@dd81390553b0a1236aedb61cdd4c0ed7cf7eaec4
+        with:
+          version: nightly
+          nightly-tag: nightly-2026-11-26-890d6c8
+          cache: 'false'
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: windows-release-preview
+          path: ${{ runner.temp }}/windows-release-preview
+      - name: Bootstrap, test, and package Reading List
+        shell: pwsh
+        run: tests/accessibility/standalone.ps1 -ReleaseDirectory "$env:RUNNER_TEMP/windows-release-preview" -TestInstaller
+
+  publish:
+    name: Publish the GitHub release
+    if: inputs.publish && github.ref == 'refs/heads/main' && github.repository == 'lukewilliamboswell/roc-native-windows'
+    needs: smoke
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: windows-release
+          path: release/
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-path: release/*
+      - name: Publish the complete draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_VERSION" release/* --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "$RELEASE_VERSION" --generate-notes --draft
+          gh release edit "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
+
+  verify:
+    name: Verify the published bootstrap
+    needs: publish
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: roc-lang/setup-roc@dd81390553b0a1236aedb61cdd4c0ed7cf7eaec4
+        with:
+          version: nightly
+          nightly-tag: nightly-2026-11-26-890d6c8
+          cache: 'false'
+      - name: Bootstrap from the public release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = gh release view $env:RELEASE_VERSION --json assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not look up the published release.' }
+          $tools = @($assets.assets | Where-Object name -Like 'windows-*.tar.zst')
+          if ($tools.Count -ne 1) { throw 'Expected one published CLI bundle.' }
+          tests/accessibility/standalone.ps1 -ReleaseUrl $tools[0].url -TestInstaller

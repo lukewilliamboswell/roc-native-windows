@@ -46,8 +46,8 @@ interactive Windows desktop for capture. Check focus, DPI, Narrator,
 file dialogs, networking and workers. Install, start, upgrade and uninstall
 the MSI on a clean machine. Cross-builds and Wine compatibility checks
 provide separate evidence from native Windows runs. Hosted CI runs the
-source checks and docs build on macOS, cross-builds on Linux, and checks
-the Win32 behavior scenarios on Windows x64. Run the interactive desktop
+source checks on macOS, cross-builds on Linux, and checks the Win32
+behavior scenarios on Windows x64. Run the interactive desktop
 checks below for Narrator, input focus, and display settings.
 The workflow's manual options run the external UI Automation probe and
 native ARM64 scenarios when those runners are available. The `standalone`
@@ -289,7 +289,10 @@ bindings using the vendored `host/glue/RustGlue.roc`, runs Roc expects and
 spec validation, and cross-builds the examples. `build` writes the example executables under
 `examples/<name>/build/<target>/`. `bundle` writes the Windows platform
 bundle to `dist/platform/`. `docs` renders the manual website, Markdown,
-and PDF under `.docs-out/`.
+and PDF under `.docs-out/` on macOS or Linux using the locked `roc-docs`
+utility from roc-automation. The Documentation workflow builds the same
+manual for pull requests and publishes the main branch to
+https://lukewilliamboswell.github.io/roc-native-windows/[GitHub Pages].
 
 The platform examples depend on the local platform through relative
 paths. Keep compiler pins in `scripts/`, keep generated ABI changes
@@ -319,7 +322,7 @@ generated path, the release version and the public asset base URL.
 ----
 rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 blueprint run bundle
-blueprint run release -- 0.1.0 dist/platform/HASH.tar.zst "$RELEASE_BASE_URL" dist/release
+blueprint run release -- 0.0.1 dist/platform/HASH.tar.zst "$RELEASE_BASE_URL" dist/release
 ----
 
 The output directory must be new. Every attachment includes the version.
@@ -332,7 +335,7 @@ Stage and serve the files to test a local HTTP URL.
 
 [source,sh]
 ----
-blueprint run release -- --local 0.1.0 dist/platform/HASH.tar.zst dist/release-preview
+blueprint run release -- --local 0.0.1 dist/platform/HASH.tar.zst dist/release-preview
 blueprint run serve -- dist/release-preview
 ----
 
@@ -341,7 +344,7 @@ The preview server uses Basic CLI's TCP support and binds to
 pass the matching loopback URL to the release task when staging the files.
 
 In another terminal, set `TOOL_BUNDLE` to the generated
-`windows-0_1_0-HASH.tar.zst` filename and use a fresh directory and cache
+`windows-0_0_1-HASH.tar.zst` filename and use a fresh directory and cache
 to check the first-user path.
 
 [source,sh]

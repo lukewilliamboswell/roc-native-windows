@@ -2,7 +2,7 @@
 
 Build native Windows desktop apps in Roc. [Roc Signals](https://github.com/lukewilliamboswell/roc-signals) manages application state, and a Rust host renders Win32 controls.
 
-Windows x64 and ARM64 are cross-build targets. Native Windows execution and clean installation evidence is pending.
+The platform targets Windows x64 and ARM64. See the [Windows validation checklist](docs/contributing.adoc#windows-handoff) for the native test coverage and remaining checks.
 
 ## Create an app
 
@@ -19,7 +19,7 @@ This creates the reading-list starter and writes `dist/my-app-x64mingw.msi`. Bui
 - [Build, test, and package an app](docs/apps.adoc)
 - [Look up the Win32 controls](docs/ui.adoc)
 - [Run the examples on Windows and contribute](docs/contributing.adoc)
-- [Read the manual](docs/index.adoc)
+- [Read the manual](https://lukewilliamboswell.github.io/roc-native-windows/) · [PDF](https://lukewilliamboswell.github.io/roc-native-windows/roc-native-windows.pdf)
 
 ## Examples
 
