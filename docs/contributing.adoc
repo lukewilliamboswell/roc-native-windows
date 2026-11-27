@@ -25,6 +25,13 @@ On Windows on Arm, run the x64 Blueprint and Roc binaries under Windows
 emulation and pass `--target arm64mingw` to test native ARM64 executables.
 The task runs Roc expects and the app's specs where present.
 
+For host changes on Windows, install Rustup and Zig 0.17.1. Run
+`blueprint run build` to rebuild the local link inputs and examples.
+`blueprint run check` also links and runs Cargo tests with your native
+Rust toolchain. Install the linker for that toolchain if Cargo needs it.
+Run `blueprint run bundle` from a checkout with spaces in its path as part
+of the first native contributor verification.
+
 To develop one example interactively, open PowerShell at the repository root.
 
 [source,powershell]
