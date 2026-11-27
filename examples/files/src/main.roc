@@ -33,6 +33,7 @@ store = Engine.store(
 		copy_status: Engine.cell(""),
 		preview_bytes: Engine.cell(NoPreview),
 		format: Engine.cell("text"),
+		detail: Engine.cell("preview"),
 		folder: Engine.cell(no_folder),
 		pick_status: Engine.cell(""),
 	}.Engine.Cells,
@@ -45,6 +46,7 @@ view = || {
 	queue = cells.queue.signal()
 	selected = cells.selected.signal()
 	format = cells.format.signal()
+	detail = cells.detail.signal()
 	selection = { queue, selected }.Signal.map(|{ queue: entries, selected: key }| active(entries, key))
 	display = cells.display.signal()
 	checksum = display.map(|state| if (state.digest.starts_with("SHA-256: ")) state.digest.drop_prefix("SHA-256: ") else "")
@@ -83,16 +85,48 @@ view = || {
 			Ui.text(display.map(|state| state.size)),
 			Ui.text(display.map(|state| state.status)),
 			Ui.text(cells.pick_status.signal()),
-			Ui.radio_group({
-				label: "Preview format",
-				choices: [Ui.Choice.{ key: "text", label: "Text" }, Ui.Choice.{ key: "hex", label: "Hex" }],
-				selected: format,
-				on_select: Engine.handle(|key| [cells.format.set(key)]),
-			}),
-			Ui.text_area(preview, { label: "Contents" }),
-			Ui.text(display.map(|state| state.digest)),
-			Ui.button("Copy SHA-256", { enabled: checksum.map(|text| !text.is_empty()), on_press: Engine.handle_by(checksum, |text, _| if (text.is_empty()) [] else [cells.copies.update(|outbox| outbox.post(text))]) }),
-			Ui.text(cells.copy_status.signal()),
+			Ui.tabs(
+				{
+					label: "File details",
+					tabs: [
+						Ui.Choice.{ key: "preview", label: "Preview" },
+						Ui.Choice.{ key: "fingerprint", label: "Fingerprint" },
+					],
+					selected: detail,
+					on_select: Engine.handle(|key| [cells.detail.set(key)]),
+				},
+				Engine.switch(detail, ["preview", "fingerprint"], |key|
+					if (key == "preview") {
+						Ui.vstack(
+							{},
+							[
+								Ui.radio_group({
+									label: "Preview format",
+									choices: [Ui.Choice.{ key: "text", label: "Text" }, Ui.Choice.{ key: "hex", label: "Hex" }],
+									selected: format,
+									on_select: Engine.handle(|format_key| [cells.format.set(format_key)]),
+								}),
+								Ui.text_area(preview, { label: "Contents" }),
+							],
+						)
+					} else {
+						Ui.vstack(
+							{},
+							[
+								Ui.text(display.map(|state| state.digest)),
+								Ui.button(
+									"Copy SHA-256",
+									{
+										enabled: checksum.map(|text| !text.is_empty()),
+										on_press: Engine.handle_by(checksum, |text, _| if (text.is_empty()) [] else [cells.copies.update(|outbox| outbox.post(text))]),
+									},
+								),
+								Ui.text(cells.copy_status.signal()),
+							],
+						)
+					},
+				),
+			),
 			Engine.watch_latest(
 				cells.folder.signal(),
 				|request| match request.selected {

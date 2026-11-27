@@ -1,5 +1,6 @@
 (test "copy the digest twice and report a busy clipboard"
   (steps
+    (select (tabs "File details") "fingerprint")
     (expect-disabled (button "Copy SHA-256") true)
     (files "tests/fixtures/hello.txt")
     (await-work)
