@@ -1,11 +1,21 @@
-app [main] { pf: platform "../../../platform/main.roc" }
+app [main] {
+	pf: platform "../../../platform/main.roc",
+	time: "https://github.com/lukewilliamboswell/roc-time/releases/download/0.4.0/roc-time-5uLL89o7nJvrtgHt1NamZMgjp76Tb5AaoMzzE8F2xfqD.tar.zst",
+}
 
 import pf.Engine exposing [Elem, Signal]
 import pf.Ui
 import TaskList exposing [Task]
 
 main : Engine.Program(_)
-main = Engine.program_store({}, |_boot| store, |_boot| view())
+main = Engine.program_store({ zone_days: 366 }, |boot| store.with_initial(cells.clock, { now: boot.now_ms, zone: boot.zone }), |_boot| view())
+
+Clock : { now : I64, zone : Engine.Zone }
+
+default_clock : Clock
+default_clock = { now: 0, zone: Engine.utc }
+
+clock_interval = 60_000.U32
 
 NoteEditor : [Closed, Editing({ id : U64, title : Str, draft : Str })]
 
@@ -16,6 +26,7 @@ store = Engine.store(
 	Todos,
 	{
 		draft: Engine.cell(""),
+		clock: Engine.cell(default_clock),
 		due_date: Engine.cell(NoDate),
 		due_time: Engine.cell(NoTime),
 		next_id: Engine.cell(1.U64),
@@ -32,6 +43,8 @@ view = || {
 	due_date = cells.due_date.signal()
 	due_time = cells.due_time.signal()
 	todos = cells.todos.signal()
+	clock = cells.clock.signal()
+	outside = clock.map(|sample| if (sample.zone.offset_at(sample.now).is_err()) [sample.now] else [])
 	new_todo = { draft, due_date, due_time, id: cells.next_id.signal() }.Signal.map(
 		|{ draft: text, due_date: date, due_time: time, id }| { id, title: text.trim(), done: Bool.False, notes: "", due_date: date, due_time: time },
 	)
@@ -74,13 +87,27 @@ view = || {
 				|todo| todo.id.to_str(),
 				|row| todo_row(row.item()),
 			),
+			Engine.watch(Engine.const({}), |_| [Engine.interval(clock_interval)],
+				Engine.react(|_, sample| match sample {
+					Ok(now) => [cells.clock.update(|prior| { ..prior, now })]
+					Err(_) => []
+				}),
+			),
+			Engine.watch_latest(outside, |samples| samples.map(|_| Engine.environment({})),
+				Engine.react(|_, outcome| match outcome {
+					Ok(facts) => [cells.clock.set({ now: facts.now_ms, zone: facts.zone })]
+					Err(_) => []
+				}),
+			),
 		],
 	)
 	Ui.window({ appearance: { accent: CustomAccent({ red: 35, green: 106, blue: 84 }) } }, content)
 }
 
 todo_row = |item| {
+	today = cells.clock.signal().map(|sample| TaskList.project_date(sample.zone, sample.now))
 	date = item.map(|todo| todo.due_date)
+	detail = { item, today }.Signal.map(|reading| TaskList.due_summary(reading.item, reading.today))
 	Ui.vstack(
 		{ spacing: 4, padding: 4 },
 		[
@@ -118,7 +145,7 @@ todo_row = |item| {
 					),
 				],
 			),
-			Ui.text_with(item.map(TaskList.summary), { style: Caption, tone: SecondaryText }),
+			Ui.text_with(detail, { style: Caption, tone: SecondaryText }),
 		],
 	)
 }

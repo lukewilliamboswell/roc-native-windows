@@ -1,0 +1,6 @@
+locale en-GB
+language en-GB
+zone Eastern Standard Time
+span 1804900000000 1805200000000
+offset 1804900000000 -300
+offset 1805007600000 -240

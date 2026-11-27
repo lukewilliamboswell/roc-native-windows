@@ -1,4 +1,9 @@
 import pf.Ui
+import pf.Engine
+import time.Calendar
+import time.FixedOffset
+import time.LocalDateTime
+import time.PosixBoundary
 
 ## Pure task records and the optional due-date policy.
 TaskList := [].{
@@ -36,6 +41,19 @@ TaskList := [].{
 			(Date(date), Time(time)) => "Due ${date.to_iso()} at ${time.to_iso()}"
 		}
 
+	project_date : Engine.Zone, I64 -> Ui.DateSelection
+	project_date = |zone, now| match local_date(zone, now) {
+		Ok(day) => Date(day)
+		Err(_) => NoDate
+	}
+
+	due_summary : Task, Ui.DateSelection -> Str
+	due_summary = |task, today| match (task.due_date, today, task.due_time) {
+		(Date(due), Date(day), Time(time)) if (due == day and !task.done) => "Due today at ${time.to_iso()}"
+		(Date(due), Date(day), NoTime) if (due == day and !task.done) => "Due today"
+		_ => summary(task)
+	}
+
 	ordered : List(Task) -> List(Task)
 	ordered = |tasks| tasks.sort_with(
 		|a, b| {
@@ -67,6 +85,20 @@ TaskList := [].{
 		} else {
 			Mixed
 		}
+}
+
+local_date : Engine.Zone, I64 -> Try(Ui.CivilDate, [Unprojectable])
+local_date = |zone, now| {
+	minutes = zone.offset_at(now) ? |_| Unprojectable
+	micros = (now.to_i128() * 1000).to_i64_try() ? |_| Unprojectable
+	local = FixedOffset.project(
+		FixedOffset.from_seconds(minutes * 60),
+		PosixBoundary.from_microseconds(micros),
+		Gregorian,
+	) ? |_| Unprojectable
+	fields = Calendar.Date.to_fields(LocalDateTime.date(local))
+	year = fields.year.to_u16_try() ? |_| Unprojectable
+	Ui.CivilDate.from_parts({ year, month: fields.month, day: fields.day }).map_err(|_| Unprojectable)
 }
 
 schedule_key : TaskList.Task -> U64
