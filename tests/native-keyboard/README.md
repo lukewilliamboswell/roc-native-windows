@@ -25,3 +25,22 @@ try {
 ```
 
 For native ARM64 use Roc's `arm64mingw` and Zig's `aarch64-windows-gnu` targets.
+
+## Todos calendar
+
+The calendar probe uses the same keyboard path to open the owned date chooser,
+navigate across a leap-day boundary, verify a single Tab stop for the days,
+and check that selecting and cancelling both return focus to the opener.
+
+```powershell
+roc build examples/todos/src/main.roc --target=x64mingw --output=build/native-keyboard/todos.exe
+Copy-Item examples/todos/assets/* build/native-keyboard/assets -Recurse -Force
+zig cc -target x86_64-windows-gnu -O2 tests/native-keyboard/calendar.c -luser32 -o build/native-keyboard/calendar.exe
+$app = Start-Process build/native-keyboard/todos.exe -PassThru
+try {
+    & build/native-keyboard/calendar.exe
+    if ($LASTEXITCODE -ne 0) { throw "Calendar probe failed with exit code $LASTEXITCODE" }
+} finally {
+    if (!$app.WaitForExit(5000)) { $app.Kill() }
+}
+```

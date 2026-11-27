@@ -16,6 +16,8 @@ mod capture;
 mod choice;
 #[cfg(any(test, windows))]
 mod civil;
+#[cfg(any(test, windows))]
+mod civil_calendar;
 #[cfg(windows)]
 mod civil_edit;
 #[cfg(any(test, windows))]

@@ -1,4 +1,5 @@
 use crate::abi::Engine;
+use crate::civil_calendar::native::{Action as CalendarAction, Calendar};
 use crate::civil_edit::Commit as CivilCommit;
 use crate::display_preferences::DisplaySettings;
 use crate::effects::{Effects, SpecOptions};
@@ -12,7 +13,7 @@ use crate::windows::{OwnedWindow, SpecSurface, SurfaceRegistry};
 use crate::wire::{Declarations, EFFECT_NODE, Key, Reader, Tree};
 use crate::{Event, Result};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{OsString, c_void};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
@@ -31,8 +32,8 @@ use windows_sys::Win32::UI::Controls::{
     TCN_SELCHANGE, TVN_ITEMEXPANDEDW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_LEFT, VK_MENU,
-    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetActiveWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2,
+    VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -62,6 +63,7 @@ thread_local! {
 struct App {
     engine: Engine,
     tree: Tree,
+    calendars: BTreeMap<Key, Calendar>,
     surface: SurfaceRegistry,
     pump: OwnedWindow,
     close_requests: VecDeque<(Key, usize)>,
@@ -93,6 +95,7 @@ impl App {
         let mut app = Self {
             engine: Engine::default(),
             tree: Tree::new(),
+            calendars: BTreeMap::new(),
             surface: SurfaceRegistry::new(window, title, driven, display_settings.read()),
             pump,
             close_requests: VecDeque::new(),
@@ -146,8 +149,11 @@ impl App {
             return Ok(());
         }
         if self.display_settings.changed() {
-            self.surface
-                .display_preferences(&self.tree, self.display_settings.read())?;
+            let settings = self.display_settings.read();
+            self.surface.display_preferences(&self.tree, settings)?;
+            for calendar in self.calendars.values_mut() {
+                calendar.settings_changed(settings)?;
+            }
         }
         self.surface.poll();
         self.automation_actions()?;
@@ -267,6 +273,7 @@ impl App {
                 _ => return Err(format!("unsupported command {opcode}")),
             }
         }
+        self.reconcile_calendars()?;
         self.surface.sync(&self.tree)?;
         self.reconcile_input();
         let (bindings, mut images) = self.rasters.sync(&self.tree)?;
@@ -431,6 +438,10 @@ impl App {
     }
 
     fn command(&mut self, control: HWND, notification: u16) -> Result<()> {
+        if u32::from(notification) == BN_CLICKED && self.surface.calendar_origin(control).is_some()
+        {
+            return self.open_calendar(control);
+        }
         if u32::from(notification) == EN_KILLFOCUS
             && let Some(key) = self.surface.grid_key(control)
             && self
@@ -480,6 +491,92 @@ impl App {
             _ => return Ok(()),
         };
         self.control_event(key, event_name, value)
+    }
+
+    fn reconcile_calendars(&mut self) -> Result<()> {
+        if self.calendars.is_empty() {
+            return Ok(());
+        }
+        let retiring = self.surface.retiring_calendars(
+            &self.tree,
+            self.calendars
+                .iter()
+                .map(|(&owner, calendar)| (owner, calendar.origin.field)),
+        )?;
+        for owner in retiring {
+            self.calendars.remove(&owner).unwrap().close(true);
+        }
+        Ok(())
+    }
+
+    fn open_calendar(&mut self, button: HWND) -> Result<()> {
+        let Some((origin, _, _)) = self.surface.calendar_origin(button) else {
+            return Ok(());
+        };
+        let surface = self.surface.selected();
+        if self.calendars.contains_key(&surface) || self.surface.blocked(surface) {
+            return Ok(());
+        }
+        if !composing(origin.edit) {
+            self.commit_civil(origin.edit)?;
+        }
+        if !self.select_key(origin.field) || self.surface.selected() != surface {
+            return Ok(());
+        }
+        let Some((current, label, date)) = self.surface.calendar_origin(button) else {
+            return Ok(());
+        };
+        if current.edit != origin.edit || current.field != origin.field {
+            return Ok(());
+        }
+        let title = if label.is_empty() {
+            "Choose date".into()
+        } else {
+            format!("Choose date for {label}")
+        };
+        // SAFETY: Focus the live opener only when its window is active.
+        unsafe {
+            if GetActiveWindow() == origin.owner {
+                SetFocus(button);
+            }
+        }
+        let calendar = Calendar::open(
+            origin,
+            &title,
+            date,
+            self.display_settings.read(),
+            Some(window_proc),
+        )?;
+        self.calendars.insert(surface, calendar);
+        Ok(())
+    }
+
+    fn calendar_owner(&self, handle: HWND) -> Option<Key> {
+        // SAFETY: A native message's HWND belongs to the current UI thread.
+        let dialog = unsafe { GetAncestor(handle, GA_ROOT) };
+        self.calendars
+            .iter()
+            .find_map(|(&owner, calendar)| (calendar.handle() == dialog).then_some(owner))
+    }
+
+    fn calendar_action(&mut self, owner: Key, action: CalendarAction) -> Result<bool> {
+        let value = match action {
+            CalendarAction::Ignore => return Ok(false),
+            CalendarAction::Handled => return Ok(true),
+            CalendarAction::Close => None,
+            CalendarAction::Choose(value) => Some(value),
+        };
+        let calendar = self.calendars.remove(&owner).unwrap();
+        let origin = calendar.origin;
+        calendar.close(true);
+        if let Some(value) = value
+            && self.select_key(origin.field)
+            && self.surface.selected() == owner
+            && self.surface.propose_calendar_date(origin, value)
+        {
+            self.commit_civil(origin.edit)?;
+        }
+        Ok(true)
     }
 
     fn commit_civil(&mut self, handle: HWND) -> Result<bool> {
@@ -1108,12 +1205,24 @@ fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
         let Some(app) = state.as_mut() else {
             return Ok(unrelated);
         };
+        if let Some(owner) = app.calendar_owner(message.hwnd) {
+            let calendar = app.calendars.get_mut(&owner).unwrap();
+            let dialog = calendar.handle();
+            let handled = if message.message == WM_KEYDOWN && modifiers() == 0 {
+                let action =
+                    calendar.key(message.wParam as u16, message.lParam & (1 << 30) != 0)?;
+                app.calendar_action(owner, action)?
+            } else {
+                false
+            };
+            return Ok((dialog, false, handled));
+        }
         if !app.select_message(message.hwnd) {
             return Ok(unrelated);
         }
         let id = app.surface.selected();
         let owner = app.surface.handle(id).expect("native route is mounted");
-        if app.surface.blocked(id) {
+        if app.surface.blocked(id) || app.calendars.contains_key(&id) {
             return Ok((owner, false, true));
         }
         if app.surface_key(message)? {
@@ -1132,6 +1241,12 @@ fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
             && (app.surface.editor_composing(focus) || modal::has_open_popup(focus))
         {
             return Ok((owner, true, false));
+        }
+        if key == VK_RETURN && plain && app.surface.calendar_origin(focus).is_some() {
+            if message.lParam & (1 << 30) == 0 {
+                app.open_calendar(focus)?;
+            }
+            return Ok((owner, false, true));
         }
         if app.grid_keyboard(message.hwnd, key)? {
             return Ok((owner, false, true));
@@ -1293,6 +1408,22 @@ pub(crate) unsafe extern "system" fn window_proc(
                         }
                         return Ok(true);
                     }
+                    if let Some(owner) = app.calendar_owner(hwnd) {
+                        let settings = app.display_settings.read();
+                        let calendar = app.calendars.get_mut(&owner).unwrap();
+                        let action = match message {
+                            WM_CLOSE => CalendarAction::Close,
+                            WM_COMMAND if (wparam >> 16) as u32 == BN_CLICKED => {
+                                calendar.command(lparam as HWND, wparam as u16)?
+                            }
+                            WM_DPICHANGED | WM_SETTINGCHANGE => {
+                                calendar.settings_changed(settings)?;
+                                CalendarAction::Ignore
+                            }
+                            _ => CalendarAction::Ignore,
+                        };
+                        return app.calendar_action(owner, action);
+                    }
                     if theme_change {
                         if message == WM_SETTINGCHANGE {
                             app.surface
@@ -1312,7 +1443,7 @@ pub(crate) unsafe extern "system" fn window_proc(
                         return Ok(false);
                     }
                     let id = app.surface.selected();
-                    if app.surface.blocked(id)
+                    if (app.surface.blocked(id) || app.calendars.contains_key(&id))
                         && matches!(
                             message,
                             WM_CLOSE

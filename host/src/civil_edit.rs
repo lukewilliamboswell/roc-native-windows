@@ -6,7 +6,9 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Gdi::HFONT;
 use windows_sys::Win32::System::SystemServices::{SS_LEFT, SS_NOPREFIX};
 use windows_sys::Win32::UI::Controls::EM_SETCUEBANNER;
-use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyWindow, SendMessageW, WM_SETFONT};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    BS_PUSHBUTTON, DestroyWindow, SendMessageW, WM_SETFONT, WS_TABSTOP,
+};
 use windows_sys::core::w;
 
 pub(crate) enum Commit {
@@ -22,6 +24,7 @@ pub(crate) struct CivilEdit {
     invalid: bool,
     help: String,
     pub(crate) note: HWND,
+    pub(crate) chooser: Option<HWND>,
     note_style: Option<StyledWindow>,
 }
 
@@ -35,14 +38,31 @@ impl CivilEdit {
             help: String::new(),
             note: child(parent, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?,
             note_style: None,
+            chooser: None,
         };
+        if kind == Kind::Date {
+            let button = child(
+                parent,
+                font,
+                0,
+                w!("BUTTON"),
+                WS_TABSTOP | BS_PUSHBUTTON as u32,
+            )?;
+            set_text(button, "Choose date");
+            entry.chooser = Some(button);
+        }
         entry.refresh_note(edit);
         Ok(entry)
     }
 
     pub(crate) fn font(&self, font: HFONT) {
         // SAFETY: The passive caption belongs to this UI thread.
-        unsafe { SendMessageW(self.note, WM_SETFONT, font as usize, 0) };
+        unsafe {
+            SendMessageW(self.note, WM_SETFONT, font as usize, 0);
+            if let Some(button) = self.chooser {
+                SendMessageW(button, WM_SETFONT, font as usize, 0);
+            }
+        }
     }
 
     pub(crate) fn style(&mut self, paint: Paint) -> Result<()> {
@@ -152,6 +172,11 @@ impl CivilEdit {
 impl Drop for CivilEdit {
     fn drop(&mut self) {
         // SAFETY: This child is owned by the editor and lives on its UI thread.
-        unsafe { DestroyWindow(self.note) };
+        unsafe {
+            if let Some(button) = self.chooser {
+                DestroyWindow(button);
+            }
+            DestroyWindow(self.note);
+        }
     }
 }

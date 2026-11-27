@@ -273,6 +273,30 @@ mod native {
             Ok(())
         }
 
+        pub(crate) fn retiring_calendars(
+            &self,
+            tree: &Tree,
+            open: impl Iterator<Item = (Key, Key)>,
+        ) -> Result<Vec<Key>> {
+            let plan = WindowPlan::read(tree, self.managed)?;
+            let blocked: BTreeSet<_> = plan
+                .declarations
+                .iter()
+                .filter_map(|wanted| wanted.owner)
+                .collect();
+            Ok(open
+                .filter_map(|(owner, field)| {
+                    let mounted = plan.scopes.get(&field) == Some(&owner);
+                    let enabled = mounted
+                        && tree
+                            .node(field)
+                            .attr("enabled")
+                            .is_none_or(crate::window::enabled_flag);
+                    (!enabled || blocked.contains(&owner)).then_some(owner)
+                })
+                .collect())
+        }
+
         pub(crate) fn sync(&mut self, tree: &Tree) -> Result<()> {
             if self.exited {
                 return Ok(());

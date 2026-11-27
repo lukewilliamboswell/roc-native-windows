@@ -13,24 +13,17 @@ pub(crate) enum Value {
     Time { hour: u16, minute: u16 },
 }
 
-const FIRST_YEAR: u16 = 1753;
-const LAST_YEAR: u16 = 9999;
+pub(crate) const FIRST_YEAR: u16 = 1753;
+pub(crate) const LAST_YEAR: u16 = 9999;
 
 impl Value {
-    fn date(year: u16, month: u16, day: u16) -> Result<Self> {
+    pub(crate) fn date(year: u16, month: u16, day: u16) -> Result<Self> {
         if !(FIRST_YEAR..=LAST_YEAR).contains(&year) {
             return Err(format!(
                 "date year must be from {FIRST_YEAR} through {LAST_YEAR}"
             ));
         }
-        let leap =
-            year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
-        let limit = match month {
-            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-            4 | 6 | 9 | 11 => 30,
-            2 => 28 + u16::from(leap),
-            _ => 0,
-        };
+        let limit = days_in_month(year, month);
         if day == 0 || day > limit {
             return Err("invalid Gregorian calendar date".into());
         }
@@ -58,6 +51,16 @@ impl Value {
             (Kind::Date, _) => Err("expected a YYYY-MM-DD date".into()),
             (Kind::Time, _) => Err("expected an HH:MM time".into()),
         }
+    }
+}
+
+pub(crate) fn days_in_month(year: u16, month: u16) -> u16 {
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 28 + u16::from(leap),
+        _ => 0,
     }
 }
 
@@ -102,7 +105,7 @@ pub(crate) mod native {
         )
     }
 
-    fn locale_setting(kind: u32) -> String {
+    pub(crate) fn locale_setting(kind: u32) -> String {
         // SAFETY: A null locale selects the current user. A zero-length query
         // returns the required size including the UTF-16 terminator.
         let count = unsafe { GetLocaleInfoEx(null(), kind, null_mut(), 0) };

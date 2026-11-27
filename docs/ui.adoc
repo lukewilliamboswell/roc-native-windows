@@ -118,6 +118,11 @@ field and committing proposes `NoDate` or `NoTime`. An invalid draft
 stays visible with a validation message. Escape restores the committed
 value. A handler may decline a proposal and keep the previous value.
 
+The date field also provides a *Choose date* button. In the calendar,
+use the arrow keys to move by day or week and Page Up or Page Down to
+change month. Enter or Space chooses a date. Escape closes the calendar
+and restores focus to *Choose date*.
+
 Both civil types expose `parts()` and `to_iso()`. A date and clock
 reading describe calendar fields. To resolve them to an instant,
 supply an application policy for timezones, offsets and ambiguous times.

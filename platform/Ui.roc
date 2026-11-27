@@ -369,6 +369,7 @@ Ui := [].{
 	## Enter an optional Gregorian date from 1753 through 9999. Use the Windows
 	## short-date format shown in the field, or ISO YYYY-MM-DD. Enter or Tab
 	## commits a valid date. An empty field clears it. Escape discards the draft.
+	## Choose date opens a keyboard-navigable calendar for the same value.
 	date_field : Signal(ctx, DateSelection), DatePickerProps(ctx) -> Elem(ctx)
 	date_field = |value, props| {
 		encoded = value.map(

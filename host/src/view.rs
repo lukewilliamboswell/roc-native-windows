@@ -2,6 +2,7 @@ use crate::Result;
 use crate::accessibility::{ElementProvider, NativeName, Role, Semantics};
 use crate::choice::Choices;
 use crate::civil::{Kind as CivilKind, Value as CivilValue};
+use crate::civil_calendar::native::Origin as CalendarOrigin;
 use crate::civil_edit::{CivilEdit, Commit as CivilCommit};
 use crate::command_icon::ButtonIcon;
 use crate::display_preferences::DisplayPreferences;
@@ -488,6 +489,9 @@ impl View {
             }
             if self.props.enabled != desired.enabled {
                 EnableWindow(self.handle, i32::from(desired.enabled));
+                if let Some(chooser) = self.civil_edit.as_ref().and_then(|editor| editor.chooser) {
+                    EnableWindow(chooser, i32::from(desired.enabled));
+                }
             }
             if self.kind.is_checkbox() && self.props.check_state != desired.check_state {
                 SendMessageW(self.handle, BM_SETCHECK, desired.check_state as usize, 0);
@@ -1149,10 +1153,43 @@ impl Surface {
         Ok(())
     }
 
+    pub(crate) fn calendar_origin(
+        &self,
+        button: HWND,
+    ) -> Option<(CalendarOrigin, &str, CivilValue)> {
+        let field = self.key(button)?;
+        let view = self.views.get(&field)?;
+        let editor = view.civil_edit.as_ref()?;
+        if editor.chooser != Some(button) || !view.props.enabled {
+            return None;
+        }
+        Some((
+            CalendarOrigin {
+                owner: self.window,
+                field,
+                edit: view.handle,
+                button,
+            },
+            &view.props.label,
+            editor.value(),
+        ))
+    }
+
+    pub(crate) fn propose_calendar_date(&self, origin: CalendarOrigin, value: CivilValue) -> bool {
+        let Some((current, _, _)) = self.calendar_origin(origin.button) else {
+            return false;
+        };
+        if current.field != origin.field || current.edit != origin.edit {
+            return false;
+        }
+        self.views[&origin.field].write_edit(&value.to_string());
+        true
+    }
+
     pub(crate) fn civil_commit(&mut self, handle: HWND) -> Option<(Key, CivilCommit)> {
         let key = self.key(handle)?;
         let view = self.views.get_mut(&key)?;
-        if !view.props.enabled {
+        if !view.props.enabled || view.handle != handle {
             return None;
         }
         let editor = view.civil_edit.as_mut()?;
@@ -1161,7 +1198,9 @@ impl Surface {
 
     pub(crate) fn civil_cancel(&mut self, handle: HWND) -> bool {
         self.key(handle)
-            .and_then(|key| self.views.get_mut(&key)?.civil_edit.as_mut())
+            .and_then(|key| self.views.get_mut(&key))
+            .filter(|view| view.handle == handle)
+            .and_then(|view| view.civil_edit.as_mut())
             .is_some_and(|editor| editor.cancel(handle))
     }
 
@@ -1406,6 +1445,9 @@ impl Surface {
                 true
             } else {
                 self.handles.remove(&(view.handle as usize));
+                if let Some(button) = view.civil_edit.as_ref().and_then(|editor| editor.chooser) {
+                    self.handles.remove(&(button as usize));
+                }
                 false
             }
         });
@@ -1604,6 +1646,10 @@ impl Surface {
                 if let std::collections::btree_map::Entry::Vacant(slot) = self.views.entry(key) {
                     let view = View::new(self.window, self.font, kind)?;
                     self.handles.insert(view.handle as usize, key);
+                    if let Some(button) = view.civil_edit.as_ref().and_then(|editor| editor.chooser)
+                    {
+                        self.handles.insert(button as usize, key);
+                    }
                     slot.insert(view);
                 }
                 let caption = match kind {
@@ -1886,13 +1932,20 @@ impl Surface {
                 unsafe { ShowWindow(view.label, SW_HIDE) };
             }
             let control_y = y + label_height;
+            let chooser = view.civil_edit.as_ref().and_then(|editor| editor.chooser);
             let control_height = item.height
                 - label_height
+                - item.chooser_height
                 - if view.grid.is_some() || view.civil_edit.is_some() {
                     item.detail_height
                 } else {
                     0
                 };
+            let edit_width = if chooser.is_some() && item.chooser_height == 0 {
+                item.width - item.chooser_width - scale(self.dpi, 6)
+            } else {
+                item.width
+            };
             if let Some(picture) = &mut view.picture {
                 let contain = tree.node(item.key).attr("fit") == Some("contain");
                 picture.update(pixels, contain, (item.width, control_height))?;
@@ -1921,7 +1974,7 @@ impl Surface {
                     after,
                     item.x,
                     control_y,
-                    item.width,
+                    edit_width,
                     control_height,
                     visible,
                 );
@@ -1934,11 +1987,22 @@ impl Surface {
                 if let Some(annotation) = &mut view.native_name {
                     annotation.help(editor.help());
                 }
+                let mut after = view.handle;
+                if let Some(button) = chooser {
+                    let gap = scale(self.dpi, 6);
+                    let (x, y, width) = if item.chooser_height == 0 {
+                        (item.x + edit_width + gap, control_y, item.chooser_width)
+                    } else {
+                        (item.x, control_y + control_height + gap, item.chooser_width)
+                    };
+                    position(button, after, x, y, width, control_height);
+                    after = button;
+                }
                 position(
                     editor.note,
-                    view.handle,
+                    after,
                     item.x,
-                    control_y + control_height,
+                    control_y + control_height + item.chooser_height,
                     item.width,
                     item.detail_height,
                 );
@@ -2007,6 +2071,8 @@ impl Surface {
                     height,
                     label_height: 0,
                     detail_height: 0,
+                    chooser_width: 0,
+                    chooser_height: 0,
                 });
                 return (width, height);
             }
@@ -2031,6 +2097,8 @@ impl Surface {
                     height,
                     label_height: 0,
                     detail_height: 0,
+                    chooser_width: 0,
+                    chooser_height: 0,
                 });
                 return (max_width, height);
             }
@@ -2064,6 +2132,8 @@ impl Surface {
                     height: label_height + header,
                     label_height,
                     detail_height: 0,
+                    chooser_width: 0,
+                    chooser_height: 0,
                 });
                 let page_width = (page.right - page.left - inset * 2).max(1);
                 let (_, page_height) = self.layout(
@@ -2096,7 +2166,24 @@ impl Surface {
                 (wrap_height(dc, editor.help(), width) + scale(self.dpi, 3))
                     .max(scale(self.dpi, 21))
             });
-            let height = height + label_height + note_height;
+            let (chooser_width, chooser_height) = if view
+                .civil_edit
+                .as_ref()
+                .and_then(|editor| editor.chooser)
+                .is_some()
+            {
+                let button_width = (text_width(dc, "Choose date") + scale(self.dpi, 24)).min(width);
+                let minimum = text_width(dc, "00/00/0000") + scale(self.dpi, 16);
+                let stack_height = if width - button_width < minimum {
+                    height + scale(self.dpi, 6)
+                } else {
+                    0
+                };
+                (button_width, stack_height)
+            } else {
+                (0, 0)
+            };
+            let height = height + label_height + note_height + chooser_height;
             if !previous.is_null() {
                 unsafe { SelectObject(dc, previous) };
             }
@@ -2108,6 +2195,8 @@ impl Surface {
                 height,
                 label_height,
                 detail_height: detail_height + note_height,
+                chooser_width,
+                chooser_height,
             });
             return (width, height);
         }
@@ -2251,6 +2340,8 @@ struct Placement {
     height: i32,
     label_height: i32,
     detail_height: i32,
+    chooser_width: i32,
+    chooser_height: i32,
 }
 
 fn tab_panel(tree: &Tree, node: &Node) -> Option<Key> {
