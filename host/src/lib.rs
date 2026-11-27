@@ -19,6 +19,8 @@ mod clipboard;
 #[cfg(windows)]
 mod command_icon;
 #[cfg(windows)]
+mod display_preferences;
+#[cfg(windows)]
 mod effects;
 #[cfg(windows)]
 mod grid;

@@ -3,6 +3,7 @@ use crate::accessibility::{ElementProvider, NativeName, Role, Semantics};
 use crate::choice::Choices;
 use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
 use crate::command_icon::ButtonIcon;
+use crate::display_preferences::DisplayPreferences;
 use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
 use crate::picture::{Picture, Resize};
@@ -20,6 +21,7 @@ use crate::tree_view::{TreeIntent, TreeProjection};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::window_chrome::{WindowDeclaration, native::StatusBar};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -352,6 +354,25 @@ impl View {
         Ok(view)
     }
 
+    fn label_title(&self) -> Cow<'_, str> {
+        if self.progress.steady() {
+            if self.props.label.is_empty() {
+                return Cow::Borrowed("Busy");
+            }
+            return Cow::Owned(format!("{} (busy)", self.props.label));
+        }
+        Cow::Borrowed(&self.props.label)
+    }
+
+    fn label_height(&self, dc: HDC, dpi: u32, width: i32) -> i32 {
+        let title = self.label_title();
+        if self.label.is_null() || title.is_empty() {
+            0
+        } else {
+            (wrap_height(dc, &title, width) + scale(dpi, 3)).max(scale(dpi, 21))
+        }
+    }
+
     fn font(&self, font: HFONT) {
         self.choices.font(font);
         // SAFETY: Both child windows, when present, are owned by this view.
@@ -388,12 +409,12 @@ impl View {
         }
         if self.kind.separate_label() && self.props.label != desired.label {
             NativeName::annotate(self.handle, &desired.label, &mut self.native_name);
-            if self.label.is_null() && !desired.label.is_empty() {
-                self.label = child(window, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?;
-            }
-            if !self.label.is_null() {
-                set_text(self.label, &desired.label);
-            }
+        }
+        if self.kind.separate_label()
+            && self.label.is_null()
+            && (!desired.label.is_empty() || self.kind == Control::ProgressBar)
+        {
+            self.label = child(window, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?;
         }
 
         // SAFETY: WM_ENABLE, BM_SETCHECK and EM_SETCUEBANNER operate on this
@@ -497,6 +518,7 @@ pub(crate) struct Surface {
     accent: Accent,
     palette: Palette,
     dpi: u32,
+    preferences: DisplayPreferences,
     assets: PathBuf,
     views: BTreeMap<Key, View>,
     raster_inputs: BTreeMap<Key, Arc<Pixels>>,
@@ -507,13 +529,13 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
-    pub(crate) fn new(window: HWND) -> Result<Self> {
+    pub(crate) fn new(window: HWND, preferences: DisplayPreferences) -> Result<Self> {
         // SAFETY: The HWND has been created and lives on this thread.
         let dpi = unsafe { GetDpiForWindow(window) }.max(96);
         let assets = std::env::current_exe()
             .map_err(|error| format!("cannot locate app assets: {error}"))?
             .with_file_name("assets");
-        let fonts = Fonts::new(dpi)?;
+        let fonts = Fonts::new(dpi, preferences.text_scale)?;
         let accent = Accent::default();
         Ok(Self {
             window,
@@ -525,6 +547,7 @@ impl Surface {
             accent,
             palette: Palette::new(accent, window),
             dpi,
+            preferences,
             assets,
             views: BTreeMap::new(),
             raster_inputs: BTreeMap::new(),
@@ -922,7 +945,8 @@ impl Surface {
             .get(&key)
             .filter(|view| view.kind == Control::ProgressBar)
             .ok_or("expect-progress requires a native progress bar")?;
-        ProgressBar::expect(view.handle, Progress::parse(wire)?)
+        view.progress
+            .expect(view.handle, view.label, Progress::parse(wire)?)
     }
 
     pub(crate) fn spec_text(&self, key: Key) -> Result<String> {
@@ -1137,7 +1161,7 @@ impl Surface {
     pub(crate) fn dpi_changed(&mut self, tree: &Tree) -> Result<()> {
         // SAFETY: WM_DPICHANGED names our live root HWND.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
-        let fonts = Fonts::new(dpi)?;
+        let fonts = Fonts::new(dpi, self.preferences.text_scale)?;
         let font = fonts.get(FontRole::Body);
         for view in self.views.values() {
             view.font(fonts.get(view.font_role));
@@ -1168,7 +1192,31 @@ impl Surface {
         self.scroll_position =
             ((i64::from(self.scroll_position) * i64::from(dpi)) / i64::from(self.dpi)) as i32;
         self.dpi = dpi;
-        self.arrange(tree)
+        self.arrange(tree)?;
+        self.reveal_focus(tree, true)
+    }
+
+    pub(crate) fn display_preferences(
+        &mut self,
+        tree: &Tree,
+        preferences: DisplayPreferences,
+    ) -> Result<()> {
+        let old = self.preferences;
+        self.preferences = preferences;
+        if old.animations != preferences.animations {
+            for view in self
+                .views
+                .values_mut()
+                .filter(|view| view.kind == Control::ProgressBar)
+            {
+                view.progress.motion(view.handle, preferences.animations);
+            }
+        }
+        if old.text_scale != preferences.text_scale {
+            self.dpi_changed(tree)
+        } else {
+            self.arrange(tree)
+        }
     }
 
     pub(crate) fn theme_changed(&mut self, tree: &Tree) -> Result<()> {
@@ -1547,7 +1595,8 @@ impl Surface {
                 }
                 if kind == Control::ProgressBar {
                     let requested = Progress::parse(node.attr("progress").unwrap_or("idle"))?;
-                    view.progress.update(view.handle, requested);
+                    view.progress
+                        .update(view.handle, requested, self.preferences.animations);
                 }
                 if kind == Control::TreeView {
                     view.tree.sync(view.handle, tree, key)?;
@@ -1641,7 +1690,12 @@ impl Surface {
         // SAFETY: The client rectangle and app HWND are live.
         unsafe { GetClientRect(self.window, &mut client) };
         let reserved = match &mut self.status {
-            Some(status) => status.arrange(client.right, client.bottom, self.dpi)?,
+            Some(status) => status.arrange(
+                client.right,
+                client.bottom,
+                self.dpi,
+                self.preferences.text_scale,
+            )?,
             None => 0,
         };
         let content_height = client.bottom - reserved;
@@ -1693,8 +1747,12 @@ impl Surface {
             let y = item.y - self.scroll_position;
             let visible = view.kind != Control::ProgressBar || view.progress.visible();
             let mut label_height = 0;
-            if !view.label.is_null() && !view.props.label.is_empty() {
-                label_height = scale(self.dpi, 21);
+            if item.label_height > 0 {
+                label_height = item.label_height;
+                let title = view.label_title();
+                if window_text(view.label) != title {
+                    set_text(view.label, &title);
+                }
                 position_visible(
                     view.label,
                     after,
@@ -1702,11 +1760,11 @@ impl Surface {
                     y,
                     item.width,
                     label_height,
-                    visible,
+                    visible || view.progress.steady(),
                 );
                 after = view.label;
             }
-            if !view.label.is_null() && view.props.label.is_empty() {
+            if !view.label.is_null() && label_height == 0 {
                 // SAFETY: The label belongs to this thread and is optional.
                 unsafe { ShowWindow(view.label, SW_HIDE) };
             }
@@ -1714,7 +1772,7 @@ impl Surface {
             let control_height = item.height
                 - label_height
                 - if view.grid.is_some() {
-                    scale(self.dpi, 22)
+                    item.detail_height
                 } else {
                     0
                 };
@@ -1753,7 +1811,7 @@ impl Surface {
             }
             if view.kind == Control::RadioGroup {
                 view.choices
-                    .arrange(item.width, scale(self.dpi, 24), scale(self.dpi, 12));
+                    .arrange(item.width, item.detail_height, scale(self.dpi, 12));
             }
             after = if let Some(grid) = &mut view.grid {
                 grid.arrange(view.handle, self.window, self.font, self.dpi)?
@@ -1815,12 +1873,14 @@ impl Surface {
                     y,
                     width,
                     height,
+                    label_height: 0,
+                    detail_height: 0,
                 });
                 return (width, height);
             }
             if view.kind == Control::FileDropTarget {
                 let inset = scale(self.dpi, 12);
-                let header = scale(self.dpi, 24);
+                let header = scale(self.dpi, 24).max(line_height(dc) + scale(self.dpi, 6));
                 let inner = (max_width - inset * 2).max(1);
                 let mut height = header;
                 for &child in &node.children {
@@ -1837,6 +1897,8 @@ impl Surface {
                     y,
                     width: max_width,
                     height,
+                    label_height: 0,
+                    detail_height: 0,
                 });
                 return (max_width, height);
             }
@@ -1859,12 +1921,8 @@ impl Surface {
                         &mut page as *mut _ as LPARAM,
                     );
                 }
-                let label_height = if view.props.label.is_empty() {
-                    0
-                } else {
-                    scale(self.dpi, 21)
-                };
-                let header = page.top.max(scale(self.dpi, 20));
+                let label_height = view.label_height(dc, self.dpi, max_width);
+                let header = page.top.max(line_height(dc) + scale(self.dpi, 5));
                 let inset = scale(self.dpi, 8);
                 placements.push(Placement {
                     key,
@@ -1872,6 +1930,8 @@ impl Surface {
                     y,
                     width: max_width,
                     height: label_height + header,
+                    label_height,
+                    detail_height: 0,
                 });
                 let page_width = (page.right - page.left - inset * 2).max(1);
                 let (_, page_height) = self.layout(
@@ -1891,7 +1951,16 @@ impl Surface {
             } else {
                 null_mut()
             };
-            let (width, height) = natural(view, node, dc, self.dpi, max_width);
+            let label_height = view.label_height(dc, self.dpi, max_width);
+            let detail_height = match view.kind {
+                Control::RadioGroup => {
+                    scale(self.dpi, 24).max(line_height(dc) + scale(self.dpi, 6))
+                }
+                Control::DataGrid => scale(self.dpi, 22).max(line_height(dc) + scale(self.dpi, 4)),
+                _ => 0,
+            };
+            let (width, height) = natural(view, node, dc, self.dpi, max_width, detail_height);
+            let height = height + label_height;
             if !previous.is_null() {
                 unsafe { SelectObject(dc, previous) };
             }
@@ -1901,6 +1970,8 @@ impl Surface {
                 y,
                 width,
                 height,
+                label_height,
+                detail_height,
             });
             return (width, height);
         }
@@ -2042,6 +2113,8 @@ struct Placement {
     y: i32,
     width: i32,
     height: i32,
+    label_height: i32,
+    detail_height: i32,
 }
 
 fn tab_panel(tree: &Tree, node: &Node) -> Option<Key> {
@@ -2061,8 +2134,16 @@ fn number(node: &Node, key: &str, fallback: i32) -> i32 {
         .clamp(0, 4096)
 }
 
-fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32, i32) {
+fn natural(
+    view: &View,
+    node: &Node,
+    dc: HDC,
+    dpi: u32,
+    max_width: i32,
+    detail_height: i32,
+) -> (i32, i32) {
     let dip = |value| scale(dpi, value);
+    let single_line = dip(30).max(line_height(dc) + dip(10));
     let (width, height) = match view.kind {
         Control::Text if view.props.ellipsize => (max_width, line_height(dc)),
         Control::Text => (
@@ -2072,27 +2153,22 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
         Control::Button | Control::FileButton | Control::FolderButton => (
             (text_width(dc, &view.props.caption) + dip(30) + view.button_icon.width(dpi))
                 .max(dip(80)),
-            dip(30),
+            single_line,
         ),
         Control::Checkbox | Control::AggregateCheckbox => {
-            (text_width(dc, &view.props.caption) + dip(26), dip(30))
+            (text_width(dc, &view.props.caption) + dip(26), single_line)
         }
-        Control::Edit | Control::DatePicker | Control::TimePicker => (
-            max_width,
-            dip(if view.props.label.is_empty() { 30 } else { 51 }),
-        ),
-        Control::Slider => (
-            max_width,
-            dip(if view.props.label.is_empty() { 34 } else { 55 }),
-        ),
+        Control::Edit | Control::DatePicker | Control::TimePicker | Control::ComboBox => {
+            (max_width, single_line)
+        }
+        Control::Slider => (max_width, dip(34)),
         Control::ProgressBar => (
             max_width,
-            dip(number(node, "height", 16).max(1)
-                + if view.props.label.is_empty() { 0 } else { 21 }),
-        ),
-        Control::ComboBox => (
-            max_width,
-            dip(30 + if view.props.label.is_empty() { 0 } else { 21 }),
+            if view.progress.steady() {
+                0
+            } else {
+                dip(number(node, "height", 16).max(1))
+            },
         ),
         Control::ListBox => {
             // SAFETY: The HWND is a live fixed-height native list box.
@@ -2102,18 +2178,15 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
                 .filter(|&height| height > 0)
                 .unwrap_or(dip(20));
             let rows = number(node, "visible-rows", 6).clamp(1, 20);
-            let label = if view.props.label.is_empty() {
-                0
-            } else {
-                dip(21)
-            };
-            (max_width, rows * row_height + dip(4) + label)
+            (max_width, rows * row_height + dip(4))
         }
-        Control::RadioGroup => (max_width, dip(24 * (view.choices.count() as i32 + 1) + 8)),
+        Control::RadioGroup => (
+            max_width,
+            detail_height * (view.choices.count() as i32 + 1) + dip(8),
+        ),
         Control::TextArea => (
             max_width,
-            line_height(dc) * number(node, "rows", 5).clamp(1, 100)
-                + dip(if view.props.label.is_empty() { 8 } else { 29 }),
+            line_height(dc) * number(node, "rows", 5).clamp(1, 100) + dip(8),
         ),
         Control::Toolbar => (
             max_width,
@@ -2129,12 +2202,7 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
                 .or_else(|| view.grid.as_ref().map(|grid| &grid.report))
                 .unwrap()
                 .height(view.handle, number(node, "visible-rows", 8), dpi)
-                + if view.props.label.is_empty() {
-                    0
-                } else {
-                    dip(21)
-                }
-                + if view.grid.is_some() { dip(22) } else { 0 },
+                + detail_height,
         ),
         Control::Tabs | Control::Panel | Control::FileDropTarget => {
             unreachable!("containers lay out their content separately")
@@ -2144,7 +2212,7 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             // SAFETY: This measures a live native tree using the current UI font.
             (unsafe { SendMessageW(view.handle, TVM_GETITEMHEIGHT, 0, 0) } as i32).max(dip(16))
                 * number(node, "visible-rows", 8).clamp(1, 100)
-                + dip(if view.props.label.is_empty() { 4 } else { 25 }),
+                + dip(4),
         ),
         Control::Image | Control::ShaderView => (
             dip(number(node, "width", 128)).max(1),

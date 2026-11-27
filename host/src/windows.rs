@@ -165,6 +165,7 @@ fn close_request(tree: &Tree, key: Key, required: bool) -> Result<Option<Key>> {
 mod native {
     use super::{Declaration, Title, WindowPlan};
     use crate::Result;
+    use crate::display_preferences::DisplayPreferences;
     use crate::modal::{self, Modal};
     use crate::taskbar::native::Taskbar;
     use crate::view::Surface;
@@ -227,12 +228,18 @@ mod native {
         managed: Option<bool>,
         driven: bool,
         app_title: String,
+        preferences: DisplayPreferences,
         legacy_title: Option<String>,
         exited: bool,
     }
 
     impl SurfaceRegistry {
-        pub(crate) fn new(window: OwnedWindow, title: String, driven: bool) -> Self {
+        pub(crate) fn new(
+            window: OwnedWindow,
+            title: String,
+            driven: bool,
+            preferences: DisplayPreferences,
+        ) -> Self {
             Self {
                 mounted: BTreeMap::new(),
                 handles: BTreeMap::new(),
@@ -243,9 +250,24 @@ mod native {
                 managed: None,
                 driven,
                 app_title: title,
+                preferences,
                 legacy_title: None,
                 exited: false,
             }
+        }
+
+        pub(crate) fn display_preferences(
+            &mut self,
+            tree: &Tree,
+            preferences: DisplayPreferences,
+        ) -> Result<()> {
+            if self.preferences != preferences {
+                self.preferences = preferences;
+                for surface in self.surfaces_mut() {
+                    surface.display_preferences(tree, preferences)?;
+                }
+            }
+            Ok(())
         }
 
         pub(crate) fn sync(&mut self, tree: &Tree) -> Result<()> {
@@ -311,7 +333,7 @@ mod native {
                         create_window(&title)?
                     };
                     let hwnd = window.0;
-                    let surface = Surface::new(hwnd)?;
+                    let surface = Surface::new(hwnd, self.preferences)?;
                     let icons = wanted.owner.is_none().then(|| WindowIcons::new(hwnd));
                     let taskbar =
                         (!self.driven && wanted.owner.is_none()).then(|| Taskbar::new(hwnd));

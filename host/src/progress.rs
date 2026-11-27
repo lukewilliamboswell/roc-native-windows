@@ -62,6 +62,7 @@ enum NativeProgress {
 pub(crate) mod native {
     use super::{NATIVE_MAX, NativeProgress, Progress};
     use crate::Result;
+    use crate::view::window_text;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::Controls::{
         PBM_GETPOS, PBM_GETRANGE, PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE,
@@ -73,6 +74,8 @@ pub(crate) mod native {
     #[derive(Default)]
     pub(crate) struct ProgressBar {
         mode: NativeProgress,
+        requested: Progress,
+        steady: bool,
     }
 
     impl ProgressBar {
@@ -81,8 +84,14 @@ pub(crate) mod native {
             unsafe { SendMessageW(hwnd, PBM_SETRANGE32, 0, NATIVE_MAX as isize) };
         }
 
-        pub(crate) fn update(&mut self, hwnd: HWND, requested: Progress) {
-            let next = requested.native();
+        pub(crate) fn update(&mut self, hwnd: HWND, requested: Progress, animations: bool) {
+            self.requested = requested;
+            self.steady = !animations && requested == Progress::Indeterminate;
+            let next = if self.steady {
+                NativeProgress::Hidden
+            } else {
+                requested.native()
+            };
             if next == self.mode {
                 return;
             }
@@ -92,7 +101,8 @@ pub(crate) mod native {
                     SendMessageW(hwnd, PBM_SETMARQUEE, 0, 0);
                     let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
                     SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(PBS_MARQUEE as isize));
-                } else if next == NativeProgress::Marquee {
+                }
+                if next == NativeProgress::Marquee {
                     let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
                     SetWindowLongPtrW(hwnd, GWL_STYLE, style | PBS_MARQUEE as isize);
                     SendMessageW(hwnd, PBM_SETMARQUEE, 1, 0);
@@ -104,11 +114,19 @@ pub(crate) mod native {
             self.mode = next;
         }
 
+        pub(crate) fn motion(&mut self, hwnd: HWND, animations: bool) {
+            self.update(hwnd, self.requested, animations);
+        }
+
+        pub(crate) fn steady(&self) -> bool {
+            self.steady
+        }
+
         pub(crate) fn visible(&self) -> bool {
             self.mode != NativeProgress::Hidden
         }
 
-        pub(crate) fn expect(hwnd: HWND, expected: Progress) -> Result<()> {
+        pub(crate) fn expect(&self, hwnd: HWND, label: HWND, expected: Progress) -> Result<()> {
             // SAFETY: This spec locator resolves to a live progress bar on its UI thread.
             let actual = unsafe {
                 // Driven specs may keep the top-level window hidden.
@@ -126,6 +144,17 @@ pub(crate) mod native {
                     NativeProgress::Position(SendMessageW(hwnd, PBM_GETPOS, 0, 0) as u32)
                 }
             };
+            if expected == Progress::Indeterminate && self.steady {
+                // SAFETY: The steady caption is a live STATIC on this thread.
+                let visible =
+                    unsafe { GetWindowLongPtrW(label, GWL_STYLE) } & WS_VISIBLE as isize != 0;
+                if actual == NativeProgress::Hidden && visible && !window_text(label).is_empty() {
+                    return Ok(());
+                }
+                return Err(
+                    "expected visible busy text instead of an animated progress bar".into(),
+                );
+            }
             let expected = expected.native();
             if actual != expected {
                 return Err(format!(

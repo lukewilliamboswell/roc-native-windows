@@ -172,8 +172,14 @@ pub(crate) mod native {
             unsafe { SendMessageW(self.handle, WM_SETFONT, font as usize, 0) };
         }
 
-        pub(crate) fn arrange(&mut self, width: i32, height: i32, dpi: u32) -> Result<i32> {
-            let bar_height = scale(dpi, 24).min(height);
+        pub(crate) fn arrange(
+            &mut self,
+            width: i32,
+            height: i32,
+            dpi: u32,
+            text_scale: f64,
+        ) -> Result<i32> {
+            let bar_height = scale(dpi, (24.0 * text_scale.max(1.0)).round() as i32).min(height);
             let edges = pane_edges(
                 width,
                 scale(dpi, 72),

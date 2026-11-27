@@ -92,7 +92,7 @@ pub(crate) mod native {
     pub(crate) struct Fonts(Vec<HFONT>);
 
     impl Fonts {
-        pub(crate) fn new(dpi: u32) -> Result<Self> {
+        pub(crate) fn new(dpi: u32, text_scale: f64) -> Result<Self> {
             let mut metrics = NONCLIENTMETRICSW {
                 cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
                 ..NONCLIENTMETRICSW::default()
@@ -113,6 +113,8 @@ pub(crate) mod native {
                         std::io::Error::last_os_error()
                     ));
                 }
+                metrics.lfMessageFont.lfHeight =
+                    (f64::from(metrics.lfMessageFont.lfHeight) * text_scale).round() as i32;
                 for role in FontRole::ALL {
                     let font = CreateFontIndirectW(&role.metrics(metrics.lfMessageFont));
                     if font.is_null() {

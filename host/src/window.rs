@@ -1,5 +1,6 @@
 use crate::abi::Engine;
 use crate::civil::{self, Value as CivilValue};
+use crate::display_preferences::DisplaySettings;
 use crate::effects::{Effects, SpecOptions};
 use crate::grid::Intent as GridIntent;
 use crate::modal;
@@ -86,6 +87,7 @@ struct App {
     grid_intents: VecDeque<GridIntent>,
     focus_departures: BTreeSet<Key>,
     driven: bool,
+    display_settings: DisplaySettings,
 }
 
 impl App {
@@ -98,10 +100,11 @@ impl App {
         let pump = create_pump()?;
         let title = app_name(unsafe { GetModuleHandleW(null()) });
         let effects = Effects::new(pump.0, send);
+        let display_settings = DisplaySettings::new();
         let mut app = Self {
             engine: Engine::default(),
             tree: Tree::new(),
-            surface: SurfaceRegistry::new(window, title, driven),
+            surface: SurfaceRegistry::new(window, title, driven, display_settings.read()),
             pump,
             close_requests: VecDeque::new(),
             input: InputState::default(),
@@ -116,6 +119,7 @@ impl App {
             grid_intents: VecDeque::new(),
             focus_departures: BTreeSet::new(),
             driven,
+            display_settings,
         };
         if let Some(options) = options {
             app.effects.configure_spec(options)?;
@@ -156,6 +160,10 @@ impl App {
         self.drain_input()?;
         if self.exited() {
             return Ok(());
+        }
+        if self.display_settings.changed() {
+            self.surface
+                .display_preferences(&self.tree, self.display_settings.read())?;
         }
         self.surface.poll();
         self.automation_actions()?;
@@ -1293,6 +1301,10 @@ pub(crate) unsafe extern "system" fn window_proc(
                         return Ok(true);
                     }
                     if theme_change {
+                        if message == WM_SETTINGCHANGE {
+                            app.surface
+                                .display_preferences(&app.tree, app.display_settings.read())?;
+                        }
                         if let Some(surface) = app
                             .surface
                             .for_handle(hwnd)
