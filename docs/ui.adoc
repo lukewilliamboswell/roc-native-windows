@@ -25,6 +25,7 @@ for state, stores, and worker tasks.
 | `Ui.radio_group` | Labeled radio buttons | `label`, static `choices`, `selected` key, `on_select`, optional `enabled`
 | `Ui.file_button` | System file picker | Title, `on_files` handler, and optional `selection` (`SingleFile` or `MultipleFiles`)
 | `Ui.list_view` | Single-selection report | Label, columns, rows, selected key and handlers
+| `Ui.data_grid` | Editable report grid | Label, columns and table rows
 | `Ui.asset_image` | Bitmap image | Asset path, accessible `label`, `width` and `height`
 |===
 
@@ -97,7 +98,7 @@ on a row, even if it is already selected. Use
 `on_column_press: Handle(handler)` to receive a column key and update the
 row order in Roc.
 
-For a complete example, see the Starter app and its specs described in
+For a complete report list example, see the Starter app and its specs described in
 xref:apps.adoc#examples[Choose an example].
 
 == Default actions and mixed check boxes
@@ -131,3 +132,26 @@ leaves. To reset the focused draft deliberately, set its `reference` and
 issue `Engine.command(ApplyValue(reference))` from an effect plan in the
 same turn as the new value. An active input method composition finishes
 before the reset is applied.
+
+[#data-grid]
+== Editable data grids
+
+Use `Ui.data_grid({ label, columns }, rows)` with `Engine.table_view` over a
+typed table. Column widths and the visible-row budget follow report lists.
+A grid can mount up to 1024 rows and 64 columns. Use the table view's window
+to page larger datasets.
+
+Build each row with `Ui.grid_row(cells)` and each cell with
+`Ui.grid_cell(value, { column })`. Define one cell per column.
+The default is read-only. An editable cell uses
+`editor: TextEditor(row.set_value(apply_edit))`, for example.
+The handler receives a `Ui.CellEdit` containing `draft`, the complete text.
+Put validation in the Roc handler and pass a `feedback` signal of
+`Clear` or `Invalid(message)`. An invalid edit can retain the committed
+text and return feedback in the same write.
+
+Use the arrow keys to move between cells and Enter or F2 to open the editor.
+Enter commits an open edit. Escape or leaving the editor discards it.
+The edit stays with its mounted cell when rows move and is discarded when
+the cell leaves the window or its committed value changes.
+The Workers example edits stock counts and reconciles a snapshot on a worker.

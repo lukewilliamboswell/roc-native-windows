@@ -412,6 +412,15 @@ impl Tree {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn mounted_event(&self, key: Key, name: &str) -> Option<(u32, Listener)> {
+        let node = self.nodes.get(&key)?;
+        let listener = *node.listeners.get(name)?;
+        let route = std::iter::successors(Some(key), |&key| self.node(key).parent)
+            .find_map(|key| self.node(key).id)?;
+        Some((route, listener))
+    }
+
     pub(crate) fn caption(&self, key: Key) -> String {
         let node = self.node(key);
         let mut text = node.text.clone();

@@ -13,6 +13,8 @@ mod civil;
 mod clipboard;
 #[cfg(windows)]
 mod effects;
+#[cfg(windows)]
+mod grid;
 #[cfg(any(test, windows))]
 mod list_view;
 #[cfg(windows)]

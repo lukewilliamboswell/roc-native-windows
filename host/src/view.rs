@@ -1,6 +1,7 @@
 use crate::Result;
 use crate::choice::Choices;
 use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
+use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
@@ -46,6 +47,7 @@ pub(crate) enum Control {
     ListView,
     DatePicker,
     TimePicker,
+    DataGrid,
 }
 
 impl Control {
@@ -67,6 +69,7 @@ impl Control {
             "ui-list-view" => Self::ListView,
             "ui-date-picker" => Self::DatePicker,
             "ui-time-picker" => Self::TimePicker,
+            "ui-data-grid" => Self::DataGrid,
             _ => return Err(format!("unsupported native control {tag}")),
         };
         Ok(Some(control))
@@ -98,6 +101,7 @@ impl Control {
             Self::Edit
                 | Self::TextArea
                 | Self::ListView
+                | Self::DataGrid
                 | Self::ListBox
                 | Self::ComboBox
                 | Self::DatePicker
@@ -137,7 +141,7 @@ impl Control {
                 WS_TABSTOP | WS_VSCROLL | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32,
             ),
             Self::RadioGroup => (WS_EX_CONTROLPARENT, w!("BUTTON"), BS_GROUPBOX as u32),
-            Self::ListView => (
+            Self::ListView | Self::DataGrid => (
                 WS_EX_CLIENTEDGE,
                 w!("SysListView32"),
                 WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
@@ -167,6 +171,7 @@ struct View {
     choices: Choices,
     combo_position: Option<(HWND, i32, i32, i32, i32)>,
     list_view: Option<ListView>,
+    grid: Option<Grid>,
 }
 
 #[derive(Default)]
@@ -201,12 +206,15 @@ impl View {
                 return Err("could not track input method composition".into());
             }
         }
-        let list_view = if kind == Control::ListView {
+        if matches!(kind, Control::ListView | Control::DataGrid) {
             ListView::initialize(handle);
+        }
+        let list_view = if kind == Control::ListView {
             Some(ListView::default())
         } else {
             None
         };
+        let grid = (kind == Control::DataGrid).then(Grid::default);
         let view = Self {
             handle,
             label: null_mut(),
@@ -221,6 +229,7 @@ impl View {
             choices: Choices::default(),
             combo_position: None,
             list_view,
+            grid,
         };
         if let Some(mode) = kind.civil() {
             civil::native::initialize(handle, mode)?;
@@ -615,6 +624,33 @@ impl Surface {
         Some((view.handle, view.list_view.as_ref()?))
     }
 
+    pub(crate) fn grid(&self, key: Key) -> Option<(HWND, &Grid)> {
+        let view = self.views.get(&key)?;
+        Some((view.handle, view.grid.as_ref()?))
+    }
+
+    pub(crate) fn grid_mut(&mut self, key: Key) -> Option<(HWND, &mut Grid)> {
+        let view = self.views.get_mut(&key)?;
+        Some((view.handle, view.grid.as_mut()?))
+    }
+
+    pub(crate) fn grid_coordinates(&self) -> (HWND, HFONT, u32) {
+        (self.window, self.font, self.dpi)
+    }
+
+    pub(crate) fn grid_key(&self, hwnd: HWND) -> Option<Key> {
+        self.key(hwnd)
+            .filter(|&key| self.grid(key).is_some())
+            .or_else(|| {
+                self.views.iter().find_map(|(&key, view)| {
+                    view.grid
+                        .as_ref()
+                        .filter(|grid| grid.editing(hwnd))
+                        .map(|_| key)
+                })
+            })
+    }
+
     pub(crate) fn restore_controlled_value(&self, key: Key) -> Result<()> {
         let Some(view) = self.views.get(&key) else {
             return Ok(());
@@ -717,6 +753,10 @@ impl Surface {
             if let Some(report) = &mut view.list_view {
                 report.measure(view.handle, font, dpi)?;
             }
+            if let Some(grid) = &mut view.grid {
+                grid.font(font);
+                grid.report.measure(view.handle, font, dpi)?;
+            }
         }
         // SAFETY: All windows have selected the new font.
         unsafe { DeleteObject(self.font) };
@@ -796,11 +836,19 @@ impl Surface {
                     },
                 )?;
                 if kind.is_choice() {
-                    let view = self.views.get_mut(&key).unwrap();
                     view.choices.sync(view.handle, self.font, kind, tree, key)?;
                     return Ok(());
                 }
-                let view = self.views.get_mut(&key).unwrap();
+                if let Some(grid) = &mut view.grid {
+                    return grid.sync(
+                        tree,
+                        key,
+                        view.handle,
+                        self.font,
+                        self.dpi,
+                        view.props.enabled,
+                    );
+                }
                 if let Some(report) = &mut view.list_view {
                     return report.sync(
                         view.handle,
@@ -908,7 +956,13 @@ impl Surface {
                 unsafe { ShowWindow(view.label, SW_HIDE) };
             }
             let control_y = y + label_height;
-            let control_height = item.height - label_height;
+            let control_height = item.height
+                - label_height
+                - if view.grid.is_some() {
+                    scale(self.dpi, 22)
+                } else {
+                    0
+                };
             if view.kind == Control::ComboBox {
                 let dropdown_height = control_height + scale(self.dpi, 200);
                 let placement = (after, item.x, control_y, item.width, dropdown_height);
@@ -938,7 +992,11 @@ impl Surface {
                 view.choices
                     .arrange(item.width, scale(self.dpi, 24), scale(self.dpi, 12));
             }
-            after = view.handle;
+            after = if let Some(grid) = &mut view.grid {
+                grid.arrange(view.handle, self.window, self.font, self.dpi)?
+            } else {
+                view.handle
+            };
         }
         Ok(())
     }
@@ -1125,17 +1183,19 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             line_height(dc) * number(node, "rows", 5).clamp(1, 100)
                 + dip(if view.props.label.is_empty() { 8 } else { 29 }),
         ),
-        Control::ListView => (
+        Control::ListView | Control::DataGrid => (
             max_width,
-            view.list_view.as_ref().unwrap().height(
-                view.handle,
-                number(node, "visible-rows", 8),
-                dpi,
-            ) + if view.props.label.is_empty() {
-                0
-            } else {
-                dip(21)
-            },
+            view.list_view
+                .as_ref()
+                .or_else(|| view.grid.as_ref().map(|grid| &grid.report))
+                .unwrap()
+                .height(view.handle, number(node, "visible-rows", 8), dpi)
+                + if view.props.label.is_empty() {
+                    0
+                } else {
+                    dip(21)
+                }
+                + if view.grid.is_some() { dip(22) } else { 0 },
         ),
         Control::Image => (
             dip(number(node, "width", 128)).max(1),
@@ -1278,13 +1338,13 @@ pub(crate) fn wide(text: &str) -> Vec<u16> {
         .collect()
 }
 
-fn set_text(hwnd: HWND, text: &str) {
+pub(crate) fn set_text(hwnd: HWND, text: &str) {
     let text = wide(text);
     // SAFETY: SetWindowTextW reads the terminated string before returning.
     unsafe { SetWindowTextW(hwnd, text.as_ptr()) };
 }
 
-fn window_text(hwnd: HWND) -> String {
+pub(crate) fn window_text(hwnd: HWND) -> String {
     // SAFETY: The child is on this thread. The count includes space for
     // Win32 to terminate the string.
     unsafe {

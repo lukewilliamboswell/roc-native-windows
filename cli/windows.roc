@@ -618,9 +618,16 @@ spec_step = |expr| {
 		_ => Err(spec_error(at, "Expected a scenario step"))
 	}?
 	fields = match (op, args) {
-		("click", [locator]) | ("toggle", [locator]) | ("press-enter", [locator]) | ("expect-visible", [locator]) | ("expect-absent", [locator]) =>
+		("click", [locator])
+		| ("toggle", [locator]) | ("press-enter", [locator])
+		| ("expect-visible", [locator])
+		| ("expect-absent", [locator])
+		|
+			("commit-cell", [locator])
+		| ("cancel-cell", [locator]) =>
 			spec_locator(locator)
 		("fill", [locator, Quoted(value, _)])
+		| ("fill-cell", [locator, Quoted(value, _)])
 		| ("expect-text", [locator, Quoted(value, _)])
 		| ("select", [locator, Quoted(value, _)])
 		| ("expect-selection", [locator, Quoted(value, _)])
@@ -631,6 +638,22 @@ spec_step = |expr| {
 			("press-column", [locator, Quoted(value, _)])
 		| ("expect-row-selected", [locator, Quoted(value, _)]) =>
 			spec_locator(locator).map_ok(|parts| parts.append(value))
+		("focus-cell", [locator, row, Quoted(column, _)])
+		|
+			("begin-cell", [locator, row, Quoted(column, _)])
+		|
+			("expect-cell-focused", [locator, row, Quoted(column, _)]) => {
+			parts = spec_locator(locator)?
+			index = spec_number(row, "mounted row number", 1, 1024)?
+			Ok(parts.concat([index, column]))
+		}
+		("expect-cell-text", [locator, row, Quoted(column, _), Quoted(value, _)])
+		|
+			("expect-cell-feedback", [locator, row, Quoted(column, _), Quoted(value, _)]) => {
+			parts = spec_locator(locator)?
+			index = spec_number(row, "mounted row number", 1, 1024)?
+			Ok(parts.concat([index, column, value]))
+		}
 		("expect-list-rows", [locator, .. as keys]) => {
 			parts = spec_locator(locator)?
 			rows = spec_texts(keys, "Expected nonempty row keys in quotes")?
@@ -756,7 +779,7 @@ spec_locator = |expr| {
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?

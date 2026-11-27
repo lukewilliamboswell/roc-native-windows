@@ -1,6 +1,7 @@
 use crate::abi::Engine;
 use crate::civil::{self, Value as CivilValue};
 use crate::effects::{Effects, SpecOptions};
+use crate::grid::Intent as GridIntent;
 use crate::view::{Surface, wide};
 use crate::wire::{Declarations, EFFECT_NODE, Key, Reader, Tree};
 use crate::{Event, Result};
@@ -26,10 +27,12 @@ use windows_sys::Win32::System::Time::{
 use windows_sys::Win32::UI::Controls::{
     DTN_DATETIMECHANGE, ICC_DATE_CLASSES, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
     INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK,
-    LVN_ITEMCHANGED, NM_DBLCLK, NM_RETURN, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
+    LVN_ENDSCROLL, LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RETURN, NMCUSTOMDRAW,
+    NMHDR, NMITEMACTIVATE, NMLISTVIEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, VK_CONTROL, VK_MENU, VK_RETURN, VK_SHIFT,
+    GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_LEFT, VK_MENU,
+    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -40,6 +43,7 @@ mod spec_run;
 
 const PUMP: usize = 1;
 const REPORT_EVENTS: u32 = WM_APP + 1;
+const GRID_EVENTS: u32 = WM_APP + 2;
 
 thread_local! {
     // User32 is allowed to send synchronous child notifications during a
@@ -58,6 +62,8 @@ struct App {
     opportunity: Option<u64>,
     report_selection: BTreeSet<Key>,
     report_actions: VecDeque<(Key, &'static str, String)>,
+    grid_intents: VecDeque<GridIntent>,
+    focus_departures: BTreeSet<Key>,
     driven: bool,
 }
 
@@ -76,6 +82,8 @@ impl App {
             opportunity: None,
             report_selection: BTreeSet::new(),
             report_actions: VecDeque::new(),
+            grid_intents: VecDeque::new(),
+            focus_departures: BTreeSet::new(),
             driven: options.is_some(),
         };
         if let Some(options) = options {
@@ -211,6 +219,16 @@ impl App {
     }
 
     fn command(&mut self, control: HWND, notification: u16) -> Result<()> {
+        if u32::from(notification) == EN_KILLFOCUS
+            && let Some(key) = self.surface.grid_key(control)
+            && self
+                .surface
+                .grid(key)
+                .is_some_and(|(_, grid)| grid.editing(control))
+        {
+            self.focus_departures.insert(key);
+            return self.queue_grid();
+        }
         let Some(key) = self.surface.key(control) else {
             return Ok(());
         };
@@ -393,6 +411,119 @@ impl App {
             })?;
             self.drain_private()?;
         }
+        Ok(())
+    }
+
+    fn queue_grid(&self) -> Result<()> {
+        let (root, _, _) = self.surface.grid_coordinates();
+        // SAFETY: The root HWND belongs to this thread.
+        if unsafe { PostMessageW(root, GRID_EVENTS, 0, 0) } == 0 {
+            return Err(last_error("queue grid input"));
+        }
+        Ok(())
+    }
+
+    fn drain_grid(&mut self) -> Result<()> {
+        for key in std::mem::take(&mut self.focus_departures) {
+            if let Some((hwnd, grid)) = self.surface.grid_mut(key) {
+                // SAFETY: Query the focus of the calling UI thread.
+                if !grid.editing(unsafe { GetFocus() }) {
+                    grid.cancel(hwnd, false);
+                }
+            }
+        }
+        while let Some(intent) = self.grid_intents.pop_front() {
+            self.deliver_grid(intent)?;
+        }
+        Ok(())
+    }
+
+    fn deliver_grid(&mut self, intent: GridIntent) -> Result<()> {
+        let Some((_, grid)) = self.surface.grid(intent.grid) else {
+            return Ok(());
+        };
+        if let Some((node, listener, draft)) = grid.resolve(intent) {
+            if listener.kind != 1 {
+                return Err("grid edits require a text listener".into());
+            }
+            self.deliver(Event::Turn {
+                node,
+                handler: listener.handler,
+                payload: draft.into_bytes(),
+            })?;
+            self.drain_private()?;
+        }
+        Ok(())
+    }
+
+    fn grid_keyboard(&mut self, handle: HWND, key: u16) -> Result<bool> {
+        if !matches!(
+            key,
+            VK_RETURN | VK_ESCAPE | VK_TAB | VK_F2 | VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN
+        ) {
+            return Ok(false);
+        }
+        let Some(grid_key) = self.surface.grid_key(handle) else {
+            return Ok(false);
+        };
+        let (root, font, dpi) = self.surface.grid_coordinates();
+        let (hwnd, grid) = self.surface.grid_mut(grid_key).unwrap();
+        if grid.editing(handle) {
+            match key {
+                VK_RETURN | VK_ESCAPE if grid.composition() => return Ok(false),
+                VK_RETURN => {
+                    if let Some(intent) = grid.commit(grid_key, hwnd) {
+                        self.grid_intents.push_back(intent);
+                        return self.queue_grid().map(|()| true);
+                    }
+                }
+                VK_ESCAPE => grid.cancel(hwnd, true),
+                VK_TAB => {
+                    grid.cancel(hwnd, true);
+                    // SAFETY: The root and grid are live HWNDs on the UI thread.
+                    unsafe {
+                        SetFocus(GetNextDlgTabItem(
+                            root,
+                            hwnd,
+                            i32::from(GetKeyState(VK_SHIFT as i32) < 0),
+                        ))
+                    };
+                }
+                _ => return Ok(false),
+            }
+        } else {
+            match key {
+                VK_RETURN | VK_F2 => grid.begin(hwnd, root, font)?,
+                VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN => grid.navigate(hwnd, key)?,
+                _ => return Ok(false),
+            }
+        }
+        grid.arrange(hwnd, root, font, dpi)?;
+        Ok(true)
+    }
+
+    unsafe fn grid_notify(&mut self, address: LPARAM) -> Result<()> {
+        // SAFETY: A nonzero WM_NOTIFY lParam points to an NMHDR.
+        let header = unsafe { &*(address as *const NMHDR) };
+        let Some(key) = self.surface.key(header.hwndFrom) else {
+            return Ok(());
+        };
+        let (root, font, dpi) = self.surface.grid_coordinates();
+        let Some((hwnd, grid)) = self.surface.grid_mut(key) else {
+            return Ok(());
+        };
+        match header.code {
+            NM_CLICK | NM_DBLCLK => {
+                // SAFETY: These ListView pointer notifications provide NMITEMACTIVATE.
+                let details = unsafe { &*(address as *const NMITEMACTIVATE) };
+                if grid.click(hwnd, details.ptAction)? && header.code == NM_DBLCLK {
+                    grid.begin(hwnd, root, font)?;
+                }
+            }
+            LVN_ENDSCROLL => grid.position_editor(hwnd, root),
+            _ => return Ok(()),
+        }
+        grid.arrange(hwnd, root, font, dpi)?;
         Ok(())
     }
 
@@ -602,13 +733,17 @@ fn run() -> Result<()> {
                 0 => break,
                 _ => {
                     if message.message == WM_KEYDOWN
-                        && message.wParam == usize::from(VK_RETURN)
-                        && modifiers() == 0
                         && APP.with(|state| {
-                            state
-                                .borrow_mut()
-                                .as_mut()
-                                .map_or(Ok(false), |app| app.enter(GetFocus(), Some(&message)))
+                            state.borrow_mut().as_mut().map_or(Ok(false), |app| {
+                                if app.grid_keyboard(message.hwnd, message.wParam as u16)? {
+                                    return Ok(true);
+                                }
+                                if message.wParam == usize::from(VK_RETURN) && modifiers() == 0 {
+                                    app.enter(GetFocus(), Some(&message))
+                                } else {
+                                    Ok(false)
+                                }
+                            })
                         })?
                     {
                         continue;
@@ -686,9 +821,25 @@ unsafe extern "system" fn window_proc(
     // SAFETY: The OS calls this on its window's UI thread with documented
     // WPARAM/LPARAM payloads. Nested callbacks skip app state if busy.
     unsafe {
+        if message == WM_NOTIFY && lparam != 0 {
+            let header = &*(lparam as *const NMHDR);
+            if header.code == NM_CUSTOMDRAW {
+                let drawn = APP.with(|state| {
+                    let state = state.try_borrow().ok()?;
+                    let app = state.as_ref()?;
+                    let key = app.surface.key(header.hwndFrom)?;
+                    let (report, grid) = app.surface.grid(key)?;
+                    let details = &*(lparam as *const NMCUSTOMDRAW);
+                    Some(grid.draw(report, details))
+                });
+                if let Some(result) = drawn {
+                    return result;
+                }
+            }
+        }
         match message {
-            WM_COMMAND | WM_NOTIFY | REPORT_EVENTS | WM_SIZE | WM_TIMER | WM_DPICHANGED
-            | WM_VSCROLL | WM_MOUSEWHEEL | WM_DROPFILES | APPLY_PENDING_EDIT => {
+            WM_COMMAND | WM_NOTIFY | REPORT_EVENTS | GRID_EVENTS | WM_SIZE | WM_TIMER
+            | WM_DPICHANGED | WM_VSCROLL | WM_MOUSEWHEEL | WM_DROPFILES | APPLY_PENDING_EDIT => {
                 let paths = (message == WM_DROPFILES).then(|| paths_from_drop(wparam as HDROP));
                 let handled = APP.with(|state| {
                     let Ok(mut state) = state.try_borrow_mut() else {
@@ -706,6 +857,7 @@ unsafe extern "system" fn window_proc(
                             let header = &*(lparam as *const NMHDR);
                             if header.code != DTN_DATETIMECHANGE {
                                 app.report_notify(hwnd, lparam)?;
+                                app.grid_notify(lparam)?;
                             } else if let Some(key) = app.surface.key(header.hwndFrom)
                                 && let Some(mode) = app.surface.kind(key).civil()
                             {
@@ -713,6 +865,7 @@ unsafe extern "system" fn window_proc(
                                 app.civil_change(key, value)?;
                             }
                         }
+                        GRID_EVENTS => app.drain_grid()?,
                         REPORT_EVENTS => app.drain_reports()?,
                         WM_SIZE => app.surface.arrange(&app.tree)?,
                         WM_DPICHANGED => {

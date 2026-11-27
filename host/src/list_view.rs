@@ -16,6 +16,7 @@ pub(crate) struct Column {
 pub(crate) struct Row {
     pub(crate) key: String,
     pub(crate) cells: Vec<String>,
+    pub(crate) mounted: Vec<Key>,
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -26,6 +27,20 @@ pub(crate) struct Report {
 
 impl Report {
     pub(crate) fn read(tree: &Tree, root: Key) -> Result<Self> {
+        Self::read_projection(tree, root, false)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn read_grid(tree: &Tree, root: Key) -> Result<Self> {
+        Self::read_projection(tree, root, true)
+    }
+
+    fn read_projection(tree: &Tree, root: Key, grid: bool) -> Result<Self> {
+        let (row_tag, cell_tag) = if grid {
+            ("ui-grid-row", "ui-grid-cell")
+        } else {
+            ("ui-list-row", "ui-list-cell")
+        };
         let mut columns = Vec::new();
         let mut by_key = BTreeMap::new();
         let mut keys = BTreeSet::new();
@@ -52,21 +67,25 @@ impl Report {
                         fixed_width,
                     });
                 }
-                "ui-list-row" if !columns.is_empty() => {
-                    let key_value = item_key(node)?;
-                    if !keys.insert(key_value) {
+                tag if tag == row_tag && !columns.is_empty() => {
+                    let key_value = if grid {
+                        key.to_string()
+                    } else {
+                        item_key(node)?.into()
+                    };
+                    if !keys.insert(key_value.clone()) {
                         return Err(format!("duplicate report row {key_value:?}"));
                     }
                     let mut cells = vec![None; columns.len()];
                     for (cell, tag) in elements(tree, key) {
-                        if tag != "ui-list-cell" {
+                        if tag != cell_tag {
                             return Err(format!("report row {key_value:?} contains {tag}"));
                         }
                         let column = item_key(tree.node(cell))?;
                         let &index = by_key.get(column).ok_or_else(|| {
                             format!("report row {key_value:?} names unknown column {column:?}")
                         })?;
-                        if cells[index].replace(caption(tree, cell)?).is_some() {
+                        if cells[index].replace((caption(tree, cell)?, cell)).is_some() {
                             return Err(format!(
                                 "report row {key_value:?} repeats column {column:?}"
                             ));
@@ -83,10 +102,12 @@ impl Report {
                                 )
                             })
                         })
-                        .collect::<Result<_>>()?;
+                        .collect::<Result<Vec<_>>>()?;
+                    let (cells, mounted) = cells.into_iter().unzip();
                     rows.push(Row {
-                        key: key_value.into(),
+                        key: key_value,
                         cells,
+                        mounted,
                     });
                 }
                 _ => return Err(format!("unexpected {tag} in the report")),
@@ -94,6 +115,12 @@ impl Report {
         }
         if columns.is_empty() {
             return Err("a report requires at least one column".into());
+        }
+        if grid && (rows.len() > 1024 || columns.len() > 64) {
+            return Err(
+                "the mounted data grid allows at most 1024 rows and 64 columns; use a table window"
+                    .into(),
+            );
         }
         if rows.len() > i32::MAX as usize || columns.len() > i32::MAX as usize {
             return Err("the report exceeds Win32 index limits".into());
@@ -382,6 +409,10 @@ mod native {
                 .map(|column| column.key.as_str())
         }
 
+        pub(crate) fn projection(&self) -> &Report {
+            &self.items
+        }
+
         pub(crate) fn has_row(&self, key: &str) -> bool {
             self.index(key).is_some()
         }
@@ -542,6 +573,7 @@ mod tests {
         Row {
             key: key.into(),
             cells: cells.iter().map(|cell| (*cell).into()).collect(),
+            mounted: Vec::new(),
         }
     }
 

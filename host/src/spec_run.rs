@@ -386,6 +386,17 @@ impl App {
                 | "expect-list-rows",
                 _,
             ) => self.control_step(step),
+            (
+                "focus-cell"
+                | "begin-cell"
+                | "fill-cell"
+                | "commit-cell"
+                | "cancel-cell"
+                | "expect-cell-focused"
+                | "expect-cell-text"
+                | "expect-cell-feedback",
+                _,
+            ) => self.control_step(step),
             _ => Err("unknown step or invalid arguments".into()),
         }
     }
@@ -522,7 +533,66 @@ impl App {
                 | "expect-list-rows",
                 _,
             ) => self.report_step(key, step.command, args),
+            (
+                "focus-cell"
+                | "begin-cell"
+                | "fill-cell"
+                | "commit-cell"
+                | "cancel-cell"
+                | "expect-cell-focused"
+                | "expect-cell-text"
+                | "expect-cell-feedback",
+                _,
+            ) => self.grid_step(key, step.command, args),
             _ => Err("invalid control arguments".into()),
+        }
+    }
+
+    fn grid_step(&mut self, key: Key, command: &str, args: &[&str]) -> Result<()> {
+        let (root, font, dpi) = self.surface.grid_coordinates();
+        let (hwnd, grid) = self
+            .surface
+            .grid_mut(key)
+            .ok_or("step requires a data grid")?;
+        let cell = |grid: &crate::grid::Grid, row: &str, column: &str| {
+            let index = number::<usize>(row)?
+                .checked_sub(1)
+                .ok_or("grid rows start at one")?;
+            grid.location(index, column)
+        };
+        match (command, args) {
+            ("expect-cell-focused", [row, column]) => {
+                let (r, c) = cell(grid, row, column)?;
+                expect(grid.active(r, c), true)
+            }
+            ("expect-cell-text", [row, column, value]) => {
+                let (r, c) = cell(grid, row, column)?;
+                expect(grid.native_text(hwnd, r, c).as_str(), *value)
+            }
+            ("expect-cell-feedback", [row, column, value]) => {
+                let (r, c) = cell(grid, row, column)?;
+                expect(grid.error(r, c), *value)
+            }
+            ("focus-cell" | "begin-cell", [row, column]) => {
+                let (r, c) = cell(grid, row, column)?;
+                grid.activate(hwnd, r, c)?;
+                if command == "begin-cell" {
+                    grid.begin(hwnd, root, font)?;
+                }
+                grid.arrange(hwnd, root, font, dpi).map(|_| ())
+            }
+            ("fill-cell", [text]) => grid.fill(text),
+            ("commit-cell", []) => {
+                if let Some(intent) = grid.commit(key, hwnd) {
+                    self.deliver_grid(intent)?;
+                }
+                Ok(())
+            }
+            ("cancel-cell", []) => {
+                grid.cancel(hwnd, true);
+                Ok(())
+            }
+            _ => Err("invalid grid arguments".into()),
         }
     }
 

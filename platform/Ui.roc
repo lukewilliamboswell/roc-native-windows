@@ -369,6 +369,65 @@ Ui := [].{
 	list_cell : Signal(ctx, Str), ListCellProps -> Elem(ctx)
 	list_cell = |value, props| Engine.element("ui-list-cell", [Engine.attr("list-key", props.column)], [Engine.text_s(value)])
 
+	## A report grid whose cells can receive typed text edits.
+	DataGridProps(ctx) := {
+		label : Str,
+		columns : List(Column),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+		visible_rows : U32 ?? 8,
+	}
+
+	## Display rows from an Engine.table_view using its mounted identities.
+	data_grid : DataGridProps(ctx), Elem(ctx) -> Elem(ctx)
+	data_grid = |props, rows|
+		Engine.element(
+			"ui-data-grid",
+			[
+				Engine.attr("label", props.label),
+				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.attr("visible-rows", props.visible_rows.to_str()),
+			],
+			props.columns.map(list_column).append(rows),
+		)
+
+	## An edit intent carries the entire draft from the native text editor.
+	CellEdit := { draft : Str }
+
+	## Empty feedback clears a previous rejection.
+	Feedback := [Clear, Invalid(Str)]
+
+	GridCellProps(ctx) := {
+		column : Str,
+		editor : [ReadOnly, TextEditor(HandlerOf(ctx, CellEdit))] ?? ReadOnly,
+		feedback : Signal(ctx, Feedback) ?? Engine.const(Clear),
+	}
+
+	## Place one cell per declared column in each rendered row.
+	grid_row : List(Elem(ctx)) -> Elem(ctx)
+	grid_row = |cells| Engine.element("ui-grid-row", [], cells)
+
+	## Project a cell's committed text, edit handler and rejection feedback.
+	grid_cell : Signal(ctx, Str), GridCellProps(ctx) -> Elem(ctx)
+	grid_cell = |value, props| {
+		attrs = [
+			Engine.attr("list-key", props.column),
+			Engine.attr_s("feedback", props.feedback.map(feedback_text)),
+		]
+		edit = match props.editor {
+			ReadOnly => []
+			TextEditor(handler) => [
+				Engine.on(
+					"grid-commit",
+					handler.from_payload_by(
+						Engine.const({}),
+						|_, draft| { draft: draft },
+					),
+				),
+			]
+		}
+		Engine.element("ui-grid-cell", attrs.concat(edit), [Engine.text_s(value)])
+	}
+
 	## An image's accessible label and dimensions in device-independent pixels.
 	AssetImageProps := { label : Str, width : U32, height : U32 }
 
@@ -510,3 +569,9 @@ expect decode_time("23:59").is_ok()
 expect decode_time("24:00") == Err(InvalidTimePayload)
 expect decode_time("12:60") == Err(InvalidTimePayload)
 expect decode_time("") == Ok(NoTime)
+
+feedback_text : Ui.Feedback -> Str
+feedback_text = |feedback| match feedback {
+	Clear => ""
+	Invalid(message) => message
+}
