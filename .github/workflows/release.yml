@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - packaging/**
       - scripts/release.roc
       - scripts/release_evidence.py
       - tests/accessibility/installer.ps1

@@ -278,6 +278,7 @@ name = "roc-windows-msi"
 version = "0.0.1"
 dependencies = [
  "cab",
+ "cfb",
  "embala-msi",
  "msi",
  "sha2",

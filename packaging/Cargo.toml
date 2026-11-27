@@ -6,6 +6,7 @@ license = "UPL-1.0"
 publish = false
 
 [dependencies]
+cfb = "0.14"
 embala-msi = "=0.15.0"
 msi = "0.10"
 sha2 = "0.10"
