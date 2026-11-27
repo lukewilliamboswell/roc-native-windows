@@ -5,7 +5,7 @@
 static HWND find_window(void) {
     for (int i = 0; i < 150; ++i) {
         HWND hwnd = FindWindowW(L"RocSignalsWindow", L"reading-list");
-        if (hwnd && FindWindowExW(hwnd, NULL, L"EDIT", NULL))
+        if (hwnd && IsWindowVisible(FindWindowExW(hwnd, NULL, L"SysListView32", NULL)))
             return hwnd;
         Sleep(40);
     }
@@ -83,7 +83,24 @@ static int verify(HWND hw) {
         puts("Shift+Tab did not return to the Toolbar");
         return 9;
     }
-    printf("Reading list passed Tab, Shift+Tab, reactive disabled Add fallback, and narrow scroll revelation\n");
+    key(VK_TAB, 1);
+    if (focus(hw) != combo || !visible(hw, combo)) {
+        puts("Shift+Tab did not return to the Status filter");
+        return 10;
+    }
+    for (int i = 0; i < 2; ++i) {
+        key(VK_F4, 0);
+        if (SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) == 0) {
+            puts("F4 did not open the native list");
+            return 11;
+        }
+        key(i == 0 ? VK_RETURN : VK_ESCAPE, 0);
+        if (SendMessageW(combo, CB_GETDROPPEDSTATE, 0, 0) != 0 || focus(hw) != combo) {
+            puts("the native list did not handle Enter or Escape");
+            return 12;
+        }
+    }
+    puts("Reading List passed Tab traversal, reactive focus fallback, scroll revelation, and native popup keys");
     return 0;
 }
 

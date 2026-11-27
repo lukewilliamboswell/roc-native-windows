@@ -876,6 +876,14 @@ impl Surface {
         }
     }
 
+    pub(crate) fn editor_composing(&self, focus: HWND) -> bool {
+        composing(focus)
+            || self.grid_key(focus).is_some_and(|key| {
+                self.grid(key)
+                    .is_some_and(|(_, grid)| grid.editing(focus) && grid.composition())
+            })
+    }
+
     pub(crate) fn default_button(&self, focus: HWND, message: Option<&MSG>) -> Option<HWND> {
         let default = self.views.values().find(|view| view.props.window_default)?;
         let focused = self.key(focus).and_then(|key| self.views.get(&key));
@@ -886,7 +894,10 @@ impl Surface {
             let parameter = message.map_or(0, |msg| std::ptr::from_ref(msg) as isize);
             // SAFETY: The message pointer, when present, is live for this SendMessage call.
             let flags = unsafe { SendMessageW(focus, WM_GETDLGCODE, 13, parameter) } as u32;
-            if flags & DLGC_WANTALLKEYS != 0 || composing(focus) {
+            if flags & DLGC_WANTALLKEYS != 0
+                || self.editor_composing(focus)
+                || crate::modal::has_open_popup(focus)
+            {
                 return None;
             }
         }
@@ -1438,6 +1449,7 @@ impl Surface {
     }
 
     fn focus_key(&self, mut handle: HWND) -> Option<Key> {
+        let focus = handle;
         while !handle.is_null() && handle != self.window {
             if let Some(&key) = self.handles.get(&(handle as usize)) {
                 return Some(key);
@@ -1445,7 +1457,7 @@ impl Surface {
             // SAFETY: Walk live child ownership on the UI thread.
             handle = unsafe { GetAncestor(handle, GA_PARENT) };
         }
-        None
+        self.grid_key(focus)
     }
 
     fn focus_eligible(&self, mut handle: HWND) -> bool {

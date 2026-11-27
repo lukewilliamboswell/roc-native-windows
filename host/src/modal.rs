@@ -8,7 +8,6 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
-use windows_sys::Win32::UI::Controls::DTM_GETMONTHCAL;
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetActiveWindow, GetFocus, IsWindowEnabled, SetActiveWindow, SetFocus, VK_ESCAPE,
@@ -296,32 +295,35 @@ unsafe fn focus_first(window: HWND) {
     }
 }
 
-/// Check Escape before passing keyboard input to the dialog manager.
-pub(crate) fn takes_escape(focus: HWND, message: &MSG, composing: bool) -> bool {
-    if composing {
-        return true;
-    }
+/// Enter and Escape belong to an open native list.
+pub(crate) fn has_open_popup(focus: HWND) -> bool {
     if focus.is_null() {
         return false;
     }
-    // SAFETY: The focused control belongs to the current UI thread. User32
-    // borrows the message and the class buffer only for synchronous calls.
+    // SAFETY: The focus belongs to this UI thread. The native class string
+    // and the query are used only for the duration of each synchronous call.
     unsafe {
         let mut class = [0_u16; 32];
         let len = GetClassNameW(focus, class.as_mut_ptr(), class.len() as i32).max(0) as usize;
         let class = String::from_utf16_lossy(&class[..len]);
-        let named = |label: &str| class.eq_ignore_ascii_case(label);
-        // Standard multiline EDIT advertises WANTALLKEYS even for Escape.
-        // Outside an active composition it has no Escape action of its own.
-        if named("Edit") {
+        class.eq_ignore_ascii_case("ComboLBox")
+            || (class.eq_ignore_ascii_case("ComboBox")
+                && SendMessageW(focus, CB_GETDROPPEDSTATE, 0, 0) != 0)
+    }
+}
+
+pub(crate) fn takes_escape(focus: HWND, message: &MSG) -> bool {
+    if focus.is_null() {
+        return false;
+    }
+    // SAFETY: The focused control and the borrowed message remain live.
+    unsafe {
+        let mut class = [0_u16; 32];
+        let len = GetClassNameW(focus, class.as_mut_ptr(), class.len() as i32).max(0) as usize;
+        if String::from_utf16_lossy(&class[..len]).eq_ignore_ascii_case("Edit") {
+            // A standard multiline EDIT advertises WANTALLKEYS outside IME
+            // composition, but ordinary Escape may still dismiss the dialog.
             return false;
-        }
-        if (named("ComboBox") && SendMessageW(focus, CB_GETDROPPEDSTATE, 0, 0) != 0)
-            || named("ComboLBox")
-            || (named("SysDateTimePick32") && SendMessageW(focus, DTM_GETMONTHCAL, 0, 0) != 0)
-            || named("SysMonthCal32")
-        {
-            return true;
         }
         let flags = SendMessageW(
             focus,
@@ -411,8 +413,7 @@ mod tests {
                     wParam: usize::from(VK_ESCAPE),
                     ..MSG::default()
                 };
-                assert!(!takes_escape(notes, &escape, false));
-                assert!(takes_escape(notes, &escape, true));
+                assert!(!takes_escape(notes, &escape));
                 position(dialog, owner, (300, 120)).unwrap();
                 let mut modal = Modal::begin(owner, dialog);
                 assert_eq!(IsWindowEnabled(owner), 0);

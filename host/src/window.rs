@@ -1121,15 +1121,30 @@ fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
             return Ok((owner, false, false));
         }
         let key = message.wParam as u16;
+        let modifiers = modifiers();
+        let plain = modifiers == 0;
+        // SAFETY: Query the focus from this UI thread, before native handlers run.
+        let focus = unsafe { GetFocus() };
+        if plain
+            && matches!(key, VK_RETURN | VK_ESCAPE)
+            && (app.surface.editor_composing(focus) || modal::has_open_popup(focus))
+        {
+            return Ok((owner, true, false));
+        }
         if app.grid_keyboard(message.hwnd, key)? {
             return Ok((owner, false, true));
         }
-        if matches!(key, VK_RETURN | VK_ESCAPE) && modifiers() == 0 {
-            // SAFETY: Query focus on the target surface's UI thread.
-            let focus = unsafe { GetFocus() };
-            if composing(focus) {
-                return Ok((owner, true, false));
-            }
+        // Commit before the dialog manager chooses the next Tab stop. A date
+        // handler can enable a following field or move focus explicitly.
+        if key == VK_TAB
+            && modifiers <= 1
+            && !app.surface.editor_composing(focus)
+            && app.commit_civil(focus)?
+            && unsafe { GetFocus() } != focus
+        {
+            return Ok((owner, false, true));
+        }
+        if plain && matches!(key, VK_RETURN | VK_ESCAPE) {
             let handled = if key == VK_RETURN {
                 app.commit_civil(focus)?
             } else {
@@ -1139,10 +1154,8 @@ fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
                 return Ok((owner, false, true));
             }
         }
-        if key == VK_ESCAPE && app.surface.is_dialog(id) && modifiers() == 0 {
-            // SAFETY: The calling UI thread owns the focused edit, if any.
-            let focus = unsafe { GetFocus() };
-            if modal::takes_escape(focus, message, composing(focus)) {
+        if key == VK_ESCAPE && app.surface.is_dialog(id) && plain {
+            if modal::takes_escape(focus, message) {
                 return Ok((owner, true, false));
             }
             if message.lParam & (1 << 30) == 0 {
@@ -1159,9 +1172,8 @@ fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
                 key,
                 VK_RETURN | VK_SPACE | VK_LEFT | VK_UP | VK_RIGHT | VK_DOWN
             ) && app.surface.toolbar(message.hwnd).is_some());
-        let handled = if !native && key == VK_RETURN && modifiers() == 0 {
-            // SAFETY: Query focus on the target surface's UI thread.
-            app.enter(unsafe { GetFocus() }, Some(message))?
+        let handled = if !native && key == VK_RETURN && plain {
+            app.enter(focus, Some(message))?
         } else {
             false
         };
