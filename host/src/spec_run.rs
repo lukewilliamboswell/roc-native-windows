@@ -3,6 +3,7 @@
 use super::{APP, App, FAILURE, last_error, mount};
 use crate::Result;
 use crate::capture::{self, Recorder};
+use crate::civil::{Kind as CivilKind, Value as CivilValue};
 use crate::effects::SpecOptions;
 use crate::spec_plan::{MAX_PLAN_BYTES, Mode, PROTOCOL, Plan, Step, valid_file_name};
 use crate::view::Control;
@@ -374,7 +375,7 @@ impl App {
             (
                 "click" | "fill" | "toggle" | "press-enter" | "expect-visible" | "expect-absent"
                 | "expect-text" | "expect-checked" | "expect-disabled" | "select"
-                | "expect-selection",
+                | "expect-selection" | "set-date" | "expect-date" | "set-time" | "expect-time",
                 _,
             ) => self.control_step(step),
             (
@@ -475,6 +476,22 @@ impl App {
                 expect(self.surface.spec_disabled(key)?, number(value)?)
             }
             ("expect-selection", [wanted]) => expect(self.surface.spec_selection(key)?, *wanted),
+            ("set-date" | "set-time" | "expect-date" | "expect-time", [value]) => {
+                let mode = if step.command.ends_with("date") {
+                    CivilKind::Date
+                } else {
+                    CivilKind::Time
+                };
+                let change = step.command.starts_with("set-");
+                let actual = self
+                    .surface
+                    .spec_civil(key, mode, change.then_some(*value))?;
+                if change {
+                    self.civil_change(key, actual)
+                } else {
+                    expect(actual, CivilValue::parse(mode, value)?)
+                }
+            }
             ("click" | "fill" | "toggle" | "select", _) => {
                 if self.surface.spec_disabled(key)? {
                     return Err("control is disabled".into());

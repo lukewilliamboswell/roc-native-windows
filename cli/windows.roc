@@ -636,6 +636,11 @@ spec_step = |expr| {
 			rows = spec_texts(keys, "Expected nonempty row keys in quotes")?
 			Ok(parts.concat(rows))
 		}
+		("set-date", [locator, value]) | ("expect-date", [locator, value]) | ("set-time", [locator, value]) | ("expect-time", [locator, value]) => {
+			parts = spec_locator(locator)?
+			encoded = spec_civil_value(op.ends_with("date"), value)?
+			Ok(parts.append(encoded))
+		}
 		("expect-checked", [locator, value]) | ("expect-disabled", [locator, value]) => {
 			parts = spec_locator(locator)?
 			word = match value {
@@ -681,16 +686,53 @@ spec_step = |expr| {
 }
 
 spec_number : SpecExpr, Str, I64, I64 -> Try(Str, SpecIssue)
-spec_number = |expr, what, lo, hi| {
+spec_number = |expr, what, lo, hi| spec_integer(expr, what, lo, hi).map_ok(I64.to_str)
+
+spec_integer : SpecExpr, Str, I64, I64 -> Try(I64, SpecIssue)
+spec_integer = |expr, what, lo, hi| {
 	bad = spec_error(spec_position(expr), "Expected ${what} from ${lo.to_str()} through ${hi.to_str()}")
 	match expr {
 		Word(word, _) => {
 			number = I64.from_str(word) ? |_| bad
-			if (number >= lo and number <= hi) Ok(number.to_str()) else Err(bad)
+			if (number >= lo and number <= hi) Ok(number) else Err(bad)
 		}
 		_ => Err(bad)
 	}
 }
+
+spec_civil_value : Bool, SpecExpr -> Try(Str, SpecIssue)
+spec_civil_value = |date, expr| {
+	at = spec_position(expr)
+	match (date, expr) {
+		(Bool.True, Word("no-date", _)) | (Bool.False, Word("no-time", _)) => Ok("")
+		(Bool.True, Form([Word("date", _), y, m, d], _)) => {
+			year = spec_integer(y, "date year", 1753, 9999)?
+			month = spec_integer(m, "date month", 1, 12)?
+			day = spec_integer(d, "date day", 1, 31)?
+			leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+			limit = match month {
+				2 => if (leap) 29 else 28
+				4 | 6 | 9 | 11 => 30
+				_ => 31
+			}
+			if day > limit {
+				Err(spec_error(spec_position(d), "Invalid Gregorian calendar date"))
+			} else {
+				Ok("${year.to_str()}-${spec_two_digits(month)}-${spec_two_digits(day)}")
+			}
+		}
+		(Bool.False, Form([Word("time", _), h, m], _)) => {
+			hour = spec_integer(h, "clock hour", 0, 23)?
+			minute = spec_integer(m, "clock minute", 0, 59)?
+			Ok("${spec_two_digits(hour)}:${spec_two_digits(minute)}")
+		}
+		(Bool.True, _) => Err(spec_error(at, "Expected (date YEAR MONTH DAY) or no-date"))
+		(Bool.False, _) => Err(spec_error(at, "Expected (time HOUR MINUTE) or no-time"))
+	}
+}
+
+spec_two_digits : I64 -> Str
+spec_two_digits = |value| if (value < 10) "0${value.to_str()}" else value.to_str()
 
 spec_texts : List(SpecExpr), Str -> Try(List(Str), SpecIssue)
 spec_texts = |nodes, problem| {
@@ -714,7 +756,7 @@ spec_locator = |expr| {
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?
@@ -1472,3 +1514,19 @@ expect {
 expect gui_executable(pe_fixture([0x64, 0xaa], Bool.False), "x64mingw") == Err(BadExecutable("unexpected architecture"))
 expect gui_executable(pe_fixture([0x64, 0x86], Bool.True), "x64mingw") == Err(BadExecutable("refusing to modify a signed image"))
 expect gui_executable([], "x64mingw") == Err(BadExecutable("missing PE header"))
+
+expect {
+	pos = { line: 1, column: 1 }
+	date_value = |year, month, day| Form([Word("date", pos), Word(year, pos), Word(month, pos), Word(day, pos)], pos)
+	spec_civil_value(Bool.True, date_value("2000", "2", "29")) == Ok("2000-02-29")
+		and spec_civil_value(Bool.True, date_value("1900", "2", "29")).is_err()
+		and spec_civil_value(Bool.True, date_value("1752", "12", "31")).is_err()
+}
+
+expect {
+	pos = { line: 1, column: 1 }
+	time_value = |hour, minute| Form([Word("time", pos), Word(hour, pos), Word(minute, pos)], pos)
+	spec_civil_value(Bool.False, time_value("9", "5")) == Ok("09:05")
+		and spec_civil_value(Bool.False, time_value("24", "0")).is_err()
+		and spec_civil_value(Bool.False, Word("no-time", pos)) == Ok("")
+}

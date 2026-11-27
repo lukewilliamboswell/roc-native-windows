@@ -144,6 +144,104 @@ Ui := [].{
 			[],
 		)
 
+	## A Gregorian calendar date in the inclusive range 1753-01-01 through 9999-12-31.
+	CivilDate := { year : U16, month : U8, day : U8 }.{
+
+		## Construct a date without applying a locale, offset or timezone.
+		from_parts : { year : U16, month : U8, day : U8 } -> Try(CivilDate, [YearOutOfRange, InvalidCalendarDate])
+		from_parts = |fields| {
+			if (fields.year < 1753 or fields.year > 9999) return Err(YearOutOfRange)
+			leap = fields.year % 4 == 0 and (fields.year % 100 != 0 or fields.year % 400 == 0)
+			limit = match fields.month {
+				1 | 3 | 5 | 7 | 8 | 10 | 12 => 31
+				4 | 6 | 9 | 11 => 30
+				2 => if (leap) 29 else 28
+				_ => 0
+			}
+			if fields.day == 0 or fields.day > limit {
+				Err(InvalidCalendarDate)
+			} else {
+				Ok(CivilDate.{ year: fields.year, month: fields.month, day: fields.day })
+			}
+		}
+
+		## The original Gregorian components.
+		parts : CivilDate -> { year : U16, month : U8, day : U8 }
+		parts = |date| { year: date.year, month: date.month, day: date.day }
+
+		## ISO date text for interchange and app-defined summaries.
+		to_iso : CivilDate -> Str
+		to_iso = |date| "${date.year.to_str()}-${two_digits(date.month)}-${two_digits(date.day)}"
+
+		is_eq : CivilDate, CivilDate -> Bool
+		is_eq = |a, b| a.parts() == b.parts()
+	}
+
+	## An optional date from a calendar picker.
+	DateSelection : [NoDate, Date(CivilDate)]
+
+	DatePickerProps(ctx) := {
+		label : Signal(ctx, Str),
+		on_change : HandlerOf(ctx, DateSelection),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+	}
+
+	## Edit a controlled date with a native, localized calendar.
+	date_picker : Signal(ctx, DateSelection), DatePickerProps(ctx) -> Elem(ctx)
+	date_picker = |value, props| {
+		encoded = value.map(
+			|selection| match selection {
+				NoDate => ""
+				Date(date) => date.to_iso()
+			},
+		)
+		handler = props.on_change.from_payload_by(value, |current, payload| decode_date(payload) ?? current)
+		civil_picker("ui-date-picker", encoded, props.label, props.enabled, handler)
+	}
+
+	## A local clock reading with minute precision.
+	CivilTime := { hour : U8, minute : U8 }.{
+		from_parts : { hour : U8, minute : U8 } -> Try(CivilTime, [InvalidClockTime])
+		from_parts = |fields|
+			if fields.hour < 24 and fields.minute < 60 {
+				Ok(CivilTime.{ hour: fields.hour, minute: fields.minute })
+			} else {
+				Err(InvalidClockTime)
+			}
+
+		parts : CivilTime -> { hour : U8, minute : U8 }
+		parts = |time| { hour: time.hour, minute: time.minute }
+
+		## 24-hour time text with minutes for interchange and app-defined summaries.
+		to_iso : CivilTime -> Str
+		to_iso = |time| "${two_digits(time.hour)}:${two_digits(time.minute)}"
+
+		is_eq : CivilTime, CivilTime -> Bool
+		is_eq = |a, b| a.parts() == b.parts()
+	}
+
+	## An optional time of day without a timezone or offset.
+	TimeSelection : [NoTime, Time(CivilTime)]
+
+	TimePickerProps(ctx) := {
+		label : Signal(ctx, Str),
+		on_change : HandlerOf(ctx, TimeSelection),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+	}
+
+	## Edit a controlled hour and minute with the user's short-time format.
+	time_picker : Signal(ctx, TimeSelection), TimePickerProps(ctx) -> Elem(ctx)
+	time_picker = |value, props| {
+		encoded = value.map(
+			|selection| match selection {
+				NoTime => ""
+				Time(time) => time.to_iso()
+			},
+		)
+		handler = props.on_change.from_payload_by(value, |current, payload| decode_time(payload) ?? current)
+		civil_picker("ui-time-picker", encoded, props.label, props.enabled, handler)
+	}
+
 	## A stable native option key and its display label.
 	Choice := { key : Str, label : Str }
 
@@ -350,3 +448,65 @@ list_column = |column| {
 	}
 	Engine.element("ui-list-column", [Engine.attr("list-key", column.key), Engine.attr("list-width", width)], [Engine.text_s(Engine.const(column.heading))])
 }
+
+two_digits : U8 -> Str
+two_digits = |n| if (n < 10) "0${n.to_str()}" else n.to_str()
+
+civil_picker : Engine.Tag, Signal(ctx, Str), Signal(ctx, Str), Signal(ctx, Bool), Handler(ctx) -> Elem(ctx)
+civil_picker = |tag, value, label, enabled, handler|
+	Engine.element(
+		tag,
+		[
+			Engine.attr_s("value", value),
+			Engine.attr_s("label", label),
+			Engine.attr_s("enabled", enabled.map(bool_word)),
+			Engine.on("change", handler),
+		],
+		[],
+	)
+
+decode_date : Str -> Try(Ui.DateSelection, [InvalidDatePayload])
+decode_date = |payload|
+	match payload.split_on("-") {
+		[""] => Ok(NoDate)
+		[y, m, d] => {
+			year = U16.from_str(y) ? |_| InvalidDatePayload
+			month = U8.from_str(m) ? |_| InvalidDatePayload
+			day = U8.from_str(d) ? |_| InvalidDatePayload
+			date = Ui.CivilDate.from_parts({ year, month, day }) ? |_| InvalidDatePayload
+			Ok(Date(date))
+		}
+		_ => Err(InvalidDatePayload)
+	}
+
+decode_time : Str -> Try(Ui.TimeSelection, [InvalidTimePayload])
+decode_time = |payload|
+	match payload.split_on(":") {
+		[""] => Ok(NoTime)
+		[h, m] => {
+			hour = U8.from_str(h) ? |_| InvalidTimePayload
+			minute = U8.from_str(m) ? |_| InvalidTimePayload
+			time = Ui.CivilTime.from_parts({ hour, minute }) ? |_| InvalidTimePayload
+			Ok(Time(time))
+		}
+		_ => Err(InvalidTimePayload)
+	}
+
+expect decode_date("2000-02-29").map_ok(
+	|selection| match selection {
+		Date(date) => date.to_iso()
+		NoDate => ""
+	},
+) == Ok("2000-02-29")
+expect decode_date("1900-02-29") == Err(InvalidDatePayload)
+expect decode_date("1753-01-01").is_ok()
+expect decode_date("9999-12-31").is_ok()
+expect Ui.CivilDate.from_parts({ year: 1752, month: 12, day: 31 }) == Err(YearOutOfRange)
+expect Ui.CivilDate.from_parts({ year: 10000, month: 1, day: 1 }) == Err(YearOutOfRange)
+expect Ui.CivilDate.from_parts({ year: 2026, month: 4, day: 31 }) == Err(InvalidCalendarDate)
+expect decode_date("") == Ok(NoDate)
+expect decode_time("00:00").is_ok()
+expect decode_time("23:59").is_ok()
+expect decode_time("24:00") == Err(InvalidTimePayload)
+expect decode_time("12:60") == Err(InvalidTimePayload)
+expect decode_time("") == Ok(NoTime)

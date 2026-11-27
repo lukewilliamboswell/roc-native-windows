@@ -1,5 +1,6 @@
 use crate::Result;
 use crate::choice::Choices;
+use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
 use crate::list_view::{ListView, Report};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
@@ -16,8 +17,9 @@ use windows_sys::Win32::System::SystemServices::{
     SS_BITMAP, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX,
 };
 use windows_sys::Win32::UI::Controls::{
-    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL,
-    LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL, SetScrollInfo,
+    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, DTS_SHORTDATEFORMAT, DTS_SHOWNONE,
+    DTS_TIMEFORMAT, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL, LVS_REPORT, LVS_SHOWSELALWAYS,
+    LVS_SINGLESEL, SetScrollInfo,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -42,6 +44,8 @@ pub(crate) enum Control {
     ListBox,
     RadioGroup,
     ListView,
+    DatePicker,
+    TimePicker,
 }
 
 impl Control {
@@ -61,6 +65,8 @@ impl Control {
             "ui-list-box" => Self::ListBox,
             "ui-radio-group" => Self::RadioGroup,
             "ui-list-view" => Self::ListView,
+            "ui-date-picker" => Self::DatePicker,
+            "ui-time-picker" => Self::TimePicker,
             _ => return Err(format!("unsupported native control {tag}")),
         };
         Ok(Some(control))
@@ -76,6 +82,27 @@ impl Control {
 
     fn is_edit(self) -> bool {
         matches!(self, Self::Edit | Self::TextArea)
+    }
+
+    pub(crate) fn civil(self) -> Option<CivilKind> {
+        match self {
+            Self::DatePicker => Some(CivilKind::Date),
+            Self::TimePicker => Some(CivilKind::Time),
+            _ => None,
+        }
+    }
+
+    fn separate_label(self) -> bool {
+        matches!(
+            self,
+            Self::Edit
+                | Self::TextArea
+                | Self::ListView
+                | Self::ListBox
+                | Self::ComboBox
+                | Self::DatePicker
+                | Self::TimePicker
+        )
     }
 
     fn class(self) -> (u32, PCWSTR, u32) {
@@ -115,6 +142,16 @@ impl Control {
                 w!("SysListView32"),
                 WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
             ),
+            Self::DatePicker => (
+                0,
+                w!("SysDateTimePick32"),
+                WS_TABSTOP | DTS_SHOWNONE | DTS_SHORTDATEFORMAT,
+            ),
+            Self::TimePicker => (
+                0,
+                w!("SysDateTimePick32"),
+                WS_TABSTOP | DTS_SHOWNONE | DTS_TIMEFORMAT,
+            ),
         }
     }
 }
@@ -142,6 +179,7 @@ struct Props {
     window_default: bool,
     editable: bool,
     ellipsize: bool,
+    civil: Option<CivilValue>,
 }
 
 impl View {
@@ -169,7 +207,7 @@ impl View {
         } else {
             None
         };
-        Ok(Self {
+        let view = Self {
             handle,
             label: null_mut(),
             kind,
@@ -183,7 +221,11 @@ impl View {
             choices: Choices::default(),
             combo_position: None,
             list_view,
-        })
+        };
+        if let Some(mode) = kind.civil() {
+            civil::native::initialize(handle, mode)?;
+        }
+        Ok(view)
     }
 
     fn font(&self, font: HFONT) {
@@ -211,13 +253,7 @@ impl View {
                 set_text(self.handle, &desired.caption);
             }
         }
-        if (self.kind.is_edit()
-            || matches!(
-                self.kind,
-                Control::ListBox | Control::ComboBox | Control::ListView
-            ))
-            && self.props.label != desired.label
-        {
+        if self.kind.separate_label() && self.props.label != desired.label {
             if self.label.is_null() && !desired.label.is_empty() {
                 self.label = child(window, font, 0, w!("STATIC"), SS_LEFT | SS_NOPREFIX)?;
             }
@@ -271,6 +307,9 @@ impl View {
                     placeholder.as_ptr() as isize,
                 );
             }
+        }
+        if let (Some(mode), Some(value)) = (self.kind.civil(), desired.civil) {
+            civil::native::restore(self.handle, mode, value)?;
         }
         self.props = desired;
         Ok(())
@@ -515,7 +554,7 @@ impl Surface {
                 window_text(view.label)
             });
         }
-        if matches!(view.kind, Control::ListBox | Control::ComboBox) {
+        if view.kind.separate_label() {
             return Some(view.props.label.clone());
         }
         if kind == "image" || kind == "list-view" {
@@ -576,9 +615,9 @@ impl Surface {
         Some((view.handle, view.list_view.as_ref()?))
     }
 
-    pub(crate) fn restore_controlled_value(&self, key: Key) {
+    pub(crate) fn restore_controlled_value(&self, key: Key) -> Result<()> {
         let Some(view) = self.views.get(&key) else {
-            return;
+            return Ok(());
         };
         match view.kind {
             Control::Edit => view.write_edit(&view.props.caption),
@@ -597,6 +636,36 @@ impl Surface {
             kind if kind.is_choice() => view.choices.restore(view.handle, kind),
             _ => {}
         }
+        if let (Some(mode), Some(value)) = (view.kind.civil(), view.props.civil) {
+            civil::native::restore(view.handle, mode, value)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn civil_changed(&self, key: Key, value: CivilValue) -> bool {
+        self.views
+            .get(&key)
+            .is_some_and(|view| view.props.civil.is_some_and(|current| current != value))
+    }
+
+    pub(crate) fn spec_civil(
+        &self,
+        key: Key,
+        mode: CivilKind,
+        replacement: Option<&str>,
+    ) -> Result<CivilValue> {
+        let view = self
+            .views
+            .get(&key)
+            .filter(|view| view.kind.civil() == Some(mode))
+            .ok_or("locator needs a picker of the requested type")?;
+        if let Some(text) = replacement {
+            if self.spec_disabled(key)? {
+                return Err("control is disabled".into());
+            }
+            civil::native::restore(view.handle, mode, CivilValue::parse(mode, text)?)?;
+        }
+        civil::native::read(view.handle, mode)
     }
 
     pub(crate) fn settle_edit(&mut self, handle: HWND) {
@@ -705,6 +774,10 @@ impl Surface {
                     self.font,
                     Props {
                         caption,
+                        civil: kind
+                            .civil()
+                            .map(|mode| CivilValue::parse(mode, node.attr("value").unwrap_or("")))
+                            .transpose()?,
                         label: node.attr("label").unwrap_or("").into(),
                         placeholder: node.attr("placeholder").unwrap_or("").into(),
                         enabled: node.attr("enabled").is_none_or(enabled_flag),
@@ -915,7 +988,11 @@ impl Surface {
             let mut room = (inner - spacing.saturating_mul((count - 1).max(0))).max(1);
             // Place fixed-size controls before distributing the leftover
             // width to edit boxes, which benefit from stretching.
-            let is_flex = |key| self.views.get(&key).is_some_and(|view| view.kind.is_edit());
+            let is_flex = |key| {
+                self.views
+                    .get(&key)
+                    .is_some_and(|view| view.kind.is_edit() || view.kind.civil().is_some())
+            };
             let flex_count = children.iter().filter(|&&key| is_flex(key)).count() as i32;
             let preferred = children
                 .iter()
@@ -1019,7 +1096,7 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
         Control::Checkbox | Control::AggregateCheckbox => {
             (text_width(dc, &view.props.caption) + dip(26), dip(30))
         }
-        Control::Edit => (
+        Control::Edit | Control::DatePicker | Control::TimePicker => (
             max_width,
             dip(if view.props.label.is_empty() { 30 } else { 51 }),
         ),

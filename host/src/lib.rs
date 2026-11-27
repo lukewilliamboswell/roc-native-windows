@@ -8,6 +8,8 @@ mod capture;
 #[cfg(windows)]
 mod choice;
 #[cfg(any(test, windows))]
+mod civil;
+#[cfg(any(test, windows))]
 mod clipboard;
 #[cfg(windows)]
 mod effects;

@@ -1,4 +1,5 @@
 use crate::abi::Engine;
+use crate::civil::{self, Value as CivilValue};
 use crate::effects::{Effects, SpecOptions};
 use crate::view::{Surface, wide};
 use crate::wire::{Declarations, EFFECT_NODE, Key, Reader, Tree};
@@ -23,9 +24,9 @@ use windows_sys::Win32::System::Time::{
     GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
 };
 use windows_sys::Win32::UI::Controls::{
-    ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
-    LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK, LVN_ITEMCHANGED, NM_DBLCLK, NM_RETURN, NMHDR,
-    NMITEMACTIVATE, NMLISTVIEW,
+    DTN_DATETIMECHANGE, ICC_DATE_CLASSES, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
+    INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK,
+    LVN_ITEMCHANGED, NM_DBLCLK, NM_RETURN, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, VK_CONTROL, VK_MENU, VK_RETURN, VK_SHIFT,
@@ -246,6 +247,22 @@ impl App {
             }
             _ => return Ok(()),
         };
+        self.control_event(key, event_name, value)
+    }
+
+    fn civil_change(&mut self, key: crate::wire::Key, value: CivilValue) -> Result<()> {
+        if self.surface.civil_changed(key, value) {
+            self.control_event(key, "change", value.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn control_event(
+        &mut self,
+        key: crate::wire::Key,
+        event_name: &str,
+        value: String,
+    ) -> Result<()> {
         if let Some((node, listener)) = self.tree.event(key, event_name) {
             let payload = match listener.kind {
                 1 => value.into_bytes(),
@@ -259,7 +276,7 @@ impl App {
                 payload,
             })?;
             self.drain_private()?;
-            self.surface.restore_controlled_value(key);
+            self.surface.restore_controlled_value(key)?;
         }
         Ok(())
     }
@@ -527,7 +544,7 @@ fn run() -> Result<()> {
         let instance = GetModuleHandleW(null());
         let controls = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES | ICC_DATE_CLASSES | ICC_LISTVIEW_CLASSES,
         };
         if InitCommonControlsEx(&controls) == 0 {
             return Err(last_error("initialize Windows common controls"));
@@ -686,7 +703,15 @@ unsafe extern "system" fn window_proc(
                         }
                         APPLY_PENDING_EDIT => app.surface.settle_edit(lparam as HWND),
                         WM_NOTIFY if lparam != 0 && !app.driven => {
-                            app.report_notify(hwnd, lparam)?
+                            let header = &*(lparam as *const NMHDR);
+                            if header.code != DTN_DATETIMECHANGE {
+                                app.report_notify(hwnd, lparam)?;
+                            } else if let Some(key) = app.surface.key(header.hwndFrom)
+                                && let Some(mode) = app.surface.kind(key).civil()
+                            {
+                                let value = civil::native::notification(lparam, mode)?;
+                                app.civil_change(key, value)?;
+                            }
                         }
                         REPORT_EVENTS => app.drain_reports()?,
                         WM_SIZE => app.surface.arrange(&app.tree)?,
