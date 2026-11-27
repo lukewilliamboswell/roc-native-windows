@@ -30,6 +30,8 @@ mod spec_effects;
 mod spec_plan;
 #[cfg(any(test, windows))]
 mod taskbar;
+#[cfg(any(test, windows))]
+mod toolbar;
 #[cfg(windows)]
 mod view;
 #[cfg(windows)]

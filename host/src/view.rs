@@ -4,6 +4,7 @@ use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
 use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
 use crate::progress::{Progress, native::ProgressBar};
+use crate::toolbar::Toolbar;
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::window_chrome::{WindowDeclaration, native::StatusBar};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
@@ -20,9 +21,10 @@ use windows_sys::Win32::System::SystemServices::{
     SS_BITMAP, SS_CENTERIMAGE, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX,
 };
 use windows_sys::Win32::UI::Controls::{
-    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, DTS_SHORTDATEFORMAT, DTS_SHOWNONE,
-    DTS_TIMEFORMAT, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL, LVS_REPORT, LVS_SHOWSELALWAYS,
-    LVS_SINGLESEL, SetScrollInfo, TCM_ADJUSTRECT, WC_TABCONTROLW,
+    BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, CCS_NODIVIDER, CCS_NOPARENTALIGN, CCS_NORESIZE,
+    DTS_SHORTDATEFORMAT, DTS_SHOWNONE, DTS_TIMEFORMAT, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL,
+    LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL, SetScrollInfo, TBSTYLE_FLAT, TBSTYLE_LIST,
+    TBSTYLE_WRAPABLE, TCM_ADJUSTRECT, TOOLBARCLASSNAMEW, WC_TABCONTROLW,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -52,6 +54,7 @@ pub(crate) enum Control {
     DataGrid,
     Tabs,
     ProgressBar,
+    Toolbar,
 }
 
 impl Control {
@@ -79,6 +82,7 @@ impl Control {
             "ui-data-grid" => Self::DataGrid,
             "ui-tabs" => Self::Tabs,
             "ui-progress-bar" => Self::ProgressBar,
+            "ui-toolbar" => Self::Toolbar,
             _ => return Err(format!("unsupported native control {tag}")),
         };
         Ok(Some(control))
@@ -125,6 +129,13 @@ impl Control {
 
     fn class(self) -> (u32, PCWSTR, u32) {
         match self {
+            Self::Toolbar => (
+                0,
+                TOOLBARCLASSNAMEW,
+                WS_TABSTOP
+                    | (CCS_NODIVIDER | CCS_NOPARENTALIGN | CCS_NORESIZE) as u32
+                    | (TBSTYLE_FLAT | TBSTYLE_LIST | TBSTYLE_WRAPABLE),
+            ),
             Self::Text => (0, w!("STATIC"), SS_LEFT | SS_NOPREFIX),
             Self::Button | Self::FileButton | Self::FolderButton => {
                 (0, w!("BUTTON"), WS_TABSTOP | BS_PUSHBUTTON as u32)
@@ -190,6 +201,7 @@ struct View {
     list_view: Option<ListView>,
     grid: Option<Grid>,
     progress: ProgressBar,
+    toolbar: Option<Toolbar>,
 }
 
 #[derive(Default)]
@@ -236,6 +248,10 @@ impl View {
             None
         };
         let grid = (kind == Control::DataGrid).then(Grid::default);
+        let toolbar = (kind == Control::Toolbar).then(|| {
+            Toolbar::initialize(handle);
+            Toolbar::default()
+        });
         let view = Self {
             handle,
             label: null_mut(),
@@ -253,6 +269,7 @@ impl View {
             list_view,
             progress: ProgressBar::default(),
             grid,
+            toolbar,
         };
         if let Some(mode) = kind.civil() {
             civil::native::initialize(handle, mode)?;
@@ -579,11 +596,26 @@ impl Surface {
         (unsafe { IsWindowEnabled(target.handle) } != 0).then_some(target.handle)
     }
 
+    pub(crate) fn toolbar(&self, handle: HWND) -> Option<&Toolbar> {
+        let key = self.key(handle)?;
+        self.views.get(&key)?.toolbar.as_ref()
+    }
+
+    pub(crate) fn toolbar_command(&self, node: Key) -> Option<(HWND, u16)> {
+        self.views
+            .values()
+            .find_map(|view| Some((view.handle, view.toolbar.as_ref()?.id(node)?)))
+    }
+
     pub(crate) fn spec_handle(&self, key: Key) -> Option<HWND> {
         self.views.get(&key).map(|view| view.handle)
     }
 
     pub(crate) fn spec_label(&self, key: Key, kind: &str) -> Option<String> {
+        if kind == "toolbar-button" {
+            let (handle, id) = self.toolbar_command(key)?;
+            return self.toolbar(handle)?.text(handle, id);
+        }
         let view = self.views.get(&key)?;
         if matches!(kind, "text-field" | "text-area") {
             return Some(if view.label.is_null() {
@@ -619,6 +651,12 @@ impl Surface {
     }
 
     pub(crate) fn spec_text(&self, key: Key) -> Result<String> {
+        if let Some((handle, id)) = self.toolbar_command(key) {
+            return self
+                .toolbar(handle)
+                .and_then(|toolbar| toolbar.text(handle, id))
+                .ok_or("toolbar button has no caption".into());
+        }
         let view = self
             .views
             .get(&key)
@@ -627,6 +665,11 @@ impl Surface {
     }
 
     pub(crate) fn spec_disabled(&self, key: Key) -> Result<bool> {
+        if let Some((handle, id)) = self.toolbar_command(key) {
+            return Ok(self
+                .toolbar(handle)
+                .is_none_or(|toolbar| toolbar.dispatch(handle, id).is_none()));
+        }
         let handle = self
             .spec_handle(key)
             .ok_or("locator is not a native control")?;
@@ -883,7 +926,7 @@ impl Surface {
                     Control::Edit => node.attr("value").unwrap_or("").into(),
                     Control::RadioGroup | Control::Tabs => node.attr("label").unwrap_or("").into(),
                     Control::TextArea => canonical_lines(node.attr("value").unwrap_or("")),
-                    Control::Image => node.attr("label").unwrap_or("").into(),
+                    Control::Image | Control::Toolbar => node.attr("label").unwrap_or("").into(),
                     _ => tree.caption(key),
                 };
                 let view = self.views.get_mut(&key).unwrap();
@@ -925,6 +968,9 @@ impl Surface {
                         self.sync_node(tree, panel, Some(key))?;
                     }
                     return Ok(());
+                }
+                if let Some(toolbar) = &mut view.toolbar {
+                    return toolbar.sync(view.handle, tree, key);
                 }
                 if let Some(grid) = &mut view.grid {
                     return grid.sync(
@@ -1352,6 +1398,13 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             max_width,
             line_height(dc) * number(node, "rows", 5).clamp(1, 100)
                 + dip(if view.props.label.is_empty() { 8 } else { 29 }),
+        ),
+        Control::Toolbar => (
+            max_width,
+            view.toolbar
+                .as_ref()
+                .unwrap()
+                .height(view.handle, max_width, dpi),
         ),
         Control::ListView | Control::DataGrid => (
             max_width,

@@ -45,6 +45,10 @@ no selection for a drop-down or list box. Select a tab by key with
 `(select (tabs "File details") "fingerprint")`. A locator scoped to the tabs
 finds controls in the active page.
 
+Use `(toolbar "Group label")` to locate a command group and
+`(toolbar-button "Caption")` to click a command or inspect its
+enabled state. Scope a command with `within` when captions repeat.
+
 For a report list, pass the locator and stable key to `select-row`,
 `activate-row`, `press-column` or `expect-row-selected`. Pass an empty
 string to `select-row` or `expect-row-selected` to clear or verify an empty

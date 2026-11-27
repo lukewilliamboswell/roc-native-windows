@@ -529,6 +529,9 @@ impl App {
                 }
                 let (handle, notification) = match (step.command, args) {
                     ("click", []) => {
+                        if let Some((toolbar, id)) = self.surface.toolbar_command(key) {
+                            return self.toolbar_command(toolbar, id);
+                        }
                         let handle = self
                             .surface
                             .spec_handle(key)

@@ -36,6 +36,7 @@ for state, stores, and worker tasks.
 | `Ui.hstack` | Horizontal layout | Children, `spacing` and `padding`
 | `Ui.text`, `Ui.text_with` | Label | Text signal and optional `overflow` with `text_with`
 | `Ui.button` | Push button | Title, `on_press`, optional `enabled`
+| `Ui.toolbar` | Command toolbar | Group label, ordered commands and separators
 | `Ui.text_field` | Single-line edit control | Value, `on_input`, optional `label`, `placeholder` and `enabled`
 | `Ui.text_area` | Multiline edit control | Value and `label`, optional `rows`, `enabled`, `mode` and `reference`
 | `Ui.checkbox` | Check box | Title, `checked`, `on_change`, optional `enabled`
@@ -107,6 +108,20 @@ UTF-16 filename and report a partial listing when the scan or result
 limit is reached or an entry is skipped. Enumeration skips subdirectories
 and reports reparse points as skipped entries. The returned files support
 reading, hashing, and saving a copy. The host keeps their paths private.
+
+[#toolbar]
+== Command toolbars
+
+Use `Ui.toolbar({ label }, items)` above the content its commands act on.
+Build each command with `Ui.toolbar_button(title, { key, on_press, enabled })`.
+Keys are nonempty and unique within the toolbar. The title, enabled state,
+and the action's context can follow your Roc state. `on_press` uses the same
+click handler as a push button. Insert `Ui.toolbar_separator()` between
+command groups.
+
+Use Tab to reach the toolbar, arrow keys to move between commands, and Enter
+or Space to activate a command. Commands wrap when the window narrows. Use
+short captions that fit at the smallest supported window width.
 
 [#list-view]
 == Report lists

@@ -621,7 +621,8 @@ spec_step = |expr| {
 	}?
 	fields = match (op, args) {
 		("click", [locator])
-		| ("toggle", [locator]) | ("press-enter", [locator])
+		| ("toggle", [locator])
+		| ("press-enter", [locator])
 		| ("expect-visible", [locator])
 		| ("expect-absent", [locator])
 		|
@@ -819,7 +820,7 @@ spec_locator = |expr| {
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?

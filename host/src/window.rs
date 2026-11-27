@@ -35,7 +35,7 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_LEFT, VK_MENU,
-    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_TAB, VK_UP,
+    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -227,6 +227,28 @@ impl App {
             if let Some(key) = self.tree.reference(id) {
                 self.surface.reference(op, key);
             }
+        }
+        Ok(())
+    }
+
+    fn toolbar_command(&mut self, handle: HWND, command: u16) -> Result<()> {
+        let Some(key) = self
+            .surface
+            .toolbar(handle)
+            .and_then(|toolbar| toolbar.dispatch(handle, command))
+        else {
+            return Ok(());
+        };
+        if let Some((node, listener)) = self.tree.mounted_event(key, "click") {
+            if listener.kind != 10 {
+                return Err("toolbar commands require a click listener".into());
+            }
+            self.deliver(Event::Turn {
+                node,
+                handler: listener.handler,
+                payload: vec![modifiers(), 0],
+            })?;
+            self.drain_private()?;
         }
         Ok(())
     }
@@ -773,7 +795,9 @@ fn run() -> Result<()> {
                 -1 => return Err(last_error("read the Windows message queue")),
                 0 => break,
                 _ => {
+                    let native_key = control_receives_key(&message);
                     if message.message == WM_KEYDOWN
+                        && !native_key
                         && APP.with(|state| {
                             state.borrow_mut().as_mut().map_or(Ok(false), |app| {
                                 if app.grid_keyboard(message.hwnd, message.wParam as u16)? {
@@ -790,7 +814,7 @@ fn run() -> Result<()> {
                         continue;
                     }
                     if !(WM_KEYFIRST..=WM_KEYLAST).contains(&message.message)
-                        || report_receives_enter(&message)
+                        || native_key
                         || IsDialogMessageW(window, &message) == 0
                     {
                         TranslateMessage(&message);
@@ -810,18 +834,26 @@ fn run() -> Result<()> {
     }
 }
 
-/// Dialog navigation handles Enter itself. A report needs the original key
-/// message so it can send its documented NM_RETURN notification.
-fn report_receives_enter(message: &MSG) -> bool {
-    message.message == WM_KEYDOWN
-        && message.wParam == usize::from(VK_RETURN)
-        && APP.with(|state| {
-            state.borrow().as_ref().is_some_and(|app| {
-                app.surface
-                    .key(message.hwnd)
-                    .is_some_and(|key| app.surface.report(key).is_some())
-            })
-        })
+/// Dialog navigation otherwise consumes the keys handled by these controls.
+fn control_receives_key(message: &MSG) -> bool {
+    if message.message != WM_KEYDOWN {
+        return false;
+    }
+    let key = message.wParam as u16;
+    APP.with(|state| {
+        let state = state.borrow();
+        let Some(app) = state.as_ref() else {
+            return false;
+        };
+        let Some(id) = app.surface.key(message.hwnd) else {
+            return false;
+        };
+        (key == VK_RETURN && app.surface.report(id).is_some())
+            || (matches!(
+                key,
+                VK_RETURN | VK_SPACE | VK_LEFT | VK_UP | VK_RIGHT | VK_DOWN
+            ) && app.surface.toolbar(message.hwnd).is_some())
+    })
 }
 
 fn mount(window: HWND, options: Option<SpecOptions>) -> Result<()> {
@@ -894,7 +926,15 @@ unsafe extern "system" fn window_proc(
                     };
                     match message {
                         WM_COMMAND if lparam != 0 && !app.driven => {
-                            app.command(lparam as HWND, (wparam >> 16) as u16)?
+                            let source = lparam as HWND;
+                            let notification = (wparam >> 16) as u16;
+                            if u32::from(notification) == BN_CLICKED
+                                && app.surface.toolbar(source).is_some()
+                            {
+                                app.toolbar_command(source, wparam as u16)?;
+                            } else {
+                                app.command(source, notification)?;
+                            }
                         }
                         APPLY_PENDING_EDIT => app.surface.settle_edit(lparam as HWND),
                         WM_NOTIFY if lparam != 0 && !app.driven => {

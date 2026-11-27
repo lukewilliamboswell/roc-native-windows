@@ -87,6 +87,48 @@ Ui := [].{
 			[Engine.text_s(title)],
 		)
 
+	## The accessible name of a toolbar.
+	ToolbarProps := { label : Str }
+
+	## A toolbar command's stable key, click handler and controlled availability.
+	ToolbarButtonProps(ctx) := {
+		key : Str,
+		on_press : HandlerOf(ctx, Engine.Click),
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+	}
+
+	ToolbarItem(ctx) := [ToolbarCommand(Elem(ctx)), ToolbarSeparator]
+
+	## A text-bearing command inside a toolbar.
+	toolbar_button : Signal(ctx, Str), ToolbarButtonProps(ctx) -> ToolbarItem(ctx)
+	toolbar_button = |title, props| ToolbarCommand(
+		Engine.element(
+			"ui-toolbar-button",
+			[
+				Engine.attr("command-key", props.key),
+				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.on_click(props.on_press),
+			],
+			[Engine.text_s(title)],
+		),
+	)
+
+	## A divider between command groups.
+	toolbar_separator : () -> ToolbarItem(ctx)
+	toolbar_separator = || ToolbarSeparator
+
+	## A native command group that wraps as its width changes.
+	toolbar : ToolbarProps, List(ToolbarItem(ctx)) -> Elem(ctx)
+	toolbar = |props, items| {
+		children = items.map(
+			|item| match item {
+				ToolbarCommand(command) => command
+				ToolbarSeparator => Engine.element("ui-toolbar-separator", [], [])
+			},
+		)
+		Engine.element("ui-toolbar", [Engine.attr("label", props.label)], children)
+	}
+
 	## A text field sends the current value after each edit.
 	TextFieldProps(ctx) := {
 		on_input : Handler(ctx),
