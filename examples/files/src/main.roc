@@ -34,6 +34,9 @@ store = Engine.store(
 		preview_bytes: Engine.cell(NoPreview),
 		format: Engine.cell("text"),
 		detail: Engine.cell("preview"),
+		grouped: Engine.cell(Bool.False),
+		group_selection: Engine.cell(Ui.Selection.NoSelection),
+		expanded: Engine.cell(Set.empty()),
 		folder: Engine.cell(no_folder),
 		pick_status: Engine.cell(""),
 	}.Engine.Cells,
@@ -48,6 +51,19 @@ view = || {
 	format = cells.format.signal()
 	detail = cells.detail.signal()
 	selection = { queue, selected }.Signal.map(|{ queue: entries, selected: key }| active(entries, key))
+	group_selection = cells.group_selection.signal()
+	tree_selected = { selected, group_selection }.Signal.map(|value|
+		match value.group_selection {
+			Selected(_) => value.group_selection
+			NoSelection => value.selected
+		},
+	)
+	group_summary = { queue, group_selection }.Signal.map(|value|
+		match value.group_selection {
+			Selected(group) => group_title(value.queue, group.drop_prefix("type:"))
+			NoSelection => ""
+		},
+	)
 	display = cells.display.signal()
 	checksum = display.map(|state| if (state.digest.starts_with("SHA-256: ")) state.digest.drop_prefix("SHA-256: ") else "")
 	preview = { display, bytes: cells.preview_bytes.signal(), format }.Signal.map(
@@ -74,13 +90,32 @@ view = || {
 					Ui.button("Clear", { on_press: Engine.handle(|_| reset(Clear)) }),
 				],
 			),
-			Ui.list_box({
-				label: "Picked files",
-				choices: queue.map(|entries| entries.map(|item| Ui.Choice.{ key: item.key, label: item.file.name() })),
-				selected,
-				on_select: Engine.handle_by(queue, select),
-				visible_rows: 4,
-			}),
+			Ui.checkbox(
+				"Group by file type",
+				{ checked: cells.grouped.signal(), on_change: Engine.handle_by(selection, toggle_grouped) },
+			),
+			Engine.when(
+				cells.grouped.signal(),
+				|| Ui.vstack({}, [
+					Ui.tree_view({
+						label: "Picked files",
+						nodes: queue.map(group_nodes),
+						selected: tree_selected,
+						on_select: Engine.handle_by(queue, select_tree),
+						expanded: cells.expanded.signal(),
+						on_expand: Engine.handle(expand_group),
+						visible_rows: 5,
+					}),
+					Engine.when(group_summary.map(|title| !title.is_empty()), || Ui.text(group_summary), || Ui.vstack({}, [])),
+				]),
+				|| Ui.list_box({
+					label: "Picked files",
+					choices: queue.map(|entries| entries.map(|item| Ui.Choice.{ key: item.key, label: item.file.name() })),
+					selected,
+					on_select: Engine.handle_by(queue, select),
+					visible_rows: 4,
+				}),
+			),
 			Ui.text_with(display.map(|state| state.name), { overflow: EllipsizeEnd }),
 			Ui.text(display.map(|state| state.size)),
 			Ui.text(display.map(|state| state.status)),
@@ -174,6 +209,60 @@ view = || {
 	)
 }
 
+file_type : File -> Str
+file_type = |file| Inspector.extension(file.name())
+
+group_key : Str -> Str
+group_key = |extension| "type:${extension}"
+
+group_title : List(Queued), Str -> Str
+group_title = |entries, extension| {
+	name = if (extension.is_empty()) "No extension" else ".${extension}"
+	count = entries.keep_if(|item| file_type(item.file) == extension).len()
+	"${name} (${count.to_str()})"
+}
+
+group_nodes : List(Queued) -> List(Ui.TreeNode)
+group_nodes = |entries| {
+	extensions = entries.fold([], |types, item| {
+		extension = file_type(item.file)
+		if (types.contains(extension)) types else types.append(extension)
+	})
+	roots = extensions.map(|extension| Ui.TreeNode.{ key: group_key(extension), label: group_title(entries, extension), parent: Root })
+	leaves = entries.map(|item| Ui.TreeNode.{ key: item.key, label: item.file.name(), parent: ChildOf(group_key(file_type(item.file))) })
+	roots.concat(leaves)
+}
+
+toggle_grouped : Selection, Bool -> List(Engine.Write(_))
+toggle_grouped = |selection, grouped| {
+	writes = [cells.grouped.set(grouped), cells.group_selection.set(NoSelection)]
+	match (grouped, selection) {
+		(Bool.True, Selected(file)) => writes.append(open_group(file))
+		_ => writes
+	}
+}
+
+open_group : File -> Engine.Write(_)
+open_group = |file| {
+	key = group_key(file_type(file))
+	cells.expanded.update(|expanded| expanded.insert(key))
+}
+
+expand_group : Ui.TreeExpansion -> List(Engine.Write(_))
+expand_group = |{ key, expansion }| [
+	cells.expanded.update(|expanded| match expansion {
+		Expanded => expanded.insert(key)
+		Collapsed => expanded.remove(key)
+	}),
+]
+
+select_tree : List(Queued), Ui.Selection -> List(Engine.Write(_))
+select_tree = |entries, wanted|
+	match wanted {
+		Selected(key) if key.starts_with("type:") => [cells.group_selection.set(wanted)]
+		_ => [cells.group_selection.set(NoSelection)].concat(select(entries, wanted))
+	}
+
 active : List(Queued), Ui.Selection -> Selection
 active = |entries, selection|
 	match selection {
@@ -232,6 +321,8 @@ set_queue = |base, files, empty_action| {
 		Ok(first) => [
 			cells.queue.set(queued),
 			cells.next_key.set(base + queued.len()),
+			cells.group_selection.set(NoSelection),
+			cells.expanded.set(Set.empty().insert(group_key(file_type(first.file)))),
 		].concat(select(queued, Selected(first.key)))
 		Err(_) => empty_queue(empty_action)
 	}
@@ -247,4 +338,12 @@ clear_folder : Engine.Write(_)
 clear_folder = cells.folder.update(|previous| FolderRequest.{ sequence: previous.sequence + 1, selected: NoFolder })
 
 empty_queue : Inspector.Action -> List(Engine.Write(_))
-empty_queue = |action| [cells.queue.set([]), cells.selected.set(NoSelection), cells.preview_bytes.set(NoPreview), cells.copy_status.set(""), change(action)]
+empty_queue = |action| [
+	cells.queue.set([]),
+	cells.selected.set(NoSelection),
+	cells.group_selection.set(NoSelection),
+	cells.expanded.set(Set.empty()),
+	cells.preview_bytes.set(NoPreview),
+	cells.copy_status.set(""),
+	change(action),
+]

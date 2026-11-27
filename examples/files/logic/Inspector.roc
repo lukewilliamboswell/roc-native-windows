@@ -21,6 +21,17 @@ Inspector := [].{
 			Digest(Err(problem)) => { ..display, digest: "Digest failed: ${problem}" }
 		}
 
+	extension : Str -> Str
+	extension = |name| {
+		parts = name.split_on(".")
+		if parts.len() < 2 or (parts.len() == 2 and name.starts_with(".")) {
+			""
+		} else {
+			extension_bytes = (parts.last() ?? "").to_utf8()
+			Str.from_utf8_lossy(extension_bytes.map(|byte| if (byte >= 'A' and byte <= 'Z') byte + 32 else byte))
+		}
+	}
+
 	preview : List(U8) -> Str
 	preview = |bytes|
 		if bytes.is_empty() {
@@ -44,3 +55,6 @@ Inspector := [].{
 expect Inspector.hex([0, 15, 255]) == "000fff"
 expect Inspector.preview("hello\n world".to_utf8()) == "hello\n world"
 expect Inspector.preview("a\r\nb\rc\u(0000)".to_utf8()) == "a\nb\nc␀"
+
+expect Inspector.extension("User.Guide.TxT") == "txt"
+expect Inspector.extension(".profile") == ""
