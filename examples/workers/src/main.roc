@@ -47,11 +47,39 @@ store = Engine.store(
 cells = store.cells()
 
 plan : Query -> Engine.QueryPlan(U64, Stock.Item, (U64, U64))
-plan = |query|
-	Engine.sort_by({
-		keep: |_, item| !query.mismatches or item.counted != item.expected,
-		sort: |key, _| if (query.reverse) 4 - key else key,
-	})
+plan = |query| Engine.sort_by({
+	keep: |_, item| keep_item(query, item),
+	sort: |key, _| rank(query, key),
+})
+
+keep_item : Query, Stock.Item -> Bool
+keep_item = |query, item| !query.mismatches or item.counted != item.expected
+
+rank : Query, U64 -> U64
+rank = |query, key| if (query.reverse) 4 - key else key
+
+paste_error : Ui.GridPasteError -> Str
+paste_error = |problem| match problem {
+	Unavailable => "The clipboard does not contain readable text."
+	Malformed => "Paste a rectangular set of tab-separated values."
+	TooLarge => "The paste is too large."
+	OutsideGrid => "The paste does not fit the mounted grid."
+	SelectionMismatch => "The pasted cells must match the selected rectangle."
+	ReadOnlyCell => "The paste includes a read-only cell."
+}
+
+paste_updates = |table, query, page, batch| {
+	ordered = table.to_list().keep_if(|entry| keep_item(query, entry.row)).sort_with(
+		|left, right| {
+			a = rank(query, left.key)
+			b = rank(query, right.key)
+			if (a < b) Before else if (a > b) After else Same
+		},
+	)
+	visible = ordered.drop_first(if (page) 3 else 0).take_first(3)
+	replacements = Stock.paste(visible, batch)?
+	Ok(replacements.fold(table, |next, change| next.update(change.key, |_| change.row)))
+}
 
 view : () -> Elem(Engine.StoreRoot(_))
 view = || {
@@ -59,6 +87,7 @@ view = || {
 	page = cells.second_page.signal()
 	window = page.map(|second| { start: if (second) 3 else 0, count: 3 })
 	job = cells.job.signal()
+	paste_context = { table: cells.counts.signal(), query, page }.Signal.map(|value| value)
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
@@ -69,7 +98,7 @@ view = || {
 					Ui.text("Stock count reconciliation"),
 				],
 			),
-			Ui.text("Select a Counted cell and press Enter or F2 to edit."),
+			Ui.text("Edit a Counted cell with Enter or F2. Hold Shift and use the arrows to select a range for Ctrl+V."),
 			Ui.hstack(
 				{},
 				[
@@ -96,6 +125,21 @@ view = || {
 						{ key: "counted", heading: "Counted", width: Fixed(90) },
 					],
 					visible_rows: 3,
+					on_paste: Handle(
+						Engine.handle_by(
+							paste_context,
+							|state, result| {
+								updates = match result {
+									Ok(batch) => paste_updates(state.table, state.query, state.page, batch)
+									Err(problem) => Err(paste_error(problem))
+								}
+								match updates {
+									Ok(table) => [cells.counts.set(table), cells.status.set("Pasted counts into the mounted grid.")]
+									Err(message) => [cells.status.set(message)]
+								}
+							},
+						),
+					),
 				},
 				Engine.table_view(
 					cells.counts,

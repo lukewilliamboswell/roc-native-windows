@@ -8,12 +8,32 @@ Stock := [].{
 	new : Str, U64 -> Item
 	new = |name, expected| { name, expected, counted: expected, feedback: Clear }
 
+	parse_count : Str -> Try(U64, Str)
+	parse_count = |draft| match U64.from_str(draft.trim()) {
+		Ok(counted) if counted <= 1_000_000 => Ok(counted)
+		_ => Err("Enter a whole number from 0 to 1,000,000.")
+	}
+
 	recount : Item, Ui.CellEdit -> Item
-	recount = |item, { draft }|
-		match U64.from_str(draft.trim()) {
-			Ok(counted) if counted <= 1_000_000 => { ..item, counted, feedback: Clear }
-			_ => { ..item, feedback: Invalid("Enter a whole number from 0 to 1,000,000.") }
+	recount = |item, { draft }| match parse_count(draft) {
+		Ok(counted) => { ..item, counted, feedback: Clear }
+		Err(message) => { ..item, feedback: Invalid(message) }
+	}
+
+	paste : List({ key : U64, row : Item }), Ui.GridPaste -> Try(List({ key : U64, row : Item }), Str)
+	paste = |visible, batch| {
+		if (batch.columns != ["counted"]) return Err("Only the Counted column can be pasted.")
+		var $changes = []
+		var $index = batch.first_row - 1
+		for line in batch.rows {
+			held = visible.get($index) ? |_| "The pasted rows no longer fit the mounted page."
+			draft = line.get(0) ? |_| "Each line needs one count."
+			counted = parse_count(draft)?
+			$changes = $changes.append({ key: held.key, row: { ..held.row, counted, feedback: Clear } })
+			$index = $index + 1
 		}
+		Ok($changes)
+	}
 
 	count : Item -> Count
 	count = |item| { expected: item.expected, counted: item.counted }
