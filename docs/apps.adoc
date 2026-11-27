@@ -84,6 +84,11 @@ controls also support their usual Windows clipboard shortcuts.
 == Package an app for distribution
 
 Set MSI metadata in `windows.json` at the app root, beside `windows.roc`.
+Set `icon` to an `.ico` path relative to `assets/` to brand the executable
+on both Windows architectures. A multi-size icon serves the window, Start
+shortcut and Explorer. The launcher embeds it in the staged executable and
+uses that executable for both MSI and ZIP. The Reading List scaffold
+includes an icon you can replace with your own.
 The starter sets an example ID from the project name. Choose your own
 stable reverse-DNS ID before publishing, and keep it for upgrades. The version is a three-part MSI
 product version. The ID, publisher, and asset filenames use ASCII.

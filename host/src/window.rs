@@ -3,6 +3,7 @@ use crate::civil::{self, Value as CivilValue};
 use crate::effects::{Effects, SpecOptions};
 use crate::grid::Intent as GridIntent;
 use crate::view::{Surface, wide};
+use crate::window_icons::WindowIcons;
 use crate::wire::{Declarations, EFFECT_NODE, Key, Reader, Tree};
 use crate::{Event, Result};
 use std::cell::RefCell;
@@ -56,6 +57,7 @@ struct App {
     engine: Engine,
     tree: Tree,
     surface: Surface,
+    icons: WindowIcons,
     effects: Effects,
     incoming: Receiver<Event>,
     private: VecDeque<Event>,
@@ -76,6 +78,7 @@ impl App {
             engine: Engine::default(),
             tree: Tree::new(),
             surface: Surface::new(window)?,
+            icons: WindowIcons::new(window),
             effects: Effects::new(window, send),
             incoming,
             private: VecDeque::new(),
@@ -909,6 +912,7 @@ unsafe extern "system" fn window_proc(
                                 SWP_NOZORDER | SWP_NOACTIVATE,
                             );
                             app.surface.dpi_changed(&app.tree)?;
+                            app.icons.sync();
                         }
                         WM_TIMER if wparam == PUMP => app.poll()?,
                         WM_VSCROLL => app.surface.scroll(&app.tree, wparam as u16, None)?,

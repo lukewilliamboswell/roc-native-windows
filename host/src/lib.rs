@@ -30,6 +30,8 @@ mod spec_plan;
 mod view;
 #[cfg(windows)]
 mod window;
+#[cfg(windows)]
+mod window_icons;
 #[cfg(any(test, windows))]
 pub(crate) mod wire;
 
