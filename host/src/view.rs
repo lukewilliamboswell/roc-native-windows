@@ -3,6 +3,7 @@ use crate::choice::Choices;
 use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
 use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
+use crate::progress::{Progress, native::ProgressBar};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
 use std::cell::RefCell;
@@ -49,6 +50,7 @@ pub(crate) enum Control {
     TimePicker,
     DataGrid,
     Tabs,
+    ProgressBar,
 }
 
 impl Control {
@@ -72,6 +74,7 @@ impl Control {
             "ui-time-picker" => Self::TimePicker,
             "ui-data-grid" => Self::DataGrid,
             "ui-tabs" => Self::Tabs,
+            "ui-progress-bar" => Self::ProgressBar,
             _ => return Err(format!("unsupported native control {tag}")),
         };
         Ok(Some(control))
@@ -108,6 +111,7 @@ impl Control {
                 | Self::ListView
                 | Self::DataGrid
                 | Self::Tabs
+                | Self::ProgressBar
                 | Self::ListBox
                 | Self::ComboBox
                 | Self::DatePicker
@@ -147,6 +151,7 @@ impl Control {
                 WS_TABSTOP | WS_VSCROLL | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32,
             ),
             Self::RadioGroup => (WS_EX_CONTROLPARENT, w!("BUTTON"), BS_GROUPBOX as u32),
+            Self::ProgressBar => (0, w!("msctls_progress32"), 0),
             Self::ListView | Self::DataGrid => (
                 WS_EX_CLIENTEDGE,
                 w!("SysListView32"),
@@ -180,6 +185,7 @@ struct View {
     combo_position: Option<(HWND, i32, i32, i32, i32)>,
     list_view: Option<ListView>,
     grid: Option<Grid>,
+    progress: ProgressBar,
 }
 
 #[derive(Default)]
@@ -214,6 +220,9 @@ impl View {
                 return Err("could not track input method composition".into());
             }
         }
+        if kind == Control::ProgressBar {
+            ProgressBar::initialize(handle);
+        }
         if matches!(kind, Control::ListView | Control::DataGrid) {
             ListView::initialize(handle);
         }
@@ -238,6 +247,7 @@ impl View {
             tab_owner: None,
             combo_position: None,
             list_view,
+            progress: ProgressBar::default(),
             grid,
         };
         if let Some(mode) = kind.civil() {
@@ -575,10 +585,19 @@ impl Surface {
         if view.kind.separate_label() {
             return Some(view.props.label.clone());
         }
-        if kind == "image" || kind == "list-view" {
+        if matches!(kind, "image" | "list-view" | "progress-bar") {
             return Some(view.props.label.clone());
         }
         Some(window_text(view.handle))
+    }
+
+    pub(crate) fn spec_progress(&self, key: Key, wire: &str) -> Result<()> {
+        let view = self
+            .views
+            .get(&key)
+            .filter(|view| view.kind == Control::ProgressBar)
+            .ok_or("expect-progress requires a native progress bar")?;
+        ProgressBar::expect(view.handle, Progress::parse(wire)?)
     }
 
     pub(crate) fn spec_text(&self, key: Key) -> Result<String> {
@@ -863,6 +882,10 @@ impl Surface {
                         ellipsize: node.attr("ellipsize-end").is_some_and(enabled_flag),
                     },
                 )?;
+                if kind == Control::ProgressBar {
+                    let requested = Progress::parse(node.attr("progress").unwrap_or("idle"))?;
+                    view.progress.update(view.handle, requested);
+                }
                 if kind.is_choice() {
                     view.choices.sync(view.handle, self.font, kind, tree, key)?;
                     if kind == Control::Tabs {
@@ -973,10 +996,19 @@ impl Surface {
         for item in placement {
             let view = self.views.get_mut(&item.key).unwrap();
             let y = item.y - self.scroll_position;
+            let visible = view.kind != Control::ProgressBar || view.progress.visible();
             let mut label_height = 0;
             if !view.label.is_null() && !view.props.label.is_empty() {
                 label_height = scale(self.dpi, 21);
-                position(view.label, after, item.x, y, item.width, label_height);
+                position_visible(
+                    view.label,
+                    after,
+                    item.x,
+                    y,
+                    item.width,
+                    label_height,
+                    visible,
+                );
                 after = view.label;
             }
             if view.kind == Control::Image {
@@ -1011,13 +1043,14 @@ impl Surface {
                     view.combo_position = Some(placement);
                 }
             } else {
-                position(
+                position_visible(
                     view.handle,
                     after,
                     item.x,
                     control_y,
                     item.width,
                     control_height,
+                    visible,
                 );
             }
             if view.kind == Control::RadioGroup {
@@ -1242,6 +1275,11 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
             max_width,
             dip(if view.props.label.is_empty() { 30 } else { 51 }),
         ),
+        Control::ProgressBar => (
+            max_width,
+            dip(number(node, "height", 16).max(1)
+                + if view.props.label.is_empty() { 0 } else { 21 }),
+        ),
         Control::ComboBox => (
             max_width,
             dip(30 + if view.props.label.is_empty() { 0 } else { 21 }),
@@ -1371,6 +1409,23 @@ pub(crate) fn child(parent: HWND, font: HFONT, ex: u32, class: PCWSTR, style: u3
 }
 
 pub(crate) fn position(hwnd: HWND, after: HWND, x: i32, y: i32, width: i32, height: i32) {
+    position_visible(hwnd, after, x, y, width, height, true);
+}
+
+fn position_visible(
+    hwnd: HWND,
+    after: HWND,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    visible: bool,
+) {
+    let visibility = if visible {
+        SWP_SHOWWINDOW
+    } else {
+        SWP_HIDEWINDOW
+    };
     // SAFETY: The target and its preceding sibling, if any, are live HWNDs.
     unsafe {
         SetWindowPos(
@@ -1380,7 +1435,7 @@ pub(crate) fn position(hwnd: HWND, after: HWND, x: i32, y: i32, width: i32, heig
             y,
             width,
             height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE | visibility,
         );
     }
 }

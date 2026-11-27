@@ -22,6 +22,7 @@ for state, stores, and worker tasks.
 | `Ui.list_box` | Single-selection list | `label`, `choices`, `selected`, `on_select`, optional `enabled` and `visible_rows` (default 6)
 | `Ui.date_picker` | Calendar picker | Date selection signal, accessible `label`, typed `on_change`, optional `enabled`
 | `Ui.time_picker` | Time-of-day picker | Time selection signal, accessible `label`, typed `on_change`, optional `enabled`
+| `Ui.progress_bar` | Progress indicator | Progress signal, accessible `label`, optional `height` (default 16 DIP)
 | `Ui.radio_group` | Labeled radio buttons | `label`, static `choices`, `selected` key, `on_select`, optional `enabled`
 | `Ui.tabs` | Tab strip and active page | `label`, static `tabs`, `selected` key, `on_select` and the page element
 | `Ui.file_button` | System file picker | Title, `on_files` handler, and optional `selection` (`SingleFile` or `MultipleFiles`)
@@ -68,6 +69,11 @@ Use at least one tab with a unique key and supply one of those keys as
 page. If `on_select` declines an intent, the selected tab and page keep
 their previous state. Keep drafts or results that should survive a page
 switch in app state outside the page's scope.
+
+Use `Ui.Progress.Indeterminate` while work is active and its total is
+unknown. `Determinate({ completed, total })` caps completed work at total.
+A zero total resolves to `Idle`. The bar and its label keep their layout
+space while idle, and the animation runs in the native control.
 
 A multi-file confirmation delivers its files and refusal count in one
 event. Cancelling the picker leaves the app's selection alone.

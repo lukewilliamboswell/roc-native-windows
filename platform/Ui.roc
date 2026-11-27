@@ -242,6 +242,27 @@ Ui := [].{
 		civil_picker("ui-time-picker", encoded, props.label, props.enabled, handler)
 	}
 
+	## Presentation progress for work with optional measurable counts.
+	Progress := [Idle, Indeterminate, Determinate({ completed : U64, total : U64 })]
+
+	ProgressBarProps := {
+		label : Str,
+		height : U32 ?? 16,
+	}
+
+	## Show a native progress indicator. Idle keeps its space and hides the indicator.
+	progress_bar : Signal(ctx, Progress), ProgressBarProps -> Elem(ctx)
+	progress_bar = |progress, props|
+		Engine.element(
+			"ui-progress-bar",
+			[
+				Engine.attr("label", props.label),
+				Engine.attr("height", props.height.to_str()),
+				Engine.attr_s("progress", progress.map(progress_word)),
+			],
+			[],
+		)
+
 	## A stable native option key and its display label.
 	Choice := { key : Str, label : Str }
 
@@ -645,3 +666,12 @@ grid_paste_from_payload = |payload| match payload.split_on("\u(0000)") {
 	}
 	_ => Err(Malformed)
 }
+
+progress_word : Ui.Progress -> Str
+progress_word = |state|
+	match state {
+		Idle => "idle"
+		Indeterminate => "indeterminate"
+		Determinate({ total: 0, .. }) => "idle"
+		Determinate({ completed, total }) => "${completed.min(total).to_str()}/${total.to_str()}"
+	}

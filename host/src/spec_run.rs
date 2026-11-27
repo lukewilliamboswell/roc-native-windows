@@ -376,7 +376,8 @@ impl App {
             (
                 "click" | "fill" | "toggle" | "press-enter" | "expect-visible" | "expect-absent"
                 | "expect-text" | "expect-checked" | "expect-disabled" | "select"
-                | "expect-selection" | "set-date" | "expect-date" | "set-time" | "expect-time",
+                | "expect-selection" | "set-date" | "expect-date" | "set-time" | "expect-time"
+                | "expect-progress",
                 _,
             ) => self.control_step(step),
             (
@@ -489,6 +490,7 @@ impl App {
             ("expect-disabled", [value]) => {
                 expect(self.surface.spec_disabled(key)?, number(value)?)
             }
+            ("expect-progress", [wanted]) => self.surface.spec_progress(key, wanted),
             ("expect-selection", [wanted]) => expect(self.surface.spec_selection(key)?, *wanted),
             ("set-date" | "set-time" | "expect-date" | "expect-time", [value]) => {
                 let mode = if step.command.ends_with("date") {

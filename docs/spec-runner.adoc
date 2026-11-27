@@ -76,6 +76,11 @@ Use \`select-cell-range\` with the grid and two row-column pairs to set a
 rectangle. \`paste-grid\` supplies tab-separated text to the grid's normal
 paste handler without using the shared desktop clipboard.
 
+Use `(expect-progress (progress-bar "Request progress") indeterminate)`
+while a request is held. An assertion can also check `idle` or
+`(determinate COMPLETED TOTAL)`. It reads the native bar's visibility,
+mode and determinate position.
+
 == Simulate and run effects
 
 Tests start with isolated storage and hold HTTP requests, timers and

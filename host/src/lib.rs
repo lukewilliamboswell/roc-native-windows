@@ -19,6 +19,8 @@ mod grid;
 mod grid_clipboard;
 #[cfg(any(test, windows))]
 mod list_view;
+#[cfg(any(test, windows))]
+mod progress;
 #[cfg(windows)]
 #[allow(clippy::all)]
 mod roc_platform_abi;

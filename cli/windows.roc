@@ -673,6 +673,11 @@ spec_step = |expr| {
 			encoded = spec_civil_value(op.ends_with("date"), value)?
 			Ok(parts.append(encoded))
 		}
+		("expect-progress", [locator, value]) => {
+			parts = spec_locator(locator)?
+			encoded = spec_progress(value)?
+			Ok(parts.append(encoded))
+		}
 		("expect-checked", [locator, value]) | ("expect-disabled", [locator, value]) => {
 			parts = spec_locator(locator)?
 			word = match value {
@@ -766,6 +771,19 @@ spec_civil_value = |date, expr| {
 spec_two_digits : I64 -> Str
 spec_two_digits = |value| if (value < 10) "0${value.to_str()}" else value.to_str()
 
+spec_progress : SpecExpr -> Try(Str, SpecIssue)
+spec_progress = |expr|
+	match expr {
+		Word(mode, _) if mode == "idle" or mode == "indeterminate" => Ok(mode)
+		Form([Word("determinate", _), Word(done_count, _), Word(total_count, _)], at) => {
+			bad = spec_error(at, "Expected unsigned 64-bit progress counts")
+			completed = U64.from_str(done_count) ? |_| bad
+			total = U64.from_str(total_count) ? |_| bad
+			Ok("${completed.to_str()}/${total.to_str()}")
+		}
+		_ => Err(spec_error(spec_position(expr), "Expected idle, indeterminate, or (determinate COMPLETED TOTAL)"))
+	}
+
 spec_texts : List(SpecExpr), Str -> Try(List(Str), SpecIssue)
 spec_texts = |nodes, problem| {
 	var $fields = []
@@ -788,7 +806,7 @@ spec_locator = |expr| {
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?

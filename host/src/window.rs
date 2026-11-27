@@ -26,10 +26,10 @@ use windows_sys::Win32::System::Time::{
     GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
 };
 use windows_sys::Win32::UI::Controls::{
-    DTN_DATETIMECHANGE, ICC_DATE_CLASSES, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
-    ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE, LVIS_SELECTED,
-    LVN_COLUMNCLICK, LVN_ENDSCROLL, LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RETURN,
-    NMCUSTOMDRAW, NMHDR, NMITEMACTIVATE, NMLISTVIEW, TCN_SELCHANGE,
+    DTN_DATETIMECHANGE, ICC_DATE_CLASSES, ICC_LISTVIEW_CLASSES, ICC_PROGRESS_CLASS,
+    ICC_STANDARD_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE,
+    LVIS_SELECTED, LVN_COLUMNCLICK, LVN_ENDSCROLL, LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW,
+    NM_DBLCLK, NM_RETURN, NMCUSTOMDRAW, NMHDR, NMITEMACTIVATE, NMLISTVIEW, TCN_SELCHANGE,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_LEFT, VK_MENU,
@@ -701,7 +701,11 @@ fn run() -> Result<()> {
         let instance = GetModuleHandleW(null());
         let controls = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES | ICC_DATE_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES
+                | ICC_DATE_CLASSES
+                | ICC_LISTVIEW_CLASSES
+                | ICC_TAB_CLASSES
+                | ICC_PROGRESS_CLASS,
         };
         if InitCommonControlsEx(&controls) == 0 {
             return Err(last_error("initialize Windows common controls"));
