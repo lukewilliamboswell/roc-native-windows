@@ -26,9 +26,9 @@ use windows_sys::Win32::System::Time::{
 };
 use windows_sys::Win32::UI::Controls::{
     DTN_DATETIMECHANGE, ICC_DATE_CLASSES, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
-    INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK,
-    LVN_ENDSCROLL, LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RETURN, NMCUSTOMDRAW,
-    NMHDR, NMITEMACTIVATE, NMLISTVIEW,
+    ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE, LVIS_SELECTED,
+    LVN_COLUMNCLICK, LVN_ENDSCROLL, LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RETURN,
+    NMCUSTOMDRAW, NMHDR, NMITEMACTIVATE, NMLISTVIEW, TCN_SELCHANGE,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_LEFT, VK_MENU,
@@ -240,7 +240,7 @@ impl App {
             (Control::Checkbox | Control::AggregateCheckbox, BN_CLICKED) => {
                 ("change", self.surface.input(key))
             }
-            (kind, code) if kind.is_choice() => {
+            (kind, code) if kind.is_choice() && kind != Control::Tabs => {
                 let Some(value) = self.surface.choice_event(key, control, code) else {
                     return Ok(());
                 };
@@ -275,6 +275,19 @@ impl App {
         Ok(())
     }
 
+    fn notify(&mut self, source: HWND, code: u32) -> Result<()> {
+        if code != TCN_SELCHANGE {
+            return Ok(());
+        }
+        if let Some(key) = self.surface.key(source)
+            && self.surface.kind(key) == crate::view::Control::Tabs
+            && let Some(value) = self.surface.choice_event(key, source, code)
+        {
+            self.control_event(key, "change", value)?;
+        }
+        Ok(())
+    }
+
     fn control_event(
         &mut self,
         key: crate::wire::Key,
@@ -294,8 +307,8 @@ impl App {
                 payload,
             })?;
             self.drain_private()?;
-            self.surface.restore_controlled_value(key)?;
         }
+        self.surface.restore_controlled_value(key)?;
         Ok(())
     }
 
@@ -675,7 +688,7 @@ fn run() -> Result<()> {
         let instance = GetModuleHandleW(null());
         let controls = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES | ICC_DATE_CLASSES | ICC_LISTVIEW_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES | ICC_DATE_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES,
         };
         if InitCommonControlsEx(&controls) == 0 {
             return Err(last_error("initialize Windows common controls"));
@@ -855,14 +868,20 @@ unsafe extern "system" fn window_proc(
                         APPLY_PENDING_EDIT => app.surface.settle_edit(lparam as HWND),
                         WM_NOTIFY if lparam != 0 && !app.driven => {
                             let header = &*(lparam as *const NMHDR);
-                            if header.code != DTN_DATETIMECHANGE {
-                                app.report_notify(hwnd, lparam)?;
-                                app.grid_notify(lparam)?;
-                            } else if let Some(key) = app.surface.key(header.hwndFrom)
-                                && let Some(mode) = app.surface.kind(key).civil()
-                            {
-                                let value = civil::native::notification(lparam, mode)?;
-                                app.civil_change(key, value)?;
+                            match header.code {
+                                TCN_SELCHANGE => app.notify(header.hwndFrom, header.code)?,
+                                DTN_DATETIMECHANGE => {
+                                    if let Some(key) = app.surface.key(header.hwndFrom)
+                                        && let Some(mode) = app.surface.kind(key).civil()
+                                    {
+                                        let value = civil::native::notification(lparam, mode)?;
+                                        app.civil_change(key, value)?;
+                                    }
+                                }
+                                _ => {
+                                    app.report_notify(hwnd, lparam)?;
+                                    app.grid_notify(lparam)?;
+                                }
                             }
                         }
                         GRID_EVENTS => app.drain_grid()?,

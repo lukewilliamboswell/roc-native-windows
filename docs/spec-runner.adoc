@@ -28,7 +28,7 @@ process can test an ARM64 build with `test --target arm64mingw`.
 
 Selectors look up `button`, `checkbox`, `text-field`, `text-area`, `text`,
 `file-button`, `folder-button`, `image`, `combo-box`, `list-box`, `radio-group`, `list-view`,
-`date-picker`, `time-picker`, and `data-grid`.
+`date-picker`, `time-picker`, `data-grid`, and `tabs`.
 Use `(within OUTER INNER)` to narrow a
 selector to a row or container. An action needs a unique match. Use
 `expect-text`, `expect-visible`, `expect-absent`, `expect-disabled` and
@@ -41,7 +41,9 @@ multiline content.
 Use `(select (combo-box "Status filter") "unread")` to propose a choice and
 `(expect-selection (combo-box "Status filter") "unread")` to assert the current
 selection. Both forms use the choice key. An empty string represents
-no selection for a drop-down or list box.
+no selection for a drop-down or list box. Select a tab by key with
+`(select (tabs "File details") "fingerprint")`. A locator scoped to the tabs
+finds controls in the active page.
 
 For a report list, pass the locator and stable key to `select-row`,
 `activate-row`, `press-column` or `expect-row-selected`. Pass an empty

@@ -294,7 +294,28 @@ Ui := [].{
 				Engine.attr_s("selected", props.selected),
 				Engine.on("change", props.on_select),
 			],
-			props.choices.map(|choice| Engine.element("ui-choice", [Engine.attr("key", choice.key), Engine.attr("label", choice.label)], [])),
+			props.choices.map(static_choice),
+		)
+
+	## A native tab strip with an app-owned selection and active page.
+	TabsProps(ctx) := {
+		label : Str,
+		tabs : List(Choice),
+		selected : Signal(ctx, Str),
+		on_select : HandlerOf(ctx, Str),
+	}
+
+	## Use the selected key to mount the active page, for example with Engine.switch.
+	tabs : TabsProps(ctx), Elem(ctx) -> Elem(ctx)
+	tabs = |props, page|
+		Engine.element(
+			"ui-tabs",
+			[
+				Engine.attr("label", props.label),
+				Engine.attr_s("selected", props.selected),
+				Engine.on("change", props.on_select),
+			],
+			props.tabs.map(static_choice).append(Engine.element("ui-tab-panel", [], [page])),
 		)
 
 	## Receive handles for the files selected by the user.
@@ -475,6 +496,10 @@ selection_key = |selection| match selection {
 
 selection_from_key : Str -> Ui.Selection
 selection_from_key = |key| if (key.is_empty()) NoSelection else Selected(key)
+
+static_choice : Ui.Choice -> Elem(ctx)
+static_choice = |choice|
+	Engine.element("ui-choice", [Engine.attr("key", choice.key), Engine.attr("label", choice.label)], [])
 
 choice_control : Engine.Tag, Str, Signal(ctx, List(Ui.Choice)), Signal(ctx, Ui.Selection), HandlerOf(ctx, Ui.Selection), Signal(ctx, Bool), U32 -> Elem(ctx)
 choice_control = |tag, label, choices, selected, on_select, enabled, rows|

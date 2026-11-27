@@ -16,6 +16,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::UpdateWindow;
+use windows_sys::Win32::UI::Controls::TCN_SELCHANGE;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -523,7 +524,11 @@ impl App {
                     ("toggle", []) => (self.surface.spec_toggle(key)?, BN_CLICKED),
                     _ => return Err("invalid control arguments".into()),
                 };
-                self.command(handle, notification as u16)
+                if notification == TCN_SELCHANGE {
+                    self.notify(handle, notification)
+                } else {
+                    self.command(handle, notification as u16)
+                }
             }
             (
                 "select-row"

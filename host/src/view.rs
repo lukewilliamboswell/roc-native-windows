@@ -20,7 +20,7 @@ use windows_sys::Win32::System::SystemServices::{
 use windows_sys::Win32::UI::Controls::{
     BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, DTS_SHORTDATEFORMAT, DTS_SHOWNONE,
     DTS_TIMEFORMAT, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL, LVS_REPORT, LVS_SHOWSELALWAYS,
-    LVS_SINGLESEL, SetScrollInfo,
+    LVS_SINGLESEL, SetScrollInfo, TCM_ADJUSTRECT, WC_TABCONTROLW,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -48,12 +48,13 @@ pub(crate) enum Control {
     DatePicker,
     TimePicker,
     DataGrid,
+    Tabs,
 }
 
 impl Control {
     fn from_tag(tag: &str) -> Result<Option<Self>> {
         let control = match tag {
-            "" | "ui-vstack" | "ui-hstack" => return Ok(None),
+            "" | "ui-vstack" | "ui-hstack" | "ui-tab-panel" => return Ok(None),
             "ui-text" => Self::Text,
             "ui-button" => Self::Button,
             "ui-file-button" => Self::FileButton,
@@ -70,6 +71,7 @@ impl Control {
             "ui-date-picker" => Self::DatePicker,
             "ui-time-picker" => Self::TimePicker,
             "ui-data-grid" => Self::DataGrid,
+            "ui-tabs" => Self::Tabs,
             _ => return Err(format!("unsupported native control {tag}")),
         };
         Ok(Some(control))
@@ -80,7 +82,10 @@ impl Control {
     }
 
     pub(crate) fn is_choice(self) -> bool {
-        matches!(self, Self::ComboBox | Self::ListBox | Self::RadioGroup)
+        matches!(
+            self,
+            Self::ComboBox | Self::ListBox | Self::RadioGroup | Self::Tabs
+        )
     }
 
     fn is_edit(self) -> bool {
@@ -102,6 +107,7 @@ impl Control {
                 | Self::TextArea
                 | Self::ListView
                 | Self::DataGrid
+                | Self::Tabs
                 | Self::ListBox
                 | Self::ComboBox
                 | Self::DatePicker
@@ -156,6 +162,7 @@ impl Control {
                 w!("SysDateTimePick32"),
                 WS_TABSTOP | DTS_SHOWNONE | DTS_TIMEFORMAT,
             ),
+            Self::Tabs => (0, WC_TABCONTROLW, WS_TABSTOP | WS_CLIPSIBLINGS),
         }
     }
 }
@@ -169,6 +176,7 @@ struct View {
     image: HBITMAP,
     rendered_image: Option<(String, i32, i32)>,
     choices: Choices,
+    tab_owner: Option<Key>,
     combo_position: Option<(HWND, i32, i32, i32, i32)>,
     list_view: Option<ListView>,
     grid: Option<Grid>,
@@ -227,6 +235,7 @@ impl View {
             image: null_mut(),
             rendered_image: None,
             choices: Choices::default(),
+            tab_owner: None,
             combo_position: None,
             list_view,
             grid,
@@ -768,6 +777,7 @@ impl Surface {
     }
 
     pub(crate) fn sync(&mut self, tree: &Tree) -> Result<()> {
+        self.focus_surviving_tab(tree);
         self.views.retain(|key, view| {
             if tree.contains(*key) {
                 true
@@ -776,7 +786,7 @@ impl Surface {
                 false
             }
         });
-        self.sync_node(tree, ROOT)?;
+        self.sync_node(tree, ROOT, None)?;
         if self
             .views
             .values()
@@ -789,7 +799,24 @@ impl Surface {
         self.arrange(tree)
     }
 
-    fn sync_node(&mut self, tree: &Tree, key: Key) -> Result<()> {
+    fn focus_surviving_tab(&self, tree: &Tree) {
+        // SAFETY: The HWNDs come from our UI thread and surface.
+        let focus = unsafe { GetFocus() };
+        let Some(dead) = self.key(focus).filter(|&key| !tree.contains(key)) else {
+            return;
+        };
+        let mut owner = self.views[&dead].tab_owner;
+        while let Some(key) = owner {
+            let view = &self.views[&key];
+            if tree.contains(key) {
+                unsafe { SetFocus(view.handle) };
+                return;
+            }
+            owner = view.tab_owner;
+        }
+    }
+
+    fn sync_node(&mut self, tree: &Tree, key: Key, tab_owner: Option<Key>) -> Result<()> {
         let node = tree.node(key);
         if let Kind::Element(tag) = &node.kind {
             if let Some(kind) = Control::from_tag(tag)? {
@@ -803,12 +830,13 @@ impl Surface {
                         node.attr("title").unwrap_or("").into()
                     }
                     Control::Edit => node.attr("value").unwrap_or("").into(),
-                    Control::RadioGroup => node.attr("label").unwrap_or("").into(),
+                    Control::RadioGroup | Control::Tabs => node.attr("label").unwrap_or("").into(),
                     Control::TextArea => canonical_lines(node.attr("value").unwrap_or("")),
                     Control::Image => node.attr("label").unwrap_or("").into(),
                     _ => tree.caption(key),
                 };
                 let view = self.views.get_mut(&key).unwrap();
+                view.tab_owner = tab_owner;
                 view.update(
                     self.window,
                     self.font,
@@ -837,6 +865,10 @@ impl Surface {
                 )?;
                 if kind.is_choice() {
                     view.choices.sync(view.handle, self.font, kind, tree, key)?;
+                    if kind == Control::Tabs {
+                        let panel = tab_panel(tree, node).ok_or("tab strip is missing its page")?;
+                        self.sync_node(tree, panel, Some(key))?;
+                    }
                     return Ok(());
                 }
                 if let Some(grid) = &mut view.grid {
@@ -860,7 +892,7 @@ impl Surface {
                 }
             }
             for &child in &node.children {
-                self.sync_node(tree, child)?;
+                self.sync_node(tree, child, tab_owner)?;
             }
         }
         Ok(())
@@ -1019,6 +1051,51 @@ impl Surface {
             return (0, 0);
         };
         if let Some(view) = self.views.get(&key) {
+            if view.kind == Control::Tabs
+                && let Some(panel) = tab_panel(tree, node)
+            {
+                // The tab strip and page remain siblings, in keyboard order.
+                // Size the strip to the header so it never covers the page.
+                let mut page = RECT {
+                    right: max_width,
+                    bottom: scale(self.dpi, 256),
+                    ..RECT::default()
+                };
+                // SAFETY: The tab is live and the native message fills this rectangle.
+                unsafe {
+                    SendMessageW(
+                        view.handle,
+                        TCM_ADJUSTRECT,
+                        0,
+                        &mut page as *mut _ as LPARAM,
+                    );
+                }
+                let label_height = if view.props.label.is_empty() {
+                    0
+                } else {
+                    scale(self.dpi, 21)
+                };
+                let header = page.top.max(scale(self.dpi, 20));
+                let inset = scale(self.dpi, 8);
+                placements.push(Placement {
+                    key,
+                    x,
+                    y,
+                    width: max_width,
+                    height: label_height + header,
+                });
+                let page_width = (page.right - page.left - inset * 2).max(1);
+                let (_, page_height) = self.layout(
+                    tree,
+                    panel,
+                    dc,
+                    page_width,
+                    x + page.left + inset,
+                    y + label_height + header + inset,
+                    placements,
+                );
+                return (max_width, label_height + header + page_height + inset * 2);
+            }
             let (width, height) = natural(view, node, dc, self.dpi, max_width);
             placements.push(Placement {
                 key,
@@ -1031,7 +1108,8 @@ impl Surface {
         }
 
         let padding = scale(self.dpi, number(node, "padding", 0));
-        let spacing = scale(self.dpi, number(node, "spacing", 8));
+        let default_spacing = if tag == "ui-tab-panel" { 0 } else { 8 };
+        let spacing = scale(self.dpi, number(node, "spacing", default_spacing));
         let inner = (max_width - padding * 2).max(1);
         let children: Vec<Key> = node
             .children
@@ -1128,6 +1206,12 @@ struct Placement {
     height: i32,
 }
 
+fn tab_panel(tree: &Tree, node: &Node) -> Option<Key> {
+    node.children.iter().copied().find(
+        |&child| matches!(&tree.node(child).kind, Kind::Element(tag) if tag == "ui-tab-panel"),
+    )
+}
+
 pub(crate) fn scale(dpi: u32, value: i32) -> i32 {
     ((i64::from(value) * i64::from(dpi) + 48) / 96) as i32
 }
@@ -1197,6 +1281,7 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
                 }
                 + if view.grid.is_some() { dip(22) } else { 0 },
         ),
+        Control::Tabs => unreachable!("tab containers lay out their panels separately"),
         Control::Image => (
             dip(number(node, "width", 128)).max(1),
             dip(number(node, "height", 96)).max(1),
