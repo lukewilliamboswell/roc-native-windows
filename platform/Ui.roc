@@ -15,9 +15,13 @@ Ui := [].{
 	WindowProps(ctx) := {
 		status_bar : [NoStatusBar, StatusBar(StatusBarProps(ctx))] ?? NoStatusBar,
 		taskbar_progress : Signal(ctx, Progress) ?? Engine.const(Idle),
+		title : Signal(ctx, WindowTitle) ?? Engine.const(AppTitle),
+		close : [UseDefaultClose, Handle(HandlerOf(ctx, {}))] ?? UseDefaultClose,
 	}
 
-	## Configure the app's one outermost native window.
+	WindowTitle := [AppTitle, Title(Str)]
+
+	## Configure the app's outermost window or declare a member of `Ui.windows`.
 	window : WindowProps(ctx), Elem(ctx) -> Elem(ctx)
 	window = |props, content| {
 		body = Engine.element("ui-window-content", [], [content])
@@ -37,8 +41,38 @@ Ui := [].{
 				),
 			]
 		}
-		Engine.element("ui-window", [Engine.attr_s("taskbar-progress", props.taskbar_progress.map(progress_word))], [body].concat(chrome))
+		attrs = [
+			Engine.attr_s("taskbar-progress", props.taskbar_progress.map(progress_word)),
+			Engine.attr_s("window-title", props.title.map(window_title)),
+		]
+		listeners = match props.close {
+			UseDefaultClose => attrs
+			Handle(handler) => attrs.append(close_listener(handler))
+		}
+		Engine.element("ui-window", listeners, [body].concat(chrome))
 	}
+
+	## Mount a keyed collection of independent Windows windows.
+	windows : Elem(ctx) -> Elem(ctx)
+	windows = |declarations| Engine.element("ui-windows", [], [declarations])
+
+	DialogProps(ctx) := {
+		title : Signal(ctx, Str),
+		open : Signal(ctx, Bool),
+		on_close_request : HandlerOf(ctx, {}),
+	}
+
+	## Present an owned modal dialog while `open` is true.
+	dialog : DialogProps(ctx), Elem(ctx) -> Elem(ctx)
+	dialog = |props, content| Engine.when(
+		props.open,
+		|| Engine.element(
+			"ui-dialog",
+			[Engine.attr_s("dialog-title", props.title), close_listener(props.on_close_request)],
+			[Engine.element("ui-dialog-content", [], [content])],
+		),
+		|| Engine.text_s(Engine.const("")),
+	)
 
 	## Stack spacing and padding in device-independent pixels.
 	StackProps := { spacing : U32 ?? 8, padding : U32 ?? 0 }
@@ -839,3 +873,12 @@ command_icon_path = |icon| match icon {
 	NoIcon => ""
 	IconAsset(path) => path
 }
+
+window_title : Ui.WindowTitle -> Str
+window_title = |title| match title {
+	AppTitle => "app"
+	Title(text) => "text:${text}"
+}
+
+close_listener : HandlerOf(ctx, {}) -> Engine.Attr(ctx)
+close_listener = |handler| Engine.on("close-request", handler.from_payload_by(Engine.const({}), |_, _| {}))

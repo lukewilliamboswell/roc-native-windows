@@ -1,19 +1,37 @@
 = Win32 controls
 
 [#window]
-== Window chrome
+== Windows and dialogs
 
-Use one `Ui.window(props, content)` as the outermost element when the app
-needs native window chrome. The status bar stays at the bottom of the
-window while the content scrolls. Apps that omit the wrapper use the
-ordinary window.
+An ordinary app gets one main window. Use `Ui.window(props, content)` as
+the outermost element to set its title, close behaviour, or chrome.
+`title` defaults to `AppTitle`, which uses the application's configured
+display name. Use `Title(text)` to supply a title from an app signal.
+
+Use `Ui.windows(declarations)` at the root for independent windows sharing
+one app store. For example, use `Engine.each` with a stable key per window
+and return a `Ui.window` from each row. A managed window requires
+`close: Handle(handler)`. The handler runs when the user requests a
+close. Remove the declaration to accept the request. Closing the last
+independent window ends the app once the turn settles.
+
+`Ui.dialog({ title, open, on_close_request }, content)` mounts an owned
+modal dialog while its open signal is true. Its owner is the enclosing
+window. Close and Escape request dismissal, and the app accepts by
+clearing the open signal. Save and Cancel can update state and dismiss
+in one turn. The dialog's controls can set their own default Enter action.
+Opening or closing the dialog leaves the owner's layout in place.
+
+[#window-chrome]
+== Window chrome
 
 The `status_bar` prop defaults to `NoStatusBar`. Set
 `StatusBar({ text, trailing })` to show a primary status signal and
 optional trailing panes. A trailing pane takes a text signal and an
 optional `width` in device-independent pixels, with a default of 128.
 The primary pane fills the remaining width. At narrow widths, trailing
-panes drop from the right so the primary status stays available.
+panes drop from the right so the primary status stays available. The bar
+stays at the bottom while the window content scrolls.
 
 Set `taskbar_progress` to a `Ui.Progress` signal to reflect work in
 the app's Windows taskbar button. It defaults to `Idle` and shares
