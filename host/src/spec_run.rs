@@ -351,6 +351,17 @@ impl App {
                 )
             }
             ("expect-cancelled", [count]) => expect(self.effects.cancelled(number(count)?)?, true),
+            ("expect-status", panes) => {
+                let texts = self.surface.status_texts();
+                expect(
+                    texts
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    panes,
+                )
+            }
             ("expect-pending-effects", [count]) => expect(self.effects.pending(), number(count)?),
             ("expect-interval", [ms, count]) => {
                 expect(self.effects.interval_count(number(ms)?), number(count)?)

@@ -1,5 +1,20 @@
 = Win32 controls
 
+[#window]
+== Window chrome
+
+Use one `Ui.window(props, content)` as the outermost element when the app
+needs native window chrome. The status bar stays at the bottom of the
+window while the content scrolls. Apps that omit the wrapper use the
+ordinary window.
+
+The `status_bar` prop defaults to `NoStatusBar`. Set
+`StatusBar({ text, trailing })` to show a primary status signal and
+optional trailing panes. A trailing pane takes a text signal and an
+optional `width` in device-independent pixels, with a default of 128.
+The primary pane fills the remaining width. At narrow widths, trailing
+panes drop from the right so the primary status stays available.
+
 [#controls]
 == Control reference
 

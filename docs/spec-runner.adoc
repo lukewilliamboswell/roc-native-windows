@@ -81,6 +81,10 @@ while a request is held. An assertion can also check `idle` or
 `(determinate COMPLETED TOTAL)`. It reads the native bar's visibility,
 mode and determinate position.
 
+Use `(expect-status "2 visible" "1 unread")` to check the native
+status panes in order. Narrow windows may have fewer trailing panes.
+An empty `(expect-status)` asserts that the app has no status bar.
+
 == Simulate and run effects
 
 Tests start with isolated storage and hold HTTP requests, timers and

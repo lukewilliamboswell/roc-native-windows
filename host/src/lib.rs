@@ -35,6 +35,8 @@ mod window;
 #[cfg(windows)]
 mod window_icons;
 #[cfg(any(test, windows))]
+mod window_chrome;
+#[cfg(any(test, windows))]
 pub(crate) mod wire;
 
 #[cfg(any(test, windows))]

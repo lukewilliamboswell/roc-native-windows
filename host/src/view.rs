@@ -5,6 +5,7 @@ use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
 use crate::progress::{Progress, native::ProgressBar};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
+use crate::window_chrome::{WindowDeclaration, native::StatusBar};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,7 +57,10 @@ pub(crate) enum Control {
 impl Control {
     fn from_tag(tag: &str) -> Result<Option<Self>> {
         let control = match tag {
-            "" | "ui-vstack" | "ui-hstack" | "ui-tab-panel" => return Ok(None),
+            "" | "ui-vstack" | "ui-hstack" | "ui-window-content" | "ui-tab-panel" => {
+                return Ok(None);
+            }
+            "ui-window" => return Err("Ui.window must be the single outermost element".into()),
             "ui-text" => Self::Text,
             "ui-button" => Self::Button,
             "ui-file-button" => Self::FileButton,
@@ -446,6 +450,8 @@ impl Drop for View {
 
 pub(crate) struct Surface {
     window: HWND,
+    content: Key,
+    status: Option<StatusBar>,
     font: HFONT,
     dpi: u32,
     assets: PathBuf,
@@ -464,6 +470,8 @@ impl Surface {
             .with_file_name("assets");
         Ok(Self {
             window,
+            content: ROOT,
+            status: None,
             font: make_font(dpi)?,
             dpi,
             assets,
@@ -589,6 +597,10 @@ impl Surface {
             return Some(view.props.label.clone());
         }
         Some(window_text(view.handle))
+    }
+
+    pub(crate) fn status_texts(&self) -> Vec<String> {
+        self.status.as_ref().map_or_else(Vec::new, StatusBar::texts)
     }
 
     pub(crate) fn spec_progress(&self, key: Key, wire: &str) -> Result<()> {
@@ -786,6 +798,9 @@ impl Surface {
                 grid.report.measure(view.handle, font, dpi)?;
             }
         }
+        if let Some(status) = &self.status {
+            status.font(font);
+        }
         // SAFETY: All windows have selected the new font.
         unsafe { DeleteObject(self.font) };
         self.font = font;
@@ -797,6 +812,16 @@ impl Surface {
 
     pub(crate) fn sync(&mut self, tree: &Tree) -> Result<()> {
         self.focus_surviving_tab(tree);
+        let wrapper = WindowDeclaration::read(tree)?;
+        self.content = wrapper.content;
+        if let Some(declaration) = wrapper.status {
+            if self.status.is_none() {
+                self.status = Some(StatusBar::new(self.window, self.font)?);
+            }
+            self.status.as_mut().unwrap().update(declaration);
+        } else {
+            self.status = None;
+        }
         self.views.retain(|key, view| {
             if tree.contains(*key) {
                 true
@@ -805,7 +830,7 @@ impl Surface {
                 false
             }
         });
-        self.sync_node(tree, ROOT, None)?;
+        self.sync_node(tree, self.content, None)?;
         if self
             .views
             .values()
@@ -959,18 +984,30 @@ impl Surface {
     pub(crate) fn arrange(&mut self, tree: &Tree) -> Result<()> {
         let mut placement = Vec::new();
         let mut client = RECT::default();
-        // SAFETY: These calls use the live app HWND and its selected font.
-        let dc = unsafe {
-            GetClientRect(self.window, &mut client);
-            GetDC(self.window)
+        // SAFETY: The client rectangle and app HWND are live.
+        unsafe { GetClientRect(self.window, &mut client) };
+        let reserved = match &mut self.status {
+            Some(status) => status.arrange(client.right, client.bottom, self.dpi)?,
+            None => 0,
         };
+        let content_height = client.bottom - reserved;
+        // SAFETY: The window owns the device context until ReleaseDC below.
+        let dc = unsafe { GetDC(self.window) };
         if dc.is_null() {
             return Ok(());
         }
         // SAFETY: Re-select the original font before returning the DC.
         let previous = unsafe { SelectObject(dc, self.font) };
         let height = self
-            .layout(tree, ROOT, dc, client.right.max(1), 0, 0, &mut placement)
+            .layout(
+                tree,
+                self.content,
+                dc,
+                client.right.max(1),
+                0,
+                0,
+                &mut placement,
+            )
             .1;
         unsafe {
             SelectObject(dc, previous);
@@ -980,19 +1017,22 @@ impl Surface {
         let height = height.max(1);
         self.scroll_position = self
             .scroll_position
-            .clamp(0, (height - client.bottom).max(0));
+            .clamp(0, (height - content_height).max(0));
         let scroll = SCROLLINFO {
             cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
             fMask: SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
             nMin: 0,
             nMax: height - 1,
-            nPage: client.bottom.max(0) as u32,
+            nPage: content_height.max(0) as u32,
             nPos: self.scroll_position,
             ..SCROLLINFO::default()
         };
         // SAFETY: The window owns its standard scrollbar.
         unsafe { SetScrollInfo(self.window, SB_VERT, &scroll, 1) };
-        let mut after = HWND_TOP;
+        let mut after = self
+            .status
+            .as_ref()
+            .map_or(HWND_TOP, |status| status.handle);
         for item in placement {
             let view = self.views.get_mut(&item.key).unwrap();
             let y = item.y - self.scroll_position;
@@ -1226,6 +1266,7 @@ impl Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         self.views.clear();
+        self.status = None;
         // SAFETY: All children using the font have been destroyed.
         unsafe { DeleteObject(self.font) };
     }
@@ -1387,7 +1428,7 @@ pub(crate) fn child(parent: HWND, font: HFONT, ex: u32, class: PCWSTR, style: u3
             ex,
             class,
             w!(""),
-            WS_CHILD | style,
+            WS_CHILD | WS_CLIPSIBLINGS | style,
             0,
             0,
             0,

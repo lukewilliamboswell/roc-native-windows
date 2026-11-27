@@ -673,6 +673,18 @@ spec_step = |expr| {
 			encoded = spec_civil_value(op.ends_with("date"), value)?
 			Ok(parts.append(encoded))
 		}
+		("expect-status", panes) => {
+			var $texts = []
+			for pane in panes {
+				match pane {
+					Quoted(value, _) => {
+						$texts = $texts.append(value)
+					}
+					_ => return Err(spec_error(spec_position(pane), "Expected a status pane's text in quotes"))
+				}
+			}
+			Ok($texts)
+		}
 		("expect-progress", [locator, value]) => {
 			parts = spec_locator(locator)?
 			encoded = spec_progress(value)?

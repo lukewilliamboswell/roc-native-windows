@@ -4,6 +4,41 @@ import Files
 ## Native Windows controls backed by the roc-signals engine.
 Ui := [].{
 
+	## A trailing native status pane with a width in device-independent pixels.
+	StatusPart(ctx) := { text : Signal(ctx, Str), width : U32 ?? 128 }
+
+	StatusBarProps(ctx) := {
+		text : Signal(ctx, Str),
+		trailing : List(StatusPart(ctx)) ?? [],
+	}
+
+	WindowProps(ctx) := {
+		status_bar : [NoStatusBar, StatusBar(StatusBarProps(ctx))] ?? NoStatusBar,
+	}
+
+	## Configure the app's one outermost native window.
+	window : WindowProps(ctx), Elem(ctx) -> Elem(ctx)
+	window = |props, content| {
+		body = Engine.element("ui-window-content", [], [content])
+		chrome = match props.status_bar {
+			NoStatusBar => []
+			StatusBar(bar) => [
+				Engine.element(
+					"ui-status-bar",
+					[Engine.attr_s("text", bar.text)],
+					bar.trailing.map(
+						|item| Engine.element(
+							"ui-status-part",
+							[Engine.attr_s("text", item.text), Engine.attr("width", item.width.to_str())],
+							[],
+						),
+					),
+				),
+			]
+		}
+		Engine.element("ui-window", [], [body].concat(chrome))
+	}
+
 	## Stack spacing and padding in device-independent pixels.
 	StackProps := { spacing : U32 ?? 8, padding : U32 ?? 0 }
 
