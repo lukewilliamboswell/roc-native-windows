@@ -2232,6 +2232,23 @@ impl Surface {
             let preferred = children
                 .iter()
                 .map(|&child| {
+                    if let Some(view) = self.views.get(&child)
+                        && view.kind == Control::Text
+                    {
+                        // SAFETY: This DC and the resolved label font belong to the current layout.
+                        let previous = unsafe { SelectObject(dc, view.label_font) };
+                        let width = view
+                            .props
+                            .caption
+                            .lines()
+                            .map(|line| text_width(dc, line))
+                            .max()
+                            .unwrap_or(1);
+                        if !previous.is_null() {
+                            unsafe { SelectObject(dc, previous) };
+                        }
+                        return width.clamp(1, inner);
+                    }
                     let mut measured = Vec::new();
                     self.layout(tree, child, dc, inner, 0, 0, &mut measured).0
                 })

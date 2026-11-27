@@ -1,5 +1,5 @@
 (demo "Add and complete to-dos"
-  (setup (window-size 480 480))
+  (setup (window-size 520 620))
   (steps
     (wait 500)
     (fill (text-field "New to-do") "Review the proposal")
