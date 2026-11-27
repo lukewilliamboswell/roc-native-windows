@@ -133,8 +133,8 @@ them. Clipboard export is a separate user action.
 
 Set app and MSI metadata in `windows.json` at the app root, beside `windows.roc`.
 The optional `display_name` supplies the initial window title, the MSI
-product name and the Start shortcut label. It also names the MSI's default
-installation folder. Use a Windows-safe ASCII name of up to 64 bytes.
+product name and the Start shortcut label.
+Use a Windows-safe ASCII name of up to 64 bytes.
 The name defaults to the executable's basename. The ZIP retains the
 title through the executable resource.
 Set `icon` to an `.ico` path relative to `assets/` to brand the executable
@@ -168,7 +168,8 @@ build. Projects can omit `windows.json` for local development defaults.
 See xref:architecture.adoc#redistributable-inputs[the embedded Win32 manifest]
 for process settings such as DPI awareness.
 
-The MSI installs under Program Files and adds a Start menu shortcut.
+The MSI uses `roc-<id>` for its folder under Program Files and its Start
+menu group. It adds the app's named shortcut inside that group.
 The ZIP contains an executable that can run after extraction. Both carry
 the executable, `assets/`, and any top-level `LICENSE` or
 `THIRD_PARTY_LICENSES.md` supplied by the app author.

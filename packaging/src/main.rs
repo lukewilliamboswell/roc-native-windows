@@ -1,6 +1,7 @@
 //! Build an MSI from a staged app. This tool runs on the packaging machine.
 
 use embala_msi::{FileSpec, MsiArch, MsiSpec};
+use msi::{Column, Delete, Expr, Insert, Select, Update, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -8,6 +9,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
+use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -72,13 +74,86 @@ fn run() -> Result<()> {
 
 fn build(spec: &MsiSpec, output: &Path) -> Result<()> {
     embala_msi::build(spec, output)?;
-    // ARM64 packages require Windows Installer schema 500. Embala 0.15
-    // writes 200 for both architectures. Edit only the summary stream so
-    // Embala's ordering of the installer tables is preserved.
     let file = fs::OpenOptions::new().read(true).write(true).open(output)?;
     let mut package = msi::Package::open(file)?;
+    // ARM64 requires Windows Installer schema 500. Embala 0.15 writes 200.
     package.summary_info_mut().set_page_count(500);
+    configure_install(&mut package, &spec.identifier)?;
     package.flush()?;
+    Ok(())
+}
+
+fn configure_install(package: &mut msi::Package<File>, identifier: &str) -> Result<()> {
+    // Keep both filesystem locations stable when the app's display name changes.
+    // Supply a short alias for Windows Installer's Directory table.
+    let digest = format!("{:x}", Sha256::digest(identifier));
+    let directory_name = format!("{}|roc-{identifier}", &digest[..8]);
+    package.update_rows(
+        Update::table("Directory")
+            .set("DefaultDir", Value::Str(directory_name.clone()))
+            .with(Expr::col("Directory").eq(Expr::string("INSTALLDIR"))),
+    )?;
+    package.insert_rows(Insert::into("Directory").row(vec![
+        Value::Str("AppProgramMenuFolder".into()),
+        Value::Str("ProgramMenuFolder".into()),
+        Value::Str(directory_name),
+    ]))?;
+    package.update_rows(
+        Update::table("Shortcut")
+            .set("Directory_", Value::Str("AppProgramMenuFolder".into()))
+            .with(Expr::col("Shortcut").eq(Expr::string("AppShortcut"))),
+    )?;
+    package.update_rows(
+        Update::table("Registry")
+            .set(
+                "Key",
+                Value::Str(format!(r"Software\roc-native-windows\{identifier}")),
+            )
+            .with(Expr::col("Registry").eq(Expr::string("ShortcutRegistry"))),
+    )?;
+    // RemoveFolders removes this group if it is empty after RemoveShortcuts.
+    package.create_table(
+        "CreateFolder",
+        vec![
+            Column::build("Directory_").primary_key().id_string(72),
+            Column::build("Component_").primary_key().id_string(72),
+        ],
+    )?;
+    package.insert_rows(Insert::into("CreateFolder").row(vec![
+        Value::Str("AppProgramMenuFolder".into()),
+        Value::Str("ShortcutComponent".into()),
+    ]))?;
+
+    // The moved resources need new component codes. Retain the UpgradeCode
+    // so Windows Installer can replace packages built with the old layout.
+    const COMPONENT_NAMESPACE: Uuid = Uuid::from_u128(0x9f10b529_c5d0_4e52_817f_fdc06bdc6f2c);
+    let mut components = Vec::new();
+    for row in package.select_rows(Select::table("Component"))? {
+        let previous = row["ComponentId"]
+            .as_str()
+            .ok_or("invalid component code")?;
+        let code = Uuid::new_v5(&COMPONENT_NAMESPACE, previous.as_bytes());
+        let shortcut = row["Component"].as_str() == Some("ShortcutComponent");
+        let component = row
+            .columns()
+            .iter()
+            .map(|column| match column.name() {
+                "ComponentId" => Value::Str(format!("{:X}", code.braced())),
+                "Directory_" if shortcut => Value::Str("AppProgramMenuFolder".into()),
+                name => row[name].clone(),
+            })
+            .collect();
+        components.push(component);
+    }
+    package.delete_rows(Delete::from("Component"))?;
+    package.insert_rows(Insert::into("Component").rows(components))?;
+    // Start the transaction before removing the old product so a failed
+    // installation can roll back to it. ProcessComponents follows at 1600.
+    package.update_rows(
+        Update::table("InstallExecuteSequence")
+            .set("Sequence", Value::Int(1501))
+            .with(Expr::col("Action").eq(Expr::string("RemoveExistingProducts"))),
+    )?;
     Ok(())
 }
 
@@ -109,6 +184,7 @@ fn spec(
     }
     files.sort_by(|left, right| left.dest.cmp(&right.dest));
     let mut hash = Sha256::new();
+    hash.update(b"install-layout-v2\0");
     for text in [
         env!("CARGO_PKG_VERSION"),
         arch.template(),
@@ -357,8 +433,18 @@ mod tests {
             let [shortcut] = shortcuts.as_slice() else {
                 panic!("expected one Start menu shortcut")
             };
-            assert_eq!(shortcut[1].as_str(), Some("ProgramMenuFolder"));
+            assert_eq!(shortcut[1].as_str(), Some("AppProgramMenuFolder"));
             assert!(shortcut[2].as_str().unwrap().ends_with("|Reading List"));
+            let (install_dir, start_menu_group) = directory_names(&mut package);
+            assert!(install_dir.ends_with("|roc-org.example.demo"));
+            assert_eq!(install_dir, start_menu_group);
+            let create_folders = package
+                .select_rows(Select::table("CreateFolder"))
+                .unwrap()
+                .collect::<Vec<_>>();
+            assert_eq!(create_folders.len(), 1);
+            assert_eq!(create_folders[0][0].as_str(), Some("AppProgramMenuFolder"));
+            assert_eq!(create_folders[0][1].as_str(), Some("ShortcutComponent"));
             assert_eq!(shortcut[8], msi::Value::Null); // Default icon comes from the target.
             assert_eq!(shortcut[11].as_str(), Some("INSTALLDIR"));
             let target = shortcut[4].as_str().unwrap().to_owned();
@@ -387,7 +473,8 @@ mod tests {
                     )
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
-            assert!(actions["RemoveExistingProducts"] < actions["CreateShortcuts"]);
+            assert!(actions["InstallInitialize"] < actions["RemoveExistingProducts"]);
+            assert!(actions["RemoveExistingProducts"] < actions["ProcessComponents"]);
             assert!(actions["RemoveShortcuts"] < actions["RemoveFiles"]);
             let msi_file = files
                 .iter()
@@ -426,6 +513,47 @@ mod tests {
         assert_ne!(identities[0].0, identities[1].0);
         assert_ne!(identities[0].1, identities[1].1);
         assert_eq!(identities[0].2, identities[1].2);
+
+        let other_app = spec(
+            MsiArch::X86_64,
+            "demo",
+            Some("Reading List"),
+            "con.example.other",
+            "1.2.3",
+            "Example",
+            dir,
+        )
+        .unwrap();
+        let output = dir.join("other.msi");
+        build(&other_app, &output).unwrap();
+        let mut other = Package::open(File::open(output).unwrap()).unwrap();
+        let (install_dir, start_menu_group) = directory_names(&mut other);
+        assert!(install_dir.ends_with("|roc-con.example.other"));
+        assert_eq!(install_dir, start_menu_group);
+    }
+
+    fn directory_names<R: Read + std::io::Seek>(package: &mut Package<R>) -> (String, String) {
+        let directories = package
+            .select_rows(Select::table("Directory"))
+            .unwrap()
+            .collect::<Vec<_>>();
+        let select = |id| {
+            directories
+                .iter()
+                .find(|row| row["Directory"].as_str() == Some(id))
+                .unwrap()
+        };
+        let install = select("INSTALLDIR");
+        let menu = select("AppProgramMenuFolder");
+        assert_eq!(
+            install["Directory_Parent"].as_str(),
+            Some("ProgramFiles64Folder")
+        );
+        assert_eq!(menu["Directory_Parent"].as_str(), Some("ProgramMenuFolder"));
+        (
+            install["DefaultDir"].as_str().unwrap().to_owned(),
+            menu["DefaultDir"].as_str().unwrap().to_owned(),
+        )
     }
 
     #[test]
