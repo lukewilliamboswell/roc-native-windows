@@ -10,12 +10,16 @@ on:
         description: Run the external Windows UI Automation probe
         type: boolean
         default: false
+      windows_arm:
+        description: Run native scenarios on Windows on Arm
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -55,16 +59,66 @@ jobs:
       - name: Install the repository Rust toolchain
         run: rustup show
       - name: Run the Blueprint source or build checks
+        id: build
         run: blueprint run ${{ matrix.task }}
       - name: Run Windows host unit tests
         if: runner.os == 'Windows'
         run: cargo test --locked --manifest-path host/Cargo.toml
       - name: Run native Windows scenarios
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.build.conclusion == 'success' }}
         run: blueprint run test-native -- --target x64mingw
       - name: Probe Windows UI Automation
-        if: runner.os == 'Windows' && inputs.accessibility
+        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.accessibility && steps.build.conclusion == 'success' }}
         run: blueprint run test-accessibility
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: runner.os == 'macOS' && inputs.windows_arm
+        with:
+          name: windows-link-inputs
+          path: platform/targets/
+          if-no-files-found: error
       - name: Build the documentation
         if: runner.os == 'macOS'
         run: blueprint run docs
+
+  windows-arm:
+    name: Windows ARM64 behavior
+    needs: check
+    if: ${{ !cancelled() && inputs.windows_arm }}
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: windows-link-inputs
+          path: platform/targets/
+      - name: Install the pinned Windows x64 tools for emulation
+        shell: pwsh
+        run: |
+          function Get-VerifiedFile($Url, $Path, $Sha256) {
+            Invoke-WebRequest -Uri $Url -OutFile $Path
+            if ((Get-FileHash -Algorithm SHA256 $Path).Hash -ne $Sha256) {
+              throw "Download digest mismatch for $Url"
+            }
+          }
+          $tools = Join-Path $env:RUNNER_TEMP "roc-windows-tools"
+          New-Item -ItemType Directory -Path $tools | Out-Null
+          Get-VerifiedFile `
+            "https://github.com/lukewilliamboswell/roc-blueprint/releases/download/0.13.0/blueprint-x86_64-windows.exe" `
+            (Join-Path $tools "blueprint.exe") `
+            "2fd36dc148fec0e21962e9508ca6f6f41f901e2a7f8d2e441bfb54d0ce599653"
+          $archive = Join-Path $tools "roc.zip"
+          Get-VerifiedFile `
+            "https://github.com/roc-lang/nightlies/releases/download/nightly-2026-11-26-890d6c8/roc_nightly-windows_x86_64-2026-11-26-890d6c8.zip" `
+            $archive "7d2d3a1b48acb2f889f5c3eb1b0ec6a6e5c075cff25ea9c89bcf8b2820105648"
+          Expand-Archive -LiteralPath $archive -DestinationPath $tools
+          $roc = Get-ChildItem $tools -Recurse -File -Filter roc.exe | Select-Object -First 1
+          if (!$roc) { throw "The pinned compiler archive did not contain roc.exe" }
+          $tools, $roc.DirectoryName | Add-Content -Path $env:GITHUB_PATH
+      - name: Run native Windows scenarios
+        run: blueprint run test-native -- --target arm64mingw
+      - name: Probe Windows UI Automation
+        if: inputs.accessibility
+        run: blueprint run test-accessibility -- -Target arm64mingw

@@ -49,6 +49,8 @@ provide separate evidence from native Windows runs. Hosted CI runs the
 source checks and docs build on macOS, cross-builds on Linux, and checks
 the Win32 behavior scenarios on Windows x64. Run the interactive desktop
 checks below for Narrator, input focus, and display settings.
+The workflow's manual options run the external UI Automation probe and
+native ARM64 scenarios when those runners are available.
 
 Run xref:accessibility.adoc#verify-uia[the accessibility probe and desktop
 walkthroughs] before recording accessibility verification for a release.
@@ -132,9 +134,9 @@ randomness with deterministic spec fixtures.
 Windows architectures.
 
 |36
-|Retained file handles at Open and Save As confirmation, exclusive Save
-As creation, rooted assets and settings, native Copy, dedicated scenario
-executables, and an exact HTTP origin allowlist.
+|Retained file and directory handles at picker confirmation, exclusive
+Save As creation, rooted assets and settings, native Copy, dedicated
+scenario executables, and an exact HTTP origin allowlist.
 |Verify picker behavior, replacement, cancellation, and installed
 capabilities on both Windows architectures. HTTP uses a generic network
 failure for denial pending a dedicated result in Signals.
