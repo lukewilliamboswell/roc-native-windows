@@ -61,7 +61,7 @@ separate terminal while recording that example.
 
 [source,powershell]
 ----
-python -m http.server 48393 --bind 127.0.0.1 --directory tests/fixtures
+roc ../../scripts/serve.roc -- tests/fixtures --port 48393
 ----
 
 [#build-the-platform]
