@@ -400,6 +400,13 @@ pub(crate) mod native {
                 WM_NCDESTROY => {
                     RemoveWindowSubclass(hwnd, Some(styled_proc), id);
                 }
+                WM_NCCALCSIZE if wparam != 0 => {
+                    // Text and panel borders depend on the whole client rectangle.
+                    // Keep the native frame calculation, then repaint instead of
+                    // preserving pixels drawn for the previous size.
+                    DefSubclassProc(hwnd, message, wparam, lparam);
+                    return WVR_REDRAW as LRESULT;
+                }
                 WM_ERASEBKGND => return 1,
                 WM_NCHITTEST if (*(data as *const Paint)).panel => return HTTRANSPARENT as LRESULT,
                 WM_PAINT => {
@@ -460,6 +467,53 @@ pub(crate) mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn resizing_a_styled_child_invalidates_its_entire_client_area() {
+            use crate::windows::OwnedWindow;
+            use windows_sys::core::w;
+
+            // SAFETY: Both HWNDs belong to this thread and the test owns them.
+            unsafe {
+                let parent = OwnedWindow(CreateWindowExW(
+                    WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    w!("STATIC"),
+                    w!(""),
+                    WS_POPUP | WS_CLIPCHILDREN,
+                    0,
+                    0,
+                    160,
+                    120,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    null(),
+                ));
+                assert!(!parent.0.is_null());
+                let child = OwnedWindow(
+                    crate::view::child(parent.0, std::ptr::null_mut(), 0, w!("STATIC"), WS_VISIBLE)
+                        .unwrap(),
+                );
+                let _style = StyledWindow::new(child.0, Paint::default()).unwrap();
+                crate::view::position(child.0, HWND_TOP, 0, 0, 100, 80);
+                ShowWindow(parent.0, SW_SHOWNOACTIVATE);
+                for (width, height) in [(120, 90), (80, 60)] {
+                    ValidateRect(child.0, null());
+                    crate::view::position(child.0, HWND_TOP, 0, 0, width, height);
+                    let region = CreateRectRgn(0, 0, 0, 0);
+                    assert!(!region.is_null());
+                    let update = GetUpdateRgn(child.0, region, 0);
+                    let mut bounds = RECT::default();
+                    GetRgnBox(region, &mut bounds);
+                    DeleteObject(region);
+                    assert_eq!(update, SIMPLEREGION);
+                    assert_eq!(
+                        (bounds.left, bounds.top, bounds.right, bounds.bottom),
+                        (0, 0, width, height)
+                    );
+                }
+            }
+        }
 
         #[test]
         fn accent_and_secondary_text_remain_readable_on_tinted_panels() {

@@ -315,6 +315,10 @@ roc ../../cli/windows.roc -- package --target x64mingw
 [#stage-a-release]
 == Stage a release
 
+Record user-visible changes in `docs/releases/unreleased.adoc` as they land
+on the integration branch. Fold those entries into the versioned notes
+when preparing the next release.
+
 Copy the https://github.com/lukewilliamboswell/roc-native-windows/blob/main/docs/releases/template.adoc[release notes template]
 to `docs/releases/<version>.adoc`. Replace the title's version, write a
 short summary for app authors, and remove the template comments. Keep
