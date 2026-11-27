@@ -61,8 +61,8 @@ for state, stores, and worker tasks.
 | `Ui.checkbox` | Check box | Title, `checked`, `on_change`, optional `enabled`
 | `Ui.combo_box` | Selection-only drop-down | `label`, `choices`, `selected`, `on_select`, optional `enabled`
 | `Ui.list_box` | Single-selection list | `label`, `choices`, `selected`, `on_select`, optional `enabled` and `visible_rows` (default 6)
-| `Ui.date_picker` | Calendar picker | Date selection signal, accessible `label`, typed `on_change`, optional `enabled`
-| `Ui.time_picker` | Time-of-day picker | Time selection signal, accessible `label`, typed `on_change`, optional `enabled`
+| `Ui.date_field` | Civil date entry | Date selection signal, accessible `label`, typed `on_change`, optional `enabled`
+| `Ui.time_field` | Civil time entry | Time selection signal, accessible `label`, typed `on_change`, optional `enabled`
 | `Ui.progress_bar` | Progress indicator | Progress signal, accessible `label`, optional `height` (default 16 DIP)
 | `Ui.radio_group` | Labeled radio buttons | `label`, static `choices`, `selected` key, `on_select`, optional `enabled`
 | `Ui.tree_view` | Hierarchical selection | `label`, `nodes`, `selected`, `on_select`, `expanded`, `on_expand`, optional `enabled` and `visible_rows` (default 8)
@@ -110,6 +110,14 @@ its checkbox clear. The typed change handler receives `Date(date)` or
 minutes 0–59 and returns `InvalidClockTime` on error. The time picker
 uses the Windows short-time format and renders `NoTime` with its
 checkbox clear. The change handler receives `Time(time)` or `NoTime`.
+The field displays an example in the Windows short-date or short-time format.
+Date input uses four-digit Gregorian years and also accepts ISO `YYYY-MM-DD`.
+Time input has minute precision and also accepts 24-hour `HH:MM`.
+Enter or a move to another control commits a valid draft. Clearing the
+field and committing proposes `NoDate` or `NoTime`. An invalid draft
+stays visible with a validation message. Escape restores the committed
+value. A handler may decline a proposal and keep the previous value.
+
 Both civil types expose `parts()` and `to_iso()`. A date and clock
 reading describe calendar fields. To resolve them to an instant,
 supply an application policy for timezones, offsets and ambiguous times.
@@ -136,7 +144,8 @@ switch in app state outside the page's scope.
 Use `Ui.Progress.Indeterminate` while work is active and its total is
 unknown. `Determinate({ completed, total })` caps completed work at total.
 A zero total resolves to `Idle`. The bar and its label keep their layout
-space while idle, and the animation runs in the native control.
+space while idle. With client-area animation disabled, an indeterminate
+indicator displays steady busy text.
 
 `Ui.file_drop_target(props, content)` accepts an Explorer file drop over
 its frame or content. A drop over nested targets goes to the innermost

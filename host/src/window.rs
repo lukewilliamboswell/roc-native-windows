@@ -1,5 +1,5 @@
 use crate::abi::Engine;
-use crate::civil::{self, Value as CivilValue};
+use crate::civil_edit::Commit as CivilCommit;
 use crate::display_preferences::DisplaySettings;
 use crate::effects::{Effects, SpecOptions};
 use crate::grid::Intent as GridIntent;
@@ -33,12 +33,11 @@ use windows_sys::Win32::System::Time::{
     GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
 };
 use windows_sys::Win32::UI::Controls::{
-    DTN_DATETIMECHANGE, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_LISTVIEW_CLASSES,
-    ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES, ICC_TAB_CLASSES, ICC_TREEVIEW_CLASSES,
-    INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE, LVIS_SELECTED, LVN_COLUMNCLICK,
-    LVN_ENDSCROLL, LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_RETURN, NMCUSTOMDRAW,
-    NMHDR, NMITEMACTIVATE, NMLISTVIEW, NMTREEVIEWW, TCN_SELCHANGE, TVN_ITEMEXPANDEDW,
-    TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
+    ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES,
+    ICC_TAB_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE,
+    LVIS_SELECTED, LVN_COLUMNCLICK, LVN_ENDSCROLL, LVN_ITEMCHANGED, NM_CLICK, NM_CUSTOMDRAW,
+    NM_DBLCLK, NM_RETURN, NMCUSTOMDRAW, NMHDR, NMITEMACTIVATE, NMLISTVIEW, NMTREEVIEWW,
+    TCN_SELCHANGE, TVN_ITEMEXPANDEDW, TVN_ITEMEXPANDINGW, TVN_SELCHANGEDW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_LEFT, VK_MENU,
@@ -498,11 +497,33 @@ impl App {
         self.control_event(key, event_name, value)
     }
 
-    fn civil_change(&mut self, key: crate::wire::Key, value: CivilValue) -> Result<()> {
-        if self.surface.civil_changed(key, value) {
-            self.control_event(key, "change", value.to_string())?;
+    fn commit_civil(&mut self, handle: HWND) -> Result<bool> {
+        let Some((key, commit)) = self.surface.civil_commit(handle) else {
+            return Ok(false);
+        };
+        match commit {
+            CivilCommit::Clean => return Ok(false),
+            CivilCommit::Edited => {}
+            CivilCommit::Changed(value) => self.control_event(key, "change", value.to_string())?,
         }
-        Ok(())
+        if self.select_key(key) && self.surface.spec_handle(key) == Some(handle) {
+            if matches!(commit, CivilCommit::Changed(_)) {
+                // The Roc handler may decline the proposed typed value.
+                self.surface.civil_cancel(handle);
+            }
+            self.surface.arrange(&self.tree)?;
+            self.surface.reveal_focus(&self.tree, true)?;
+        }
+        Ok(true)
+    }
+
+    fn cancel_civil(&mut self, handle: HWND) -> Result<bool> {
+        let changed = self.surface.civil_cancel(handle);
+        if changed {
+            self.surface.arrange(&self.tree)?;
+            self.surface.reveal_focus(&self.tree, true)?;
+        }
+        Ok(changed)
     }
 
     fn notify(&mut self, source: HWND, code: u32) -> Result<()> {
@@ -1073,7 +1094,6 @@ fn run() -> Result<()> {
         let controls = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
             dwICC: ICC_STANDARD_CLASSES
-                | ICC_DATE_CLASSES
                 | ICC_LISTVIEW_CLASSES
                 | ICC_TAB_CLASSES
                 | ICC_PROGRESS_CLASS
@@ -1160,6 +1180,21 @@ fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
         let key = message.wParam as u16;
         if app.grid_keyboard(message.hwnd, key)? {
             return Ok((owner, false, true));
+        }
+        if matches!(key, VK_RETURN | VK_ESCAPE) && modifiers() == 0 {
+            // SAFETY: Query focus on the target surface's UI thread.
+            let focus = unsafe { GetFocus() };
+            if composing(focus) {
+                return Ok((owner, true, false));
+            }
+            let handled = if key == VK_RETURN {
+                app.commit_civil(focus)?
+            } else {
+                app.cancel_civil(focus)?
+            };
+            if handled {
+                return Ok((owner, false, true));
+            }
         }
         if key == VK_ESCAPE && app.surface.is_dialog(id) && modifiers() == 0 {
             // SAFETY: The calling UI thread owns the focused edit, if any.
@@ -1346,7 +1381,13 @@ pub(crate) unsafe extern "system" fn window_proc(
                                 app.command(source, notification)?;
                             }
                         }
-                        APPLY_PENDING_EDIT => app.surface.settle_edit(lparam as HWND),
+                        APPLY_PENDING_EDIT => {
+                            let handle = lparam as HWND;
+                            app.surface.settle_edit(handle);
+                            if GetFocus() != handle && !composing(handle) {
+                                app.commit_civil(handle)?;
+                            }
+                        }
                         WM_NOTIFY if lparam != 0 && !app.driven => {
                             let header = &*(lparam as *const NMHDR);
                             match header.code {
@@ -1368,14 +1409,6 @@ pub(crate) unsafe extern "system" fn window_proc(
                                     }
                                 }
                                 TCN_SELCHANGE => app.notify(header.hwndFrom, header.code)?,
-                                DTN_DATETIMECHANGE => {
-                                    if let Some(key) = app.surface.key(header.hwndFrom)
-                                        && let Some(mode) = app.surface.kind(key).civil()
-                                    {
-                                        let value = civil::native::notification(lparam, mode)?;
-                                        app.civil_change(key, value)?;
-                                    }
-                                }
                                 _ => {
                                     app.report_notify(lparam)?;
                                     app.grid_notify(lparam)?;

@@ -78,160 +78,46 @@ impl std::fmt::Display for Value {
     }
 }
 
+#[path = "civil_format.rs"]
+mod format;
+
 #[cfg(windows)]
 pub(crate) mod native {
-    use super::{FIRST_YEAR, Kind, LAST_YEAR, Value};
-    use crate::Result;
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, SYSTEMTIME};
-    use windows_sys::Win32::Globalization::{GetLocaleInfoEx, LOCALE_SSHORTTIME};
-    use windows_sys::Win32::UI::Controls::{
-        DTM_GETSYSTEMTIME, DTM_SETFORMATW, DTM_SETRANGE, DTM_SETSYSTEMTIME, GDT_NONE, GDT_VALID,
-        GDTR_MAX, GDTR_MIN, NMDATETIMECHANGE,
+    use super::Kind;
+    use super::format::CivilFormat;
+    use std::ptr::{null, null_mut};
+    use windows_sys::Win32::Globalization::{
+        GetLocaleInfoEx, LOCALE_S1159, LOCALE_S2359, LOCALE_SSHORTDATE, LOCALE_SSHORTTIME,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
 
-    pub(crate) fn initialize(hwnd: HWND, kind: Kind) -> Result<()> {
-        match kind {
-            Kind::Date => {
-                let range = [
-                    system_time(Value::Date {
-                        year: FIRST_YEAR,
-                        month: 1,
-                        day: 1,
-                    }),
-                    SYSTEMTIME {
-                        wHour: 23,
-                        wMinute: 59,
-                        wSecond: 59,
-                        wMilliseconds: 999,
-                        ..system_time(Value::Date {
-                            year: LAST_YEAR,
-                            month: 12,
-                            day: 31,
-                        })
-                    },
-                ];
-                // SAFETY: The two valid SYSTEMTIMEs remain live for this synchronous call.
-                if unsafe {
-                    SendMessageW(
-                        hwnd,
-                        DTM_SETRANGE,
-                        (GDTR_MIN | GDTR_MAX) as usize,
-                        range.as_ptr() as LPARAM,
-                    )
-                } == 0
-                {
-                    return Err("could not set the native date picker's range".into());
-                }
-            }
-            Kind::Time => {
-                let mut format = [0u16; 128];
-                // SAFETY: A null locale asks for the current user's locale. The buffer is writable.
-                let len = unsafe {
-                    GetLocaleInfoEx(
-                        std::ptr::null(),
-                        LOCALE_SSHORTTIME,
-                        format.as_mut_ptr(),
-                        format.len() as i32,
-                    )
-                };
-                // SAFETY: A successful query leaves a terminated format string in the live buffer.
-                if len == 0
-                    || unsafe { SendMessageW(hwnd, DTM_SETFORMATW, 0, format.as_ptr() as LPARAM) }
-                        == 0
-                {
-                    return Err("could not set the native time picker's short-time format".into());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn read(hwnd: HWND, kind: Kind) -> Result<Value> {
-        let mut fields = SYSTEMTIME::default();
-        // SAFETY: The window is a live picker and fields remains writable for the call.
-        let flag = unsafe {
-            SendMessageW(
-                hwnd,
-                DTM_GETSYSTEMTIME,
-                0,
-                &mut fields as *mut SYSTEMTIME as LPARAM,
-            )
+    pub(crate) fn format(kind: Kind) -> CivilFormat {
+        let pattern = match kind {
+            Kind::Date => LOCALE_SSHORTDATE,
+            Kind::Time => LOCALE_SSHORTTIME,
         };
-        match flag as u32 {
-            GDT_NONE => Ok(Value::Unset),
-            GDT_VALID => decode(kind, fields),
-            _ => Err("could not read the native calendar or clock value".into()),
-        }
+        CivilFormat::new(
+            kind,
+            &locale_setting(pattern),
+            [locale_setting(LOCALE_S1159), locale_setting(LOCALE_S2359)],
+        )
     }
 
-    pub(crate) fn restore(hwnd: HWND, kind: Kind, value: Value) -> Result<()> {
-        if read(hwnd, kind)? == value {
-            return Ok(());
+    fn locale_setting(kind: u32) -> String {
+        // SAFETY: A null locale selects the current user. A zero-length query
+        // returns the required size including the UTF-16 terminator.
+        let count = unsafe { GetLocaleInfoEx(null(), kind, null_mut(), 0) };
+        if count <= 1 {
+            return String::new();
         }
-        let fields = system_time(value);
-        let flag = if value == Value::Unset {
-            GDT_NONE
-        } else {
-            GDT_VALID
-        };
-        // DTM_SETSYSTEMTIME ignores the fields for GDT_NONE on Windows.
-        // A live pointer also works with Win32 implementations that require one.
-        // SAFETY: The SYSTEMTIME remains live for the synchronous message.
-        let applied = unsafe {
-            SendMessageW(
-                hwnd,
-                DTM_SETSYSTEMTIME,
-                flag as usize,
-                &fields as *const SYSTEMTIME as LPARAM,
-            )
-        };
-        if applied == 0 || read(hwnd, kind)? != value {
-            return Err("the native picker rejected the controlled value".into());
-        }
-        Ok(())
-    }
-
-    /// The caller checked the WM_NOTIFY code and resolved a live date or time picker.
-    pub(crate) unsafe fn notification(lparam: LPARAM, kind: Kind) -> Result<Value> {
-        let event = lparam as *const NMDATETIMECHANGE;
-        // SAFETY: Win32 owns the message payload for the duration of WM_NOTIFY.
-        // Only GDT_VALID guarantees that the time fields are initialized.
-        match unsafe { (*event).dwFlags } {
-            GDT_NONE => Ok(Value::Unset),
-            GDT_VALID => decode(kind, unsafe { (*event).st }),
-            _ => Err("unexpected state from a native calendar or clock picker".into()),
-        }
-    }
-
-    fn decode(kind: Kind, fields: SYSTEMTIME) -> Result<Value> {
-        match kind {
-            Kind::Date => Value::date(fields.wYear, fields.wMonth, fields.wDay),
-            Kind::Time => Value::time(fields.wHour, fields.wMinute),
-        }
-    }
-
-    fn system_time(value: Value) -> SYSTEMTIME {
-        match value {
-            Value::Date { year, month, day } => SYSTEMTIME {
-                wYear: year,
-                wMonth: month,
-                wDay: day,
-                ..SYSTEMTIME::default()
-            },
-            Value::Time { hour, minute } => SYSTEMTIME {
-                // Win32 needs a full SYSTEMTIME. These date fields are never exposed.
-                wYear: 2000,
-                wMonth: 1,
-                wDay: 1,
-                wHour: hour,
-                wMinute: minute,
-                ..SYSTEMTIME::default()
-            },
-            Value::Unset => SYSTEMTIME::default(),
-        }
+        let mut text = vec![0; count as usize];
+        // SAFETY: The writable buffer contains count UTF-16 units.
+        let written = unsafe { GetLocaleInfoEx(null(), kind, text.as_mut_ptr(), count) };
+        String::from_utf16_lossy(&text[..written.saturating_sub(1).max(0) as usize])
     }
 }
+
+#[cfg(windows)]
+pub(crate) use format::CivilFormat;
 
 #[cfg(test)]
 mod tests {

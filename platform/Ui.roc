@@ -346,7 +346,7 @@ Ui := [].{
 		is_eq = |a, b| a.parts() == b.parts()
 	}
 
-	## An optional date from a calendar picker.
+	## An optional Gregorian civil date.
 	DateSelection : [NoDate, Date(CivilDate)]
 
 	DatePickerProps(ctx) := {
@@ -355,9 +355,11 @@ Ui := [].{
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
 	}
 
-	## Edit a controlled date with a native, localized calendar.
-	date_picker : Signal(ctx, DateSelection), DatePickerProps(ctx) -> Elem(ctx)
-	date_picker = |value, props| {
+	## Enter an optional Gregorian date from 1753 through 9999. Use the Windows
+	## short-date format shown in the field, or ISO YYYY-MM-DD. Enter or Tab
+	## commits a valid date. An empty field clears it. Escape discards the draft.
+	date_field : Signal(ctx, DateSelection), DatePickerProps(ctx) -> Elem(ctx)
+	date_field = |value, props| {
 		encoded = value.map(
 			|selection| match selection {
 				NoDate => ""
@@ -367,6 +369,10 @@ Ui := [].{
 		handler = props.on_change.from_payload_by(value, |current, payload| decode_date(payload) ?? current)
 		civil_picker("ui-date-picker", encoded, props.label, props.enabled, handler)
 	}
+
+	## Enter an optional Gregorian civil date. See `date_field`.
+	date_picker : Signal(ctx, DateSelection), DatePickerProps(ctx) -> Elem(ctx)
+	date_picker = date_field
 
 	## A local clock reading with minute precision.
 	CivilTime := { hour : U8, minute : U8 }.{
@@ -398,9 +404,11 @@ Ui := [].{
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
 	}
 
-	## Edit a controlled hour and minute with the user's short-time format.
-	time_picker : Signal(ctx, TimeSelection), TimePickerProps(ctx) -> Elem(ctx)
-	time_picker = |value, props| {
+	## Enter an optional local clock time in the Windows short-time format
+	## shown in the field, or 24-hour HH:MM. Enter or Tab commits a valid time.
+	## An empty field clears it. Escape discards the draft.
+	time_field : Signal(ctx, TimeSelection), TimePickerProps(ctx) -> Elem(ctx)
+	time_field = |value, props| {
 		encoded = value.map(
 			|selection| match selection {
 				NoTime => ""
@@ -410,6 +418,10 @@ Ui := [].{
 		handler = props.on_change.from_payload_by(value, |current, payload| decode_time(payload) ?? current)
 		civil_picker("ui-time-picker", encoded, props.label, props.enabled, handler)
 	}
+
+	## Enter an optional local clock time. See `time_field`.
+	time_picker : Signal(ctx, TimeSelection), TimePickerProps(ctx) -> Elem(ctx)
+	time_picker = time_field
 
 	## Presentation progress for work with optional measurable counts.
 	Progress := [Idle, Indeterminate, Determinate({ completed : U64, total : U64 })]

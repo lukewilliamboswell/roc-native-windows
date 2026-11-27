@@ -28,7 +28,7 @@ process can test an ARM64 build with `test --target arm64mingw`.
 
 Selectors look up `button`, `checkbox`, `text-field`, `text-area`, `text`,
 `file-button`, `folder-button`, `file-drop-target`, `image`, `combo-box`, `list-box`, `radio-group`, `list-view`,
-`date-picker`, `time-picker`, `data-grid`, `tabs`, `toolbar`, `toolbar-button`,
+`date-field`, `time-field`, `data-grid`, `tabs`, `toolbar`, `toolbar-button`,
 `progress-bar`, and `tree-view`.
 Use `(within OUTER INNER)` to narrow a
 selector to a row or container. An action needs a unique match. Use
@@ -65,19 +65,23 @@ string to `select-row` or `expect-row-selected` to clear or verify an empty
 selection. Use `expect-list-rows` with the row keys in display order,
 or with just the locator for an empty report.
 
-Picker steps compare the native date and time fields across locales.
+Date and time steps compare the committed typed value across locales.
 Use `no-date` and `no-time` to set or assert the unset state.
 In the Todos app, clearing the due date also clears the due time.
 
 [source,scheme]
 ----
-(set-date (date-picker "New due date") (date 2028 2 29))
-(set-time (time-picker "New due time") (time 9 15))
-(expect-date (date-picker "New due date") (date 2028 2 29))
-(expect-time (time-picker "New due time") (time 9 15))
-(set-date (date-picker "New due date") no-date)
-(expect-time (time-picker "New due time") no-time)
+(set-date (date-field "New due date") (date 2028 2 29))
+(set-time (time-field "New due time") (time 9 15))
+(expect-date (date-field "New due date") (date 2028 2 29))
+(expect-time (time-field "New due time") (time 9 15))
+(set-date (date-field "New due date") no-date)
+(expect-time (time-field "New due time") no-time)
 ----
+
+To exercise draft entry, use `fill`, followed by `press-enter`.
+Use `expect-invalid` to check the validation state and `expect-text`
+to check the retained draft. `press-escape` restores the committed value.
 
 For an editable data grid, `focus-cell` and `begin-cell` take a grid,
 a one-based mounted row number and a quoted column key. Use `fill-cell` with

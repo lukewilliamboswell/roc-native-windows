@@ -64,8 +64,8 @@ view = || {
 			Ui.hstack(
 				{},
 				[
-					Ui.date_picker(due_date, { label: "New due date", on_change: Engine.handle(draft_date) }),
-					Ui.time_picker(due_time, { label: "New due time", enabled: due_date.map(TaskList.has_due_date), on_change: Engine.handle(|time| [cells.due_time.set(time)]) }),
+					Ui.date_field(due_date, { label: "New due date", on_change: Engine.handle(draft_date) }),
+					Ui.time_field(due_time, { label: "New due time", enabled: due_date.map(TaskList.has_due_date), on_change: Engine.handle(|time| [cells.due_time.set(time)]) }),
 				],
 			),
 			notes_panel(),
@@ -101,14 +101,14 @@ todo_row = |item| {
 			Ui.hstack(
 				{},
 				[
-					Ui.date_picker(
+					Ui.date_field(
 						date,
 						{
 							label: item.map(|todo| "Due date for ${todo.title}"),
 							on_change: Engine.handle_by(item, |todo, value| update(todo.id, |task| TaskList.with_date(task, value))),
 						},
 					),
-					Ui.time_picker(
+					Ui.time_field(
 						item.map(|todo| todo.due_time),
 						{
 							label: item.map(|todo| "Due time for ${todo.title}"),

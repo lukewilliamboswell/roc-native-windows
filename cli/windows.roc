@@ -628,6 +628,7 @@ spec_step = |expr| {
 		("click", [locator])
 		| ("toggle", [locator])
 		| ("press-enter", [locator])
+		| ("press-escape", [locator])
 		| ("expect-visible", [locator])
 		| ("expect-absent", [locator])
 		|
@@ -717,7 +718,7 @@ spec_step = |expr| {
 			}?
 			Ok(parts.concat([key, word]))
 		}
-		("expect-checked", [locator, value]) | ("expect-disabled", [locator, value]) => {
+		("expect-checked", [locator, value]) | ("expect-disabled", [locator, value]) | ("expect-invalid", [locator, value]) => {
 			parts = spec_locator(locator)?
 			word = match value {
 				Word("true", _) | Word("#t", _) => Ok("true")
@@ -945,7 +946,7 @@ spec_screenshot_name = |name, pos|
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "file-drop-target", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button", "tree-view", "slider", "shader-view"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "file-drop-target", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "date-field", "time-field", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button", "tree-view", "slider", "shader-view"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?

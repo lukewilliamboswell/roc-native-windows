@@ -1,7 +1,8 @@
 use crate::Result;
 use crate::accessibility::{ElementProvider, NativeName, Role, Semantics};
 use crate::choice::Choices;
-use crate::civil::{self, Kind as CivilKind, Value as CivilValue};
+use crate::civil::{Kind as CivilKind, Value as CivilValue};
+use crate::civil_edit::{CivilEdit, Commit as CivilCommit};
 use crate::command_icon::ButtonIcon;
 use crate::display_preferences::DisplayPreferences;
 use crate::grid::Grid;
@@ -33,11 +34,10 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX};
 use windows_sys::Win32::UI::Controls::{
     BST_CHECKED, BST_INDETERMINATE, BST_UNCHECKED, CCM_SETUNICODEFORMAT, CCS_NODIVIDER,
-    CCS_NOPARENTALIGN, CCS_NORESIZE, DTS_SHORTDATEFORMAT, DTS_SHOWNONE, DTS_TIMEFORMAT,
-    EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
-    SetScrollInfo, TBSTYLE_FLAT, TBSTYLE_LIST, TBSTYLE_WRAPABLE, TCM_ADJUSTRECT, TOOLBARCLASSNAMEW,
-    TVM_GETITEMHEIGHT, TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT,
-    TVS_SHOWSELALWAYS, WC_TABCONTROLW, WC_TREEVIEWW,
+    CCS_NOPARENTALIGN, CCS_NORESIZE, EM_SETCUEBANNER, EM_SETREADONLY, EM_SETSEL, LVS_REPORT,
+    LVS_SHOWSELALWAYS, LVS_SINGLESEL, SetScrollInfo, TBSTYLE_FLAT, TBSTYLE_LIST, TBSTYLE_WRAPABLE,
+    TCM_ADJUSTRECT, TOOLBARCLASSNAMEW, TVM_GETITEMHEIGHT, TVS_DISABLEDRAGDROP, TVS_HASBUTTONS,
+    TVS_HASLINES, TVS_LINESATROOT, TVS_SHOWSELALWAYS, WC_TABCONTROLW, WC_TREEVIEWW,
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -126,7 +126,10 @@ impl Control {
     }
 
     fn is_edit(self) -> bool {
-        matches!(self, Self::Edit | Self::TextArea)
+        matches!(
+            self,
+            Self::Edit | Self::TextArea | Self::DatePicker | Self::TimePicker
+        )
     }
 
     pub(crate) fn civil(self) -> Option<CivilKind> {
@@ -172,7 +175,7 @@ impl Control {
             Self::FileDropTarget => (0, w!("BUTTON"), BS_GROUPBOX as u32 | WS_CLIPSIBLINGS),
             Self::Checkbox => (0, w!("BUTTON"), WS_TABSTOP | BS_AUTOCHECKBOX as u32),
             Self::AggregateCheckbox => (0, w!("BUTTON"), WS_TABSTOP | BS_3STATE as u32),
-            Self::Edit => (
+            Self::Edit | Self::DatePicker | Self::TimePicker => (
                 WS_EX_CLIENTEDGE,
                 w!("EDIT"),
                 WS_TABSTOP | ES_AUTOHSCROLL as u32,
@@ -203,16 +206,6 @@ impl Control {
                 w!("SysListView32"),
                 WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
             ),
-            Self::DatePicker => (
-                0,
-                w!("SysDateTimePick32"),
-                WS_TABSTOP | DTS_SHOWNONE | DTS_SHORTDATEFORMAT,
-            ),
-            Self::TimePicker => (
-                0,
-                w!("SysDateTimePick32"),
-                WS_TABSTOP | DTS_SHOWNONE | DTS_TIMEFORMAT,
-            ),
             Self::Tabs => (0, WC_TABCONTROLW, WS_TABSTOP | WS_CLIPSIBLINGS),
             Self::TreeView => (
                 WS_EX_CLIENTEDGE,
@@ -233,6 +226,7 @@ struct View {
     label: HWND,
     native_name: Option<NativeName>,
     semantics: Option<ElementProvider>,
+    civil_edit: Option<CivilEdit>,
     kind: Control,
     props: Props,
     styled: Option<StyledWindow>,
@@ -283,7 +277,7 @@ impl View {
                     handle,
                     Some(edit_subclass),
                     1,
-                    usize::from(kind == Control::TextArea),
+                    usize::from(kind != Control::Edit),
                 )
             } == 0
             {
@@ -320,11 +314,12 @@ impl View {
             // SAFETY: The failed control mount belongs to this thread.
             unsafe { DestroyWindow(handle) };
         })?;
-        let view = Self {
+        let mut view = Self {
             handle,
             label: null_mut(),
             native_name: None,
             semantics: None,
+            civil_edit: None,
             kind,
             styled: None,
             label_style: None,
@@ -349,7 +344,7 @@ impl View {
             button_icon: ButtonIcon::default(),
         };
         if let Some(mode) = kind.civil() {
-            civil::native::initialize(handle, mode)?;
+            view.civil_edit = Some(CivilEdit::new(window, handle, font, mode)?);
         }
         Ok(view)
     }
@@ -375,6 +370,9 @@ impl View {
 
     fn font(&self, font: HFONT) {
         self.choices.font(font);
+        if let Some(civil) = &self.civil_edit {
+            civil.font(font);
+        }
         // SAFETY: Both child windows, when present, are owned by this view.
         unsafe {
             SendMessageW(self.handle, WM_SETFONT, font as usize, 0);
@@ -396,7 +394,8 @@ impl View {
     fn update(&mut self, window: HWND, font: HFONT, desired: Props) -> Result<()> {
         // Compare the controlled edit value with what's on screen before
         // writing. Writing the same string can reset the selection and IME.
-        if !matches!(self.kind, Control::ListBox | Control::ComboBox)
+        if self.civil_edit.is_none()
+            && !matches!(self.kind, Control::ListBox | Control::ComboBox)
             && self.props.caption != desired.caption
         {
             if self.kind == Control::TextArea {
@@ -463,8 +462,8 @@ impl View {
                 );
             }
         }
-        if let (Some(mode), Some(value)) = (self.kind.civil(), desired.civil) {
-            civil::native::restore(self.handle, mode, value)?;
+        if let (Some(editor), Some(value)) = (&mut self.civil_edit, desired.civil) {
+            editor.set_value(self.handle, value);
         }
         self.props = desired;
         Ok(())
@@ -870,7 +869,15 @@ impl Surface {
             return self.toolbar(handle)?.text(handle, id);
         }
         let view = self.views.get(&key)?;
-        if matches!(kind, "text-field" | "text-area") {
+        if matches!(
+            kind,
+            "text-field"
+                | "text-area"
+                | "date-picker"
+                | "time-picker"
+                | "date-field"
+                | "time-field"
+        ) {
             return Some(view.props.label.clone());
         }
         if view.kind.separate_label() {
@@ -981,7 +988,7 @@ impl Surface {
             .views
             .get(&key)
             .filter(|view| view.kind.is_edit())
-            .ok_or("fill requires a text field or text area")?;
+            .ok_or("fill requires a text, date, or time field")?;
         if view.kind == Control::TextArea && !view.props.editable {
             return Err("cannot fill a read-only text area".into());
         }
@@ -1074,16 +1081,23 @@ impl Surface {
             Control::Slider => view.slider.restore(view.handle),
             _ => {}
         }
-        if let (Some(mode), Some(value)) = (view.kind.civil(), view.props.civil) {
-            civil::native::restore(view.handle, mode, value)?;
-        }
         Ok(())
     }
 
-    pub(crate) fn civil_changed(&self, key: Key, value: CivilValue) -> bool {
-        self.views
-            .get(&key)
-            .is_some_and(|view| view.props.civil.is_some_and(|current| current != value))
+    pub(crate) fn civil_commit(&mut self, handle: HWND) -> Option<(Key, CivilCommit)> {
+        let key = self.key(handle)?;
+        let view = self.views.get_mut(&key)?;
+        if !view.props.enabled {
+            return None;
+        }
+        let editor = view.civil_edit.as_mut()?;
+        Some((key, editor.commit(handle)))
+    }
+
+    pub(crate) fn civil_cancel(&mut self, handle: HWND) -> bool {
+        self.key(handle)
+            .and_then(|key| self.views.get_mut(&key)?.civil_edit.as_mut())
+            .is_some_and(|editor| editor.cancel(handle))
     }
 
     pub(crate) fn spec_civil(
@@ -1091,19 +1105,29 @@ impl Surface {
         key: Key,
         mode: CivilKind,
         replacement: Option<&str>,
-    ) -> Result<CivilValue> {
+    ) -> Result<(HWND, CivilValue)> {
         let view = self
             .views
             .get(&key)
             .filter(|view| view.kind.civil() == Some(mode))
-            .ok_or("locator needs a picker of the requested type")?;
+            .ok_or("locator needs a civil field of the requested type")?;
         if let Some(text) = replacement {
             if self.spec_disabled(key)? {
                 return Err("control is disabled".into());
             }
-            civil::native::restore(view.handle, mode, CivilValue::parse(mode, text)?)?;
+            CivilValue::parse(mode, text)?;
+            view.write_edit(text);
         }
-        civil::native::read(view.handle, mode)
+        Ok((view.handle, view.civil_edit.as_ref().unwrap().value()))
+    }
+
+    pub(crate) fn spec_civil_invalid(&self, key: Key) -> Result<bool> {
+        let editor = self
+            .views
+            .get(&key)
+            .and_then(|view| view.civil_edit.as_ref())
+            .ok_or("expect-invalid requires a date or time field")?;
+        Ok(editor.invalid())
     }
 
     pub(crate) fn settle_edit(&mut self, handle: HWND) {
@@ -1221,6 +1245,11 @@ impl Surface {
 
     pub(crate) fn theme_changed(&mut self, tree: &Tree) -> Result<()> {
         self.palette = Palette::new(self.accent, self.window);
+        for view in self.views.values_mut() {
+            if let Some(editor) = &mut view.civil_edit {
+                editor.refresh_locale(view.handle);
+            }
+        }
         self.style_node(tree, self.content, self.palette.background())?;
         self.dpi_changed(tree)
     }
@@ -1254,12 +1283,15 @@ impl Surface {
                 ))?;
             }
             if !view.label.is_null() {
-                let label = self.palette.text(background, "primary", "start", true);
+                let label = self.palette.text(background, "primary", "start", false);
                 if let Some(style) = &mut view.label_style {
                     style.update(label);
                 } else {
                     view.label_style = Some(StyledWindow::new(view.label, label)?);
                 }
+            }
+            if let Some(editor) = &mut view.civil_edit {
+                editor.style(self.palette.text(background, "primary", "start", false))?;
             }
             if let Some(picture) = &mut view.picture {
                 picture.set_background(background);
@@ -1771,7 +1803,7 @@ impl Surface {
             let control_y = y + label_height;
             let control_height = item.height
                 - label_height
-                - if view.grid.is_some() {
+                - if view.grid.is_some() || view.civil_edit.is_some() {
                     item.detail_height
                 } else {
                     0
@@ -1813,8 +1845,20 @@ impl Surface {
                 view.choices
                     .arrange(item.width, item.detail_height, scale(self.dpi, 12));
             }
+            if let Some(editor) = &view.civil_edit {
+                position(
+                    editor.note,
+                    view.handle,
+                    item.x,
+                    control_y + control_height,
+                    item.width,
+                    item.detail_height,
+                );
+            }
             after = if let Some(grid) = &mut view.grid {
                 grid.arrange(view.handle, self.window, self.font, self.dpi)?
+            } else if let Some(editor) = &view.civil_edit {
+                editor.note
             } else {
                 view.handle
             };
@@ -1960,7 +2004,11 @@ impl Surface {
                 _ => 0,
             };
             let (width, height) = natural(view, node, dc, self.dpi, max_width, detail_height);
-            let height = height + label_height;
+            let note_height = view.civil_edit.as_ref().map_or(0, |editor| {
+                (wrap_height(dc, editor.help(), width) + scale(self.dpi, 3))
+                    .max(scale(self.dpi, 21))
+            });
+            let height = height + label_height + note_height;
             if !previous.is_null() {
                 unsafe { SelectObject(dc, previous) };
             }
@@ -1971,7 +2019,7 @@ impl Surface {
                 width,
                 height,
                 label_height,
-                detail_height,
+                detail_height: detail_height + note_height,
             });
             return (width, height);
         }

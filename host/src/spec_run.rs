@@ -563,7 +563,8 @@ impl App {
                 "click" | "fill" | "toggle" | "press-enter" | "expect-visible" | "expect-absent"
                 | "expect-text" | "expect-checked" | "expect-disabled" | "select"
                 | "expect-selection" | "set-date" | "expect-date" | "set-time" | "expect-time"
-                | "expect-progress" | "expand" | "collapse" | "expect-expanded" | "drop-files",
+                | "press-escape" | "expect-invalid" | "expect-progress" | "expand" | "collapse"
+                | "expect-expanded" | "drop-files",
                 _,
             ) => self.control_step(step),
             (
@@ -751,7 +752,9 @@ impl App {
                     .surface
                     .spec_handle(key)
                     .ok_or("locator is not a native control")?;
-                self.enter(focused, None)?;
+                if !self.commit_civil(focused)? {
+                    self.enter(focused, None)?;
+                }
                 Ok(())
             }
             ("expect-disabled", [value]) => {
@@ -759,6 +762,17 @@ impl App {
             }
             ("expect-progress", [wanted]) => self.surface.spec_progress(key, wanted),
             ("expect-selection", [wanted]) => expect(self.surface.spec_selection(key)?, *wanted),
+            ("press-escape", []) => {
+                let handle = self
+                    .surface
+                    .spec_handle(key)
+                    .ok_or("locator is not a native control")?;
+                self.cancel_civil(handle)?;
+                Ok(())
+            }
+            ("expect-invalid", [wanted]) => {
+                expect(self.surface.spec_civil_invalid(key)?, number(wanted)?)
+            }
             ("set-date" | "set-time" | "expect-date" | "expect-time", [value]) => {
                 let mode = if step.command.ends_with("date") {
                     CivilKind::Date
@@ -766,11 +780,12 @@ impl App {
                     CivilKind::Time
                 };
                 let change = step.command.starts_with("set-");
-                let actual = self
-                    .surface
-                    .spec_civil(key, mode, change.then_some(*value))?;
+                let (handle, actual) =
+                    self.surface
+                        .spec_civil(key, mode, change.then_some(*value))?;
                 if change {
-                    self.civil_change(key, actual)
+                    self.commit_civil(handle)?;
+                    Ok(())
                 } else {
                     expect(actual, CivilValue::parse(mode, value)?)
                 }
@@ -1097,7 +1112,12 @@ impl App {
                 let matches = if kind == "test-id" {
                     !label.is_empty() && node.attr("test-id") == Some(label)
                 } else {
-                    let expected = if kind == "image" { "asset-image" } else { kind };
+                    let expected = match kind {
+                        "image" => "asset-image",
+                        "date-field" => "date-picker",
+                        "time-field" => "time-picker",
+                        _ => kind,
+                    };
                     matches!(&node.kind, Kind::Element(tag) if tag.strip_prefix("ui-") == Some(expected)
                         || (kind == "image" && tag == "ui-image")
                         || (kind == "text" && tag == "ui-status-text")

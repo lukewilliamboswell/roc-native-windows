@@ -14,6 +14,8 @@ mod capture;
 mod choice;
 #[cfg(any(test, windows))]
 mod civil;
+#[cfg(windows)]
+mod civil_edit;
 #[cfg(any(test, windows))]
 mod clipboard;
 #[cfg(windows)]
