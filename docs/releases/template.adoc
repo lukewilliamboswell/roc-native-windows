@@ -1,0 +1,41 @@
+= roc-native-windows <version>
+
+// Copy to <version>.adoc and remove these comments.
+// Open with one or two sentences about what users can now do or need to change.
+
+== Roc compiler
+
+Built and tested with Roc `{roc-version}`. Earlier versions may be incompatible.
+https://github.com/roc-lang/nightlies/releases/tag/{roc-version}[Download the tested Roc nightly].
+
+== Use this release
+
+The Reading List starter uses this header in `src/main.roc`.
+
+[source,roc]
+----
+app [main, native] {
+    logic: "../logic/main.roc",
+    pf: platform "{platform-url}",
+}
+----
+
+== Getting started
+
+With the tested compiler available as `roc`, run this in PowerShell on Windows x64.
+
+[source,powershell]
+----
+$tool = '{cli-url}'
+roc $tool -- init reading-list
+Set-Location reading-list
+roc windows.roc -- package --target x64mingw
+roc windows.roc -- run --target x64mingw
+----
+
+Packaging downloads the matching MSI packager and writes
+`dist/reading-list-x64mingw.msi`. Use `--target arm64mingw` for Windows ARM64.
+
+// Include migration steps, additional prerequisites, bundle choices or
+// evidence links when readers need them to use or evaluate this release.
+// Link to the manual for longer procedures and to the release assets for evidence.

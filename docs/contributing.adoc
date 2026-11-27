@@ -315,11 +315,20 @@ roc ../../cli/windows.roc -- package --target x64mingw
 [#stage-a-release]
 == Stage a release
 
+Copy the https://github.com/lukewilliamboswell/roc-native-windows/blob/main/docs/releases/template.adoc[release notes template]
+to `docs/releases/<version>.adoc`. Replace the title's version, write a
+short summary for app authors, and remove the template comments. Keep
+`{roc-version}`, `{platform-url}` and `{cli-url}` for the workflow to fill
+from the tested compiler and staged assets. Use HTTPS links and keep the
+release notes self-contained for GitHub.
+
 The Release Windows platform workflow stages the public assets and a loopback
 preview, then uses the preview to bootstrap Reading List and test MSI
 installation, upgrade, launch, and removal on Windows x64 and ARM64. Run it
 on `main` with `publish` enabled to attest the staged files, verify the GitHub
 draft assets, and publish. The final job bootstraps from the public URLs.
+Pull requests render the newest authored version's notes during the dry run.
+A manual run uses the version supplied to the workflow.
 
 On Apple Silicon macOS, add the Intel macOS and Linux musl Rust targets
 for the release packagers. Build the platform bundle and pass its

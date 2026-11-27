@@ -4,9 +4,12 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - docs/releases/**
       - packaging/**
       - scripts/release.roc
       - scripts/release_evidence.py
+      - scripts/release_notes.py
+      - tests/test_release_notes.py
       - tests/accessibility/installer.ps1
       - tests/accessibility/standalone.ps1
   workflow_dispatch:
@@ -27,15 +30,13 @@ concurrency:
   group: windows-release-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  RELEASE_VERSION: ${{ inputs.version || '0.0.1' }}
-  RELEASE_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ inputs.version || '0.0.1' }}
-
 jobs:
   stage:
     name: Stage release and loopback preview
     runs-on: macos-15
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.notes-source.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -51,9 +52,24 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.13'
+      - name: Validate the authored notes
+        id: notes-source
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          python3 -B -m unittest discover -s tests -p test_release_notes.py
+          version=$(python3 scripts/release_notes.py --version "$REQUESTED_VERSION")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "RELEASE_BASE_URL=https://github.com/$GITHUB_REPOSITORY/releases/download/$version" >> "$GITHUB_ENV"
+      - uses: lukewilliamboswell/roc-automation/actions/setup-blueprint@ca31a848926b19ec2aed867c481ef691b55aaeb8
+      - id: renderer
+        uses: lukewilliamboswell/roc-automation/actions/blueprint-tool@ca31a848926b19ec2aed867c481ef691b55aaeb8
+        with:
+          task: docs-path
+          label: Locked release notes renderer
       - name: Build the platform and packagers
         run: |
-          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           rustup target add x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl
           roc scripts/build.roc -- bundle
           shopt -s nullglob
@@ -67,6 +83,17 @@ jobs:
           done
       - name: Collect license notices, SBOMs, and asset checksums
         run: python3 scripts/release_evidence.py dist/release "$RELEASE_VERSION" "$RELEASE_BASE_URL"
+      - name: Render the GitHub release notes
+        env:
+          ROC_DOCS: ${{ steps.renderer.outputs.binary }}
+        run: |
+          python3 scripts/release_notes.py --version "$RELEASE_VERSION" --assets dist/release \
+            --base-url "$RELEASE_BASE_URL" --renderer "$ROC_DOCS" --output dist/release-notes.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-release-notes
+          path: dist/release-notes.md
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-release
@@ -128,13 +155,19 @@ jobs:
   publish:
     name: Publish the GitHub release
     if: inputs.publish && github.ref == 'refs/heads/main' && github.repository == 'lukewilliamboswell/roc-native-windows'
-    needs: install-arm
+    needs: [stage, install-arm]
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.stage.outputs.version }}
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: windows-release-notes
+          path: notes/
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
           name: windows-release
@@ -149,24 +182,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > "$RUNNER_TEMP/notes.md" <<'EOF'
-          Build native Windows x64 and ARM64 desktop apps in Roc. The CLI bundle bootstraps a Reading List or Counter app and packages it as an MSI or ZIP.
-
-          Use the pinned Roc nightly and follow the starter guide. [Roc nightly](https://github.com/roc-lang/nightlies/releases/tag/nightly-2026-11-26-890d6c8) · [Windows app guide](https://lukewilliamboswell.github.io/roc-native-windows/apps.html)
-
-          `SHA256SUMS` lists the assets and SBOMs. GitHub build provenance covers every uploaded file. The `.spdx.json` files inventory the release subjects and their resolved components, with coverage gaps recorded for native runtime symbols and transitive supplier inputs. Original notices are in the dependency license archive.
-          EOF
+          test -s notes/release-notes.md
           gh release create "$RELEASE_VERSION" release/* --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" --title "$RELEASE_VERSION" --notes-file "$RUNNER_TEMP/notes.md" --draft
+            --target "$GITHUB_SHA" --title "$RELEASE_VERSION" --notes-file notes/release-notes.md --draft
           gh release download "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/verified"
           diff --recursive release "$RUNNER_TEMP/verified"
           gh release edit "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
 
   verify:
     name: Verify the published bootstrap
-    needs: publish
+    needs: [stage, publish]
     runs-on: windows-2025
     timeout-minutes: 30
+    env:
+      RELEASE_VERSION: ${{ needs.stage.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
