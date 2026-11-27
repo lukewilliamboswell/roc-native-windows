@@ -66,13 +66,15 @@ Windows on Arm.
 [source,powershell]
 ----
 blueprint run test-native -- --target x64mingw
-blueprint run test-accessibility
+blueprint run test-accessibility -- -FreshStarter
 ----
 
 Run the keyboard probes in `tests/native-keyboard/` and repeat the
 Reading List accessibility check on a project created by the standalone
-release launcher. Then run the desktop checks below. Cross-build,
-Wine, and native Windows results each need their own record.
+release launcher. In `windows.roc dev`, press Ctrl+R after a valid edit
+and then after a syntax error. Verify that a valid edit starts a fresh
+app instance and a failed build reopens the last successful executable.
+Record cross-build, Wine, and native Windows results separately.
 
 [cols="1,2,3",options="header"]
 |===
@@ -118,6 +120,9 @@ field label and validation relationships, the focused grid EDIT and
 its native text interface, decorative graphic visibility, and
 announcements during completion and cancellation. Check Narrator,
 Text size, contrast themes, and mixed-DPI focus.
+The previous hosted x64 probe failed in Workers with
+`Expecting object to be local`. Use the updated probe's operation and
+exception details to trace the failure if it recurs.
 
 |33–34
 |Private packaged fonts and app-owned themes. Standalone init carries
