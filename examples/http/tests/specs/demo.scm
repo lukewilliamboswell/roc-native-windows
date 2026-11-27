@@ -1,5 +1,5 @@
 (demo "Fetch a local response"
-  (setup (window-size 480 272))
+  (setup (window-size 480 320))
   (steps
     (wait 450)
     (fill (text-field "URL") "http://127.0.0.1:48393/guide.txt")
