@@ -9,8 +9,11 @@ main : Engine.Program(_)
 main = Engine.program_store({}, |_boot| store, |_boot| view())
 
 Request : { url : Str, serial : U64, phase : Phase }
+
 Phase : [Idle, Starting, Fetching(StartMark), Finishing(StartMark, Transfer)]
+
 StartMark : Try(System.Mark, System.Failure)
+
 Transfer : [Received({ status : U16, size : U64, preview : Str }), Failed(Str)]
 
 store = Engine.store(
@@ -39,6 +42,7 @@ HttpStyle := {
 		font: PackagedFont({ asset: "fonts/IBMPlexMono-Regular.ttf", family: "IBM Plex Mono" }),
 	},
 }
+
 empty_request : Request
 empty_request = { url: "", serial: 0, phase: Idle }
 
@@ -87,10 +91,13 @@ view = || {
 					],
 				),
 			),
-			Ui.button("Copy request details", {
-				enabled: details.map(|value| !value.is_empty()),
-				on_press: Engine.handle_by(details, |value, _| [cells.copies.update(|outbox| outbox.post(value))]),
-			}),
+			Ui.button(
+				"Copy request details",
+				{
+					enabled: details.map(|value| !value.is_empty()),
+					on_press: Engine.handle_by(details, |value, _| [cells.copies.update(|outbox| outbox.post(value))]),
+				},
+			),
 			Engine.on_post(cells.copies.signal(), |value| [Clipboard.text(value)], Engine.ignore({})),
 			Engine.watch_latest(
 				request,
@@ -100,10 +107,16 @@ view = || {
 			Engine.watch_latest(
 				request.map(|r| if (r.phase == Idle) 0 else r.serial),
 				|serial| if (serial == 0) [] else [System.secure_random(16)],
-				Engine.react(|_, result| [cells.reference.set(match result {
-					Ok(bytes) => hex(bytes)
-					Err(_) => ""
-				})]),
+				Engine.react(
+					|_, result| [
+						cells.reference.set(
+							match result {
+								Ok(bytes) => hex(bytes)
+								Err(_) => ""
+							},
+						),
+					],
+				),
 			),
 			Engine.watch_latest(
 				request,

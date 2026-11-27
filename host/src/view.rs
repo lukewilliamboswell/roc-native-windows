@@ -577,7 +577,11 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
-    pub(crate) fn new(window: HWND, preferences: DisplayPreferences, font_registry: FontRegistry) -> Result<Self> {
+    pub(crate) fn new(
+        window: HWND,
+        preferences: DisplayPreferences,
+        font_registry: FontRegistry,
+    ) -> Result<Self> {
         // SAFETY: The HWND has been created and lives on this thread.
         let dpi = unsafe { GetDpiForWindow(window) }.max(96);
         let assets = std::env::current_exe()
@@ -1915,6 +1919,9 @@ impl Surface {
                     .arrange(item.width, item.detail_height, scale(self.dpi, 12));
             }
             if let Some(editor) = &view.civil_edit {
+                if let Some(annotation) = &mut view.native_name {
+                    annotation.help(editor.help());
+                }
                 position(
                     editor.note,
                     view.handle,

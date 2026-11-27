@@ -45,6 +45,7 @@ impl Drop for Apartment {
 pub(crate) struct NativeName {
     hwnd: HWND,
     service: IAccPropServices,
+    help: String,
 }
 
 impl NativeName {
@@ -62,6 +63,7 @@ impl NativeName {
                 *current = Some(Self {
                     hwnd: HWND(hwnd),
                     service,
+                    help: String::new(),
                 });
             }
             if let Some(current) = current {
@@ -78,6 +80,26 @@ impl NativeName {
             }
         }
     }
+
+    pub(crate) fn help(&mut self, details: &str) {
+        if self.help == details {
+            return;
+        }
+        self.help = details.to_owned();
+        let details = wide(details);
+        // SAFETY: The same live annotation owns both platform help properties.
+        unsafe {
+            for property in [PROPID_ACC_HELP, HelpText_Property_GUID] {
+                let _ = self.service.SetHwndPropStr(
+                    self.hwnd,
+                    OBJID_CLIENT as u32,
+                    0,
+                    property,
+                    PCWSTR(details.as_ptr()),
+                );
+            }
+        }
+    }
 }
 
 impl Drop for NativeName {
@@ -88,7 +110,12 @@ impl Drop for NativeName {
                 self.hwnd,
                 OBJID_CLIENT as u32,
                 0,
-                &[PROPID_ACC_NAME, Name_Property_GUID],
+                &[
+                    PROPID_ACC_NAME,
+                    Name_Property_GUID,
+                    PROPID_ACC_HELP,
+                    HelpText_Property_GUID,
+                ],
             );
         }
     }

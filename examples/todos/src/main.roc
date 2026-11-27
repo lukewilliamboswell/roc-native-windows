@@ -87,17 +87,25 @@ view = || {
 				|todo| todo.id.to_str(),
 				|row| todo_row(row.item()),
 			),
-			Engine.watch(Engine.const({}), |_| [Engine.interval(clock_interval)],
-				Engine.react(|_, sample| match sample {
-					Ok(now) => [cells.clock.update(|prior| { ..prior, now })]
-					Err(_) => []
-				}),
+			Engine.watch(
+				Engine.const({}),
+				|_| [Engine.interval(clock_interval)],
+				Engine.react(
+					|_, sample| match sample {
+						Ok(now) => [cells.clock.update(|prior| { ..prior, now })]
+						Err(_) => []
+					},
+				),
 			),
-			Engine.watch_latest(outside, |samples| samples.map(|_| Engine.environment({})),
-				Engine.react(|_, outcome| match outcome {
-					Ok(facts) => [cells.clock.set({ now: facts.now_ms, zone: facts.zone })]
-					Err(_) => []
-				}),
+			Engine.watch_latest(
+				outside,
+				|samples| samples.map(|_| Engine.environment({})),
+				Engine.react(
+					|_, outcome| match outcome {
+						Ok(facts) => [cells.clock.set({ now: facts.now_ms, zone: facts.zone })]
+						Err(_) => []
+					},
+				),
 			),
 		],
 	)

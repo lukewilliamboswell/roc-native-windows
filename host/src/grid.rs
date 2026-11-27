@@ -551,6 +551,9 @@ impl Grid {
             &self.report.projection().columns[column].heading,
             &mut name,
         );
+        if let Some(annotation) = &mut name {
+            annotation.help(&self.cells[&cell.key].feedback);
+        }
         self.editing = Some(Editing { handle, cell, name });
         self.position_editor(hwnd, window);
         if self.editing.is_some() {

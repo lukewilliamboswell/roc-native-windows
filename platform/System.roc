@@ -46,6 +46,7 @@ regional : Port.Call({}, { code : U8, locale : Str, zone : Str })
 regional = Port.call({ name: "roc-native-windows/regional", timeout: Ms(15000) })
 
 FormatInput : { instants : List(I64), zone : [Local, Utc], date : [ShortDate, LongDate] }
+
 format : Port.Call(FormatInput, { code : U8, parts : List(System.FormattedTime) })
 format = Port.call({ name: "roc-native-windows/format-time", timeout: Ms(15000) })
 
