@@ -1,7 +1,7 @@
 //! Bind binary image inputs to the lifetime of mounted native nodes.
 
 use crate::picture::Resize;
-use crate::raster::{MAX_PIXELS, Pixels, byte_count, decode_asset};
+use crate::raster::{self, AssetDecoder, MAX_PIXELS, Pixels, byte_count};
 use crate::wire::{ATTACH_RASTER_PORT, Key, Kind, Reader, Tree};
 use crate::{Event, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -272,7 +272,10 @@ impl Worker {
         let mailbox = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("roc-image-prepare".into())
-            .spawn(move || work(&mailbox))
+            .spawn({
+                let decoder = raster::decoders().map(|(asset, _)| asset);
+                move || work(&mailbox, decoder)
+            })
             .map_err(|error| format!("cannot start the image worker: {error}"))?;
         Ok(Self(shared))
     }
@@ -318,7 +321,7 @@ impl Drop for Worker {
 
 type Digest = (u32, u32, [u8; 32]);
 
-fn work((mailbox, ready): &(Mutex<Mailbox>, Condvar)) {
+fn work((mailbox, ready): &(Mutex<Mailbox>, Condvar), decoder: Option<AssetDecoder>) {
     let mut rasters = BTreeMap::<Digest, Weak<Pixels>>::new();
     let mut assets = BTreeMap::<(PathBuf, String), Weak<Pixels>>::new();
     // The weak source keeps the allocation identity unique while the cache entry lives.
@@ -366,7 +369,9 @@ fn work((mailbox, ready): &(Mutex<Mailbox>, Condvar)) {
                 if let Some(pixels) = assets.get(&key).and_then(Weak::upgrade) {
                     Ok(Prepared::Source(pixels))
                 } else {
-                    decode_asset(&key.0, &key.1)
+                    decoder
+                        .ok_or_else(|| "packaged images require Win.Features.image_codecs!".into())
+                        .and_then(|decode| decode(&key.0, &key.1))
                         .inspect(|pixels| {
                             assets.insert(key, Arc::downgrade(pixels));
                         })

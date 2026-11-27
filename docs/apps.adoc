@@ -50,6 +50,43 @@ machine and can produce either Windows target. The CLI selects the
 packager automatically and checks its SHA-256 before running it. For a
 custom platform, use `init --platform <platform/main.roc-or-bundle-URL>`.
 
+[#native-features]
+== Select native features
+
+Export `native` alongside `main` in the app header. Keep the configuration
+pure by passing the registration functions themselves to `Win.Features.use`.
+For an app that fetches HTTP responses and displays packaged images, use
+the following configuration.
+
+[source,roc]
+----
+native = Win.Features.use([Win.Features.http!, Win.Features.image_codecs!])
+----
+
+The platform runs the selected registrations before mounting the UI. Use
+`Win.Features.use([])` for an app that only needs the core Win32 controls.
+The core includes native accessibility, keyboard input, signals, and app
+settings. The linker can discard optional implementations when the app
+omits their registration. Every configuration uses the same platform
+package and build commands.
+
+[cols="1,3",options="header"]
+|===
+| Registration | Use it for
+| `Win.Features.clipboard!` | Copy buttons that write plain text.
+| `Win.Features.direct3d!` | Shader views and their image textures. Includes image codecs.
+| `Win.Features.files!` | Native file and folder pickers, drops, file operations, and folder listings.
+| `Win.Features.grid!` | Editable data grids with their accessibility provider.
+| `Win.Features.http!` | Native HTTP requests. Declare allowed origins in `windows.json`.
+| `Win.Features.image_codecs!` | PNG, JPEG, and BMP assets and selected file decoding.
+| `Win.Features.taskbar!` | Progress on the Windows taskbar button.
+| `Win.Features.workers!` | Background Roc workers declared through `with_workers`.
+|===
+
+To move a project to this platform version, add `native` to `app [main,
+native]` and select the registrations used by the project. Both `init`
+templates supply the configuration for their own features.
+
 [#test-an-app]
 == Check an app
 

@@ -6,12 +6,12 @@ use crate::civil_calendar::native::Origin as CalendarOrigin;
 use crate::civil_edit::{CivilEdit, Commit as CivilCommit};
 use crate::command_icon::ButtonIcon;
 use crate::display_preferences::DisplayPreferences;
-use crate::grid::Grid;
+use crate::grid::{self, MountedGrid};
 use crate::list_view::{ListView, Report};
 use crate::picture::{Picture, Resize};
 use crate::progress::{Progress, native::ProgressBar};
 use crate::raster::Pixels;
-use crate::shader::{Inputs as ShaderInputs, ShaderView};
+use crate::shader::{self, Inputs as ShaderInputs, ShaderView};
 use crate::slider::native::Slider;
 use crate::style::{
     Accent,
@@ -45,9 +45,7 @@ use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetActiveWindow, GetFocus, IsWindowEnabled, SetFocus,
 };
-use windows_sys::Win32::UI::Shell::{
-    DefSubclassProc, DragAcceptFiles, RemoveWindowSubclass, SetWindowSubclass,
-};
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::{PCWSTR, w};
 
@@ -239,13 +237,13 @@ struct View {
     label_font: HFONT,
     force_pending: bool,
     picture: Option<Picture>,
-    shader: Option<ShaderView>,
+    shader: Option<Box<dyn ShaderView>>,
     choices: Choices,
     tree: TreeProjection,
     tab_owner: Option<Key>,
     combo_position: Option<(HWND, i32, i32, i32, i32)>,
     list_view: Option<ListView>,
-    grid: Option<Grid>,
+    grid: Option<Box<dyn MountedGrid>>,
     progress: ProgressBar,
     slider: Slider,
     input_attached: bool,
@@ -301,7 +299,6 @@ impl View {
         } else {
             None
         };
-        let grid = (kind == Control::DataGrid).then(Grid::default);
         let toolbar = (kind == Control::Toolbar).then(|| {
             Toolbar::initialize(handle);
             Toolbar::default()
@@ -311,11 +308,12 @@ impl View {
                 .then(|| Picture::new(handle))
                 .transpose()?;
             let shader = (kind == Control::ShaderView)
-                .then(|| ShaderView::attach(handle))
+                .then(|| shader::attach(handle))
                 .transpose()?;
-            Ok((picture, shader))
+            let grid = (kind == Control::DataGrid).then(grid::mount).transpose()?;
+            Ok((picture, shader, grid))
         };
-        let (picture, shader) = mount_picture().inspect_err(|_| {
+        let (picture, shader, grid) = mount_picture().inspect_err(|_| {
             // SAFETY: The failed control mount belongs to this thread.
             unsafe { DestroyWindow(handle) };
         })?;
@@ -732,7 +730,7 @@ impl Surface {
         unsafe {
             let style = GetWindowLongPtrW(self.window, GWL_EXSTYLE);
             if ((style & WS_EX_ACCEPTFILES as isize) != 0) != accepted {
-                DragAcceptFiles(self.window, i32::from(accepted));
+                crate::effects::accept_drops(self.window, accepted);
             }
         }
     }
@@ -983,10 +981,10 @@ impl Surface {
         self.shader_at(key)?.pixel(x, y)
     }
 
-    fn shader_at(&self, key: Key) -> Result<&ShaderView> {
+    fn shader_at(&self, key: Key) -> Result<&dyn ShaderView> {
         self.views
             .get(&key)
-            .and_then(|view| view.shader.as_ref())
+            .and_then(|view| view.shader.as_deref())
             .ok_or("step requires a shader view".into())
     }
 
@@ -1094,14 +1092,17 @@ impl Surface {
         Some((view.handle, view.list_view.as_ref()?))
     }
 
-    pub(crate) fn grid(&self, key: Key) -> Option<(HWND, &Grid)> {
+    pub(crate) fn grid(&self, key: Key) -> Option<(HWND, &dyn MountedGrid)> {
         let view = self.views.get(&key)?;
-        Some((view.handle, view.grid.as_ref()?))
+        Some((view.handle, view.grid.as_deref()?))
     }
 
-    pub(crate) fn grid_mut(&mut self, key: Key) -> Option<(HWND, &mut Grid)> {
+    pub(crate) fn grid_mut(
+        &mut self,
+        key: Key,
+    ) -> Option<(HWND, &mut (dyn MountedGrid + 'static))> {
         let view = self.views.get_mut(&key)?;
-        Some((view.handle, view.grid.as_mut()?))
+        Some((view.handle, view.grid.as_deref_mut()?))
     }
 
     pub(crate) fn refresh_automation_interaction(&self) {
@@ -1119,7 +1120,9 @@ impl Surface {
             let hwnd = view.handle;
             view.grid.iter_mut().flat_map(move |grid| {
                 grid.refresh_automation_interaction(hwnd);
-                grid.take_automation().map(move |action| (key, action))
+                grid.take_automation()
+                    .into_iter()
+                    .map(move |action| (key, action))
             })
         })
     }
@@ -1333,7 +1336,7 @@ impl Surface {
                 report.measure(view.handle, font, dpi)?;
             }
             if let Some(grid) = &mut view.grid {
-                grid.report.measure(view.handle, font, dpi)?;
+                grid.report_mut().measure(view.handle, font, dpi)?;
             }
         }
         self.scroll_position =
@@ -2462,7 +2465,7 @@ fn natural(
             max_width,
             view.list_view
                 .as_ref()
-                .or_else(|| view.grid.as_ref().map(|grid| &grid.report))
+                .or_else(|| view.grid.as_ref().map(|grid| grid.report()))
                 .unwrap()
                 .height(view.handle, number(node, "visible-rows", 8), dpi)
                 + detail_height,

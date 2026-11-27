@@ -1,10 +1,12 @@
-app [main] { pf: platform "../../../platform/main.roc" }
+app [main, native] { pf: platform "../../../platform/main.roc" }
 
 import pf.Engine exposing [Elem, In, Root, State]
 import pf.Win
 
 main : Engine.Program(_)
 main = Engine.program(|| Engine.state(0.I64, view))
+
+native = Win.Features.use([Win.Features.image_codecs!])
 
 CounterStyle := {
 	appearance : Win.Ui.AppearanceProps ?? { accent: CustomAccent({ red: 33, green: 100, blue: 146 }) },

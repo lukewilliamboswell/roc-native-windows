@@ -903,7 +903,7 @@ impl App {
                     if !paste {
                         return Ok(false);
                     }
-                    if let Some(intent) = grid.paste(grid_key, crate::grid_clipboard::read(root)) {
+                    if let Some(intent) = grid.paste_native(grid_key, root) {
                         self.grid_intents.push_back(intent);
                         return self.queue_grid().map(|()| true);
                     }
@@ -997,7 +997,7 @@ fn modifiers() -> u8 {
     }
 }
 
-fn paths_from_drop(drop: HDROP) -> (Option<POINT>, Vec<PathBuf>) {
+pub(crate) fn paths_from_drop(drop: HDROP) -> (Option<POINT>, Vec<PathBuf>) {
     let mut paths = Vec::new();
     let mut point = POINT::default();
     let client;
@@ -1378,7 +1378,9 @@ pub(crate) unsafe extern "system" fn window_proc(
             | WM_DWMCOLORIZATIONCOLORCHANGED
             | APPLY_PENDING_EDIT
             | APPLY_TREE_INTENT => {
-                let paths = (message == WM_DROPFILES).then(|| paths_from_drop(wparam as HDROP));
+                let paths = (message == WM_DROPFILES)
+                    .then(|| crate::effects::take_drop(wparam as HDROP))
+                    .flatten();
                 let handled = APP.with(|state| {
                     let Ok(mut state) = state.try_borrow_mut() else {
                         return Ok(false);

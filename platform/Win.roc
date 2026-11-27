@@ -1,4 +1,5 @@
 import Clipboard
+import Features
 import Files
 import System
 import Ui
@@ -6,6 +7,7 @@ import Ui
 ## Windows controls, effects, and packaged resources.
 Win := [].{
 	Clipboard : Clipboard
+	Features : Features
 	Files : Files
 	System : System
 	Ui : Ui

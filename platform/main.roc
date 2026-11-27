@@ -7,7 +7,8 @@
 ## engine package.
 platform ""
 	requires {
-		[Store : st] for main : Engine.Program(st)
+		[Store : st] for main : Engine.Program(st),
+		native : Features.Config
 	}
 	exposes [Clipboard, Engine, Files, Layout, System, Ui, Win, Wire, Worker]
 	packages { engine: "https://github.com/lukewilliamboswell/roc-signals/releases/download/0.8.0-rc2/engine-GKiw1oqhZ1Q3sWgo1mSinHwACzFUCU8cCZPRY7SXYSgh.tar.zst" }
@@ -17,7 +18,7 @@ platform ""
 		"roc_engine_event": event_for_host,
 		"roc_engine_files": files_for_host,
 		"roc_engine_forget": forget_for_host,
-		"roc_engine_init": init_for_host,
+		"roc_engine_init": init_for_host!,
 		"roc_engine_keys": keys_for_host,
 		"roc_engine_prepare": prepare_for_host!,
 		"roc_engine_version": version_for_host,
@@ -31,6 +32,14 @@ platform ""
 		"roc_task_open": Hosted.open!,
 		"roc_task_read": Hosted.read!,
 		"roc_task_size": Hosted.size!,
+		"roc_windows_register_clipboard": Features.clipboard!,
+		"roc_windows_register_direct3d": Features.direct3d!,
+		"roc_windows_register_files": Features.files!,
+		"roc_windows_register_grid": Features.grid!,
+		"roc_windows_register_http": Features.http!,
+		"roc_windows_register_image_codecs": Features.image_codecs!,
+		"roc_windows_register_taskbar": Features.taskbar!,
+		"roc_windows_register_workers": Features.workers!,
 	}
 	targets: {
 		inputs_dir: "targets/",
@@ -42,6 +51,7 @@ import engine.EngineHost
 import Clipboard
 import Effects
 import Engine
+import Features
 import Files
 import Hosted
 import Layout
@@ -77,8 +87,11 @@ keys_for_host : () -> List(U8)
 keys_for_host = || ((EngineHost.driver(main.with_ports(native_ports()))).keys)()
 
 ## Mount with the boot bytes the host read for those declarations.
-init_for_host : List(U8) -> Step
-init_for_host = |boot| {
+init_for_host! : List(U8) => Step
+init_for_host! = |boot| {
+	for register! in native.register {
+		_ = register!()
+	}
 	(state, cmds, work) = ((EngineHost.driver(main.with_ports(native_ports()))).init)(boot)
 	{ cmds, state: Box.box(state), work }
 }

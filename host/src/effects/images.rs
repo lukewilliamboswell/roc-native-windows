@@ -2,7 +2,7 @@
 
 use super::files::{self, Entry};
 use crate::Result;
-use crate::raster::{MAX_ENCODED_BYTES, Pixels, decode_bytes, supports};
+use crate::raster::{BytesDecoder, MAX_ENCODED_BYTES, Pixels, supports};
 use crate::wire::Reader;
 use std::sync::Arc;
 
@@ -30,7 +30,7 @@ impl Request {
         })
     }
 
-    pub(super) fn decode(self) -> std::result::Result<Arc<Pixels>, u8> {
+    pub(super) fn decode(self, decode_bytes: BytesDecoder) -> std::result::Result<Arc<Pixels>, u8> {
         if self.len > MAX_ENCODED_BYTES as u64 {
             return Err(3);
         }

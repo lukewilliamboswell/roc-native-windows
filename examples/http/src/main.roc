@@ -1,10 +1,12 @@
-app [main] { pf: platform "../../../platform/main.roc" }
+app [main, native] { pf: platform "../../../platform/main.roc" }
 
 import pf.Engine exposing [Elem, Signal]
 import pf.Win
 
 main : Engine.Program(_)
 main = Engine.program_store({}, |_boot| store, |_boot| view())
+
+native = Win.Features.use([Win.Features.http!, Win.Features.image_codecs!, Win.Features.taskbar!, Win.Features.clipboard!])
 
 Request : { url : Str, serial : U64, phase : Phase }
 

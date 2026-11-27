@@ -1,6 +1,7 @@
 use super::http_policy::{Policy, Target};
 use super::{MAX_TIMEOUT, Result, put_string, tagged};
 use crate::wire::Reader;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::io;
@@ -13,6 +14,22 @@ use windows_sys::Win32::UI::Shell::UrlCombineW;
 const MAX_BODY: usize = 16 << 20;
 const MAX_HEADERS: usize = 256 << 10;
 const MAX_REDIRECTS: usize = 20;
+
+pub(super) type Transport = fn(Request, Target, &Policy, &AtomicBool, &dyn Fn(Vec<u8>)) -> Vec<u8>;
+
+thread_local! {
+    static TRANSPORT: Cell<Option<Transport>> = const { Cell::new(None) };
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn roc_windows_register_http() -> u8 {
+    TRANSPORT.set(Some(Request::run));
+    0
+}
+
+pub(super) fn transport() -> Option<Transport> {
+    TRANSPORT.get()
+}
 
 enum Hop {
     Response(Vec<u8>),

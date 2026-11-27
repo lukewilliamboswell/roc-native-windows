@@ -242,7 +242,36 @@ fn tiff_orientation(tiff: &[u8]) -> Option<u16> {
 }
 
 #[cfg(windows)]
-pub(crate) use native::{decode_asset, decode_bytes};
+pub(crate) use native::decode_asset;
+
+#[cfg(windows)]
+pub(crate) type AssetDecoder = fn(&Path, &str) -> Result<std::sync::Arc<Pixels>>;
+
+#[cfg(windows)]
+pub(crate) type BytesDecoder = fn(&[u8]) -> Result<std::sync::Arc<Pixels>>;
+
+#[cfg(windows)]
+thread_local! {
+    static DECODERS: std::cell::Cell<Option<(AssetDecoder, BytesDecoder)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(windows)]
+#[unsafe(no_mangle)]
+extern "C" fn roc_windows_register_image_codecs() -> u8 {
+    register_codecs();
+    0
+}
+
+#[cfg(windows)]
+pub(crate) fn register_codecs() {
+    DECODERS.set(Some((native::decode_asset, native::decode_bytes)));
+}
+
+#[cfg(windows)]
+pub(crate) fn decoders() -> Option<(AssetDecoder, BytesDecoder)> {
+    DECODERS.get()
+}
 
 #[cfg(windows)]
 mod native {
@@ -436,13 +465,13 @@ mod tests {
             0x17, 0x00, 0x00, 0xbd, 0xf5, 0x0a, 0xf7, 0x1a, 0x8e, 0x02, 0x8d, 0x00, 0x00, 0x00,
             0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ];
-        let decoded = decode_bytes(&png).unwrap();
+        let decoded = native::decode_bytes(&png).unwrap();
         assert_eq!((decoded.width, decoded.height), (4, 2));
         assert_eq!(
             &decoded.bgra[..16],
             &[0, 0, 255, 255, 0, 0, 128, 128, 0, 0, 0, 0, 255, 0, 0, 255],
         );
-        assert!(decode_bytes(&png[..20]).is_err());
+        assert!(native::decode_bytes(&png[..20]).is_err());
     }
 
     #[test]

@@ -148,11 +148,63 @@ build! = |roc| {
 	for target in windows_targets {
 		for example in examples {
 			app_tool!(roc, "examples/${example}", ["build", "--target", target.roc])?
+			check_linked_features!("examples/${example}/build/${target.roc}/${example}.exe", example)?
 		}
 		app_tool!(roc, "tests/native-input", ["build", "--target", target.roc])?
+		check_linked_features!("tests/native-input/build/${target.roc}/native-input.exe", "native-input")?
 	}
 	Ok({})
 }
+
+check_linked_features! = |path, example| {
+	bytes = Path.read_bytes!(Path.utf8(path)) ? |error| "Could not read ${path}: ${Str.inspect(error)}"
+	pe = pe_number(bytes, 60, 4)
+	header = pe + 24
+	if bytes.sublist({ start: pe, len: 4 }) != [80, 69, 0, 0] or pe_number(bytes, pe + 12, 8) != 0 {
+		return Err("Expected a shipping PE without a COFF symbol table: ${path}")
+	}
+	dlls = pe_imports(bytes, pe, pe_number(bytes, header + 120, 4)) ? |detail| "${path}: ${detail}"
+	if dlls.contains("winhttp.dll") != (example == "http") {
+		return Err("Unexpected WinHTTP import configuration: ${path}")
+	}
+	if dlls.contains("d3d11.dll") != ["files", "workers"].contains(example) {
+		return Err("Unexpected Direct3D import configuration: ${path}")
+	}
+	Ok({})
+}
+
+pe_imports : List(U8), U64, U64 -> Try(List(Str), Str)
+pe_imports = |bytes, pe, imports_rva| {
+	count = pe_number(bytes, pe + 6, 2)
+	table = pe + 24 + pe_number(bytes, pe + 20, 2)
+	if count == 0 or count > 96 or table + 40 * count > bytes.len() or imports_rva == 0 {
+		return Err("invalid PE import or section table")
+	}
+	var $sections = []
+	for index in (0.U64).until(count) {
+		at = table + 40 * index
+		$sections = $sections.append({ rva: pe_number(bytes, at + 12, 4), size: pe_number(bytes, at + 16, 4), offset: pe_number(bytes, at + 20, 4) })
+	}
+	sections = $sections
+	locate = |rva| sections.find_first(|section| rva >= section.rva and rva - section.rva < section.size).map_ok(|section| section.offset + rva - section.rva)
+	start = locate(imports_rva) ? |_| "PE imports are outside the image sections"
+	var $dlls = []
+	for index in (0.U64).until(128) {
+		descriptor = start + 20 * index
+		if (descriptor + 20 > bytes.len()) return Err("truncated PE import table")
+		name = pe_number(bytes, descriptor + 12, 4)
+		if (name == 0) return Ok($dlls)
+		offset = locate(name) ? |_| "PE import name is outside the image sections"
+		field = bytes.sublist({ start: offset, len: 128 })
+		if (!field.contains(0)) return Err("unterminated PE import name")
+		$dlls = $dlls.append(Str.from_utf8_lossy(field.split_on(0).first() ?? []))
+	}
+	Err("missing PE import terminator")
+}
+
+pe_number : List(U8), U64, U64 -> U64
+pe_number = |bytes, at, width|
+	bytes.sublist({ start: at, len: width }).fold({ value: 0.U64, shift: 0.U8 }, |acc, byte| { value: acc.value + byte.to_u64().shl_wrap(acc.shift), shift: acc.shift + 8 }).value
 
 hosts! = || {
 	version = command("zig", ["version"]).capture!() ? |error| "Could not determine the Zig version: ${Str.inspect(error)}"

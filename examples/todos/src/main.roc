@@ -1,4 +1,4 @@
-app [main] {
+app [main, native] {
 	pf: platform "../../../platform/main.roc",
 	time: "https://github.com/lukewilliamboswell/roc-time/releases/download/0.4.0/roc-time-5uLL89o7nJvrtgHt1NamZMgjp76Tb5AaoMzzE8F2xfqD.tar.zst",
 }
@@ -9,6 +9,8 @@ import TaskList exposing [Task]
 
 main : Engine.Program(_)
 main = Engine.program_store({ zone_days: 366 }, |boot| store.with_initial(cells.clock, { now: boot.now_ms, zone: boot.zone }), |_boot| view())
+
+native = Win.Features.use([Win.Features.image_codecs!])
 
 Clock : { now : I64, zone : Engine.Zone }
 

@@ -53,7 +53,7 @@ pub(crate) mod native {
     use super::{Command, Replay};
     use crate::Result;
     use crate::progress::Progress;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeSet;
     use std::sync::OnceLock;
     use windows::Win32::Foundation::HWND as ShellWindow;
@@ -70,7 +70,14 @@ pub(crate) mod native {
 
     static BUTTON_CREATED: OnceLock<u32> = OnceLock::new();
     thread_local! {
+        static PLAYER: Cell<Option<fn(&mut Taskbar)>> = const { Cell::new(None) };
         static REPLAY_PENDING: RefCell<BTreeSet<usize>> = const { RefCell::new(BTreeSet::new()) };
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn roc_windows_register_taskbar() -> u8 {
+        PLAYER.set(Some(Taskbar::reconcile));
+        0
     }
 
     pub(crate) struct Taskbar {
@@ -79,6 +86,7 @@ pub(crate) mod native {
         shell: Option<ITaskbarList3>,
         apartment: Option<Apartment>,
         warned: bool,
+        play: fn(&mut Self),
     }
 
     impl Drop for Taskbar {
@@ -88,17 +96,19 @@ pub(crate) mod native {
     }
 
     impl Taskbar {
-        pub(crate) fn new(window: HWND) -> Self {
+        pub(crate) fn new(window: HWND) -> Option<Self> {
+            let play = PLAYER.get()?;
             // SAFETY: User32 reads the static, terminated message name.
             BUTTON_CREATED
                 .get_or_init(|| unsafe { RegisterWindowMessageW(w!("TaskbarButtonCreated")) });
-            Self {
+            Some(Self {
                 window: ShellWindow(window),
                 playback: Replay::default(),
                 shell: None,
                 apartment: None,
                 warned: false,
-            }
+                play,
+            })
         }
 
         pub(crate) fn queue_if_button_created(hwnd: HWND, message: u32) -> bool {
@@ -117,7 +127,7 @@ pub(crate) mod native {
             {
                 self.shell = None;
                 self.playback.button_created();
-                self.reconcile();
+                (self.play)(self);
             }
         }
 
@@ -126,7 +136,7 @@ pub(crate) mod native {
             if requested != Progress::Idle && BUTTON_CREATED.get() == Some(&0) {
                 self.unavailable("could not register TaskbarButtonCreated");
             } else {
-                self.reconcile();
+                (self.play)(self);
             }
         }
 

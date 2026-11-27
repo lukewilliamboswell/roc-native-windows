@@ -1,4 +1,4 @@
-app [main] { pf: platform "../../../platform/main.roc" }
+app [main, native] { pf: platform "../../../platform/main.roc" }
 
 import Stock
 import StockStyle
@@ -8,6 +8,8 @@ import pf.Worker
 
 main : Engine.Program(_)
 main = Engine.program_store({}, |_| store, |_| view()).with_workers([reconcile.registration()])
+
+native = Win.Features.use([Win.Features.direct3d!, Win.Features.workers!, Win.Features.grid!])
 
 reconcile : Worker.Task(List(Stock.Count), Stock.Summary, Worker.Never)
 reconcile = Worker.task({

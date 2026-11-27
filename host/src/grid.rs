@@ -5,7 +5,8 @@ use crate::grid_clipboard::ClipboardText;
 use crate::list_view::{ListView, Report};
 use crate::view::{child, position, set_text, window_text};
 use crate::wire::{Key, Listener, Tree};
-use std::collections::BTreeMap;
+use std::cell::Cell as Slot;
+use std::collections::{BTreeMap, VecDeque};
 use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{DrawFocusRect, HFONT, InvalidateRect, MapWindowPoints};
@@ -77,8 +78,8 @@ impl Drop for Editing {
 }
 
 #[derive(Default)]
-pub(crate) struct Grid {
-    pub(crate) report: ListView,
+struct Grid {
+    report: ListView,
     cells: BTreeMap<Key, Metadata>,
     active: Option<Key>,
     anchor: Option<Key>,
@@ -93,7 +94,192 @@ pub(crate) struct Grid {
 }
 
 impl Grid {
-    pub(crate) fn sync(
+    fn editable(&self, key: Key) -> Option<Cell> {
+        if !self.enabled {
+            return None;
+        }
+        let meta = self.cells.get(&key)?;
+        Some(Cell {
+            key,
+            listener: meta.commit?,
+            value: self.text(meta.position.0, meta.position.1).into(),
+        })
+    }
+
+    fn range(&self) -> Option<automation::Range> {
+        let active = self.active?;
+        let (row, column) = self.cells[&active].position;
+        let (anchor_row, anchor_column) = self.cells[&self.anchor.unwrap_or(active)].position;
+        Some((
+            row.min(anchor_row),
+            column.min(anchor_column),
+            row.max(anchor_row),
+            column.max(anchor_column),
+        ))
+    }
+
+    fn move_to(&mut self, hwnd: HWND, row: usize, column: usize) -> Result<()> {
+        let record = self
+            .report
+            .projection()
+            .rows
+            .get(row)
+            .ok_or("grid row is not mounted")?;
+        self.revision = self.revision.wrapping_add(1);
+        self.active = Some(*record.mounted.get(column).ok_or("unknown grid column")?);
+        self.report.select(hwnd, Some(&record.key))?;
+        reveal_cell(hwnd, row, column);
+        Ok(())
+    }
+
+    fn interaction_enabled(&self, hwnd: HWND) -> bool {
+        // SAFETY: These checks run on the UI thread with the mounted grid HWND.
+        self.enabled
+            && unsafe {
+                IsWindowVisible(hwnd) != 0
+                    && IsWindowEnabled(hwnd) != 0
+                    && IsWindowEnabled(GetAncestor(hwnd, GA_ROOT)) != 0
+            }
+    }
+}
+
+fn reveal_cell(hwnd: HWND, row: usize, column: usize) {
+    // SAFETY: The live report is owned by this grid on the UI thread.
+    unsafe {
+        SendMessageW(hwnd, LVM_ENSUREVISIBLE, row, 0);
+        if let Some(rect) = subitem_rect(hwnd, row, column) {
+            let mut client = RECT::default();
+            GetClientRect(hwnd, &mut client);
+            let scroll = if rect.left < 0 {
+                rect.left
+            } else {
+                (rect.right - client.right).clamp(0, rect.left)
+            };
+            if scroll != 0 {
+                SendMessageW(hwnd, LVM_SCROLL, scroll as usize, 0);
+            }
+        }
+        InvalidateRect(hwnd, null_mut(), 0);
+    }
+}
+
+fn rect_to_uia(rect: RECT) -> windows::Win32::UI::Accessibility::UiaRect {
+    windows::Win32::UI::Accessibility::UiaRect {
+        left: f64::from(rect.left),
+        top: f64::from(rect.top),
+        width: f64::from((rect.right - rect.left).max(0)),
+        height: f64::from((rect.bottom - rect.top).max(0)),
+    }
+}
+
+fn scroll_axis(hwnd: HWND, axis: i32) -> automation::ScrollAxis {
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_PAGE | SIF_POS | SIF_RANGE,
+        ..SCROLLINFO::default()
+    };
+    // SAFETY: The report lives on our UI thread and supplies the scrollbar state.
+    if unsafe { GetScrollInfo(hwnd, axis, &mut info) } == 0 {
+        return automation::ScrollAxis::default();
+    }
+    let length = (info.nMax - info.nMin + 1).max(0);
+    let page = (info.nPage as i32).clamp(0, length);
+    automation::ScrollAxis {
+        position: (info.nPos - info.nMin).clamp(0, length - page),
+        length,
+        page,
+    }
+}
+
+impl Grid {
+    pub(crate) fn text(&self, row: usize, column: usize) -> &str {
+        &self.report.projection().rows[row].cells[column]
+    }
+}
+
+pub(crate) trait MountedGrid {
+    fn report(&self) -> &ListView;
+    fn report_mut(&mut self) -> &mut ListView;
+    fn sync(
+        &mut self,
+        tree: &Tree,
+        key: Key,
+        hwnd: HWND,
+        font: HFONT,
+        dpi: u32,
+        enabled: bool,
+    ) -> Result<()>;
+    fn resolve(&self, intent: Intent) -> Option<(u32, Listener, String)>;
+    fn accepts_paste(&self) -> bool;
+    fn paste(&self, key: Key, clipboard: ClipboardText) -> Option<Intent>;
+    fn paste_native(&self, key: Key, owner: HWND) -> Option<Intent>;
+    fn editing(&self, hwnd: HWND) -> bool;
+    fn cancel(&mut self, hwnd: HWND, refocus: bool);
+    fn font(&self, font: HFONT);
+    fn activate(&mut self, hwnd: HWND, row: usize, column: usize) -> Result<()>;
+    fn select_range(
+        &mut self,
+        hwnd: HWND,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) -> Result<()>;
+    fn mount_automation(&mut self, hwnd: HWND, name: &str) -> Result<()>;
+    fn take_automation(&mut self) -> VecDeque<Action>;
+    fn automation_action(&mut self, key: Key, hwnd: HWND, action: Action)
+    -> Result<Option<Intent>>;
+    fn publish_automation(&mut self, hwnd: HWND);
+    fn refresh_automation_interaction(&self, hwnd: HWND);
+    fn navigate(&mut self, hwnd: HWND, key: u16, extend: bool) -> Result<()>;
+    fn click(&mut self, hwnd: HWND, point: POINT) -> Result<bool>;
+    fn begin(&mut self, hwnd: HWND, window: HWND, font: HFONT) -> Result<()>;
+    fn composition(&self) -> bool;
+    fn commit(&mut self, key: Key, hwnd: HWND) -> Option<Intent>;
+    fn fill(&self, text: &str) -> Result<()>;
+    fn location(&self, row: usize, column: &str) -> Result<(usize, usize)>;
+    fn native_text(&self, hwnd: HWND, row: usize, column: usize) -> String;
+    fn error(&self, row: usize, column: usize) -> &str;
+    fn active(&self, row: usize, column: usize) -> bool;
+    fn status_text(&self) -> String;
+    fn arrange(
+        &mut self,
+        hwnd: HWND,
+        window: HWND,
+        font: HFONT,
+        status_height: i32,
+    ) -> Result<HWND>;
+    fn position_editor(&mut self, hwnd: HWND, window: HWND);
+    fn draw(&self, hwnd: HWND, details: &NMCUSTOMDRAW) -> isize;
+}
+
+type GridFactory = fn() -> Box<dyn MountedGrid>;
+
+thread_local! {
+    static FACTORY: Slot<Option<GridFactory>> = const { Slot::new(None) };
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn roc_windows_register_grid() -> u8 {
+    FACTORY.set(Some(|| Box::new(Grid::default())));
+    0
+}
+
+pub(crate) fn mount() -> Result<Box<dyn MountedGrid>> {
+    let factory = FACTORY
+        .get()
+        .ok_or("data grids require Win.Features.grid!")?;
+    Ok(factory())
+}
+
+impl MountedGrid for Grid {
+    fn report(&self) -> &ListView {
+        &self.report
+    }
+
+    fn report_mut(&mut self) -> &mut ListView {
+        &mut self.report
+    }
+
+    fn sync(
         &mut self,
         tree: &Tree,
         key: Key,
@@ -150,19 +336,7 @@ impl Grid {
         Ok(())
     }
 
-    fn editable(&self, key: Key) -> Option<Cell> {
-        if !self.enabled {
-            return None;
-        }
-        let meta = self.cells.get(&key)?;
-        Some(Cell {
-            key,
-            listener: meta.commit?,
-            value: self.text(meta.position.0, meta.position.1).into(),
-        })
-    }
-
-    pub(crate) fn resolve(&self, intent: Intent) -> Option<(u32, Listener, String)> {
+    fn resolve(&self, intent: Intent) -> Option<(u32, Listener, String)> {
         let (node, listener) = match intent.source {
             IntentSource::Edit(cell) if self.editable(cell.key).as_ref() == Some(&cell) => {
                 cell.listener
@@ -177,11 +351,11 @@ impl Grid {
         Some((node, listener, intent.text))
     }
 
-    pub(crate) fn accepts_paste(&self) -> bool {
+    fn accepts_paste(&self) -> bool {
         self.enabled && self.paste.is_some() && self.active.is_some() && self.editing.is_none()
     }
 
-    pub(crate) fn paste(&self, key: Key, clipboard: ClipboardText) -> Option<Intent> {
+    fn paste(&self, key: Key, clipboard: ClipboardText) -> Option<Intent> {
         let listener = self.paste.filter(|_| self.accepts_paste())?;
         let (top, left, bottom, right) = self.range()?;
         let report = self.report.projection();
@@ -229,13 +403,17 @@ impl Grid {
         })
     }
 
-    pub(crate) fn editing(&self, hwnd: HWND) -> bool {
+    fn paste_native(&self, key: Key, owner: HWND) -> Option<Intent> {
+        self.paste(key, crate::grid_clipboard::read(owner))
+    }
+
+    fn editing(&self, hwnd: HWND) -> bool {
         self.editing
             .as_ref()
             .is_some_and(|editing| editing.handle == hwnd)
     }
 
-    pub(crate) fn cancel(&mut self, hwnd: HWND, refocus: bool) {
+    fn cancel(&mut self, hwnd: HWND, refocus: bool) {
         let Some(editing) = self.editing.take() else {
             return;
         };
@@ -249,7 +427,7 @@ impl Grid {
         }
     }
 
-    pub(crate) fn font(&self, font: HFONT) {
+    fn font(&self, font: HFONT) {
         // SAFETY: These optional surface windows live on the UI thread.
         unsafe {
             if let Some(editing) = &self.editing {
@@ -261,12 +439,12 @@ impl Grid {
         }
     }
 
-    pub(crate) fn activate(&mut self, hwnd: HWND, row: usize, column: usize) -> Result<()> {
+    fn activate(&mut self, hwnd: HWND, row: usize, column: usize) -> Result<()> {
         self.anchor = None;
         self.move_to(hwnd, row, column)
     }
 
-    pub(crate) fn select_range(
+    fn select_range(
         &mut self,
         hwnd: HWND,
         start: (usize, usize),
@@ -276,33 +454,7 @@ impl Grid {
         self.move_to(hwnd, end.0, end.1)
     }
 
-    fn range(&self) -> Option<automation::Range> {
-        let active = self.active?;
-        let (row, column) = self.cells[&active].position;
-        let (anchor_row, anchor_column) = self.cells[&self.anchor.unwrap_or(active)].position;
-        Some((
-            row.min(anchor_row),
-            column.min(anchor_column),
-            row.max(anchor_row),
-            column.max(anchor_column),
-        ))
-    }
-
-    fn move_to(&mut self, hwnd: HWND, row: usize, column: usize) -> Result<()> {
-        let record = self
-            .report
-            .projection()
-            .rows
-            .get(row)
-            .ok_or("grid row is not mounted")?;
-        self.revision = self.revision.wrapping_add(1);
-        self.active = Some(*record.mounted.get(column).ok_or("unknown grid column")?);
-        self.report.select(hwnd, Some(&record.key))?;
-        reveal_cell(hwnd, row, column);
-        Ok(())
-    }
-
-    pub(crate) fn mount_automation(&mut self, hwnd: HWND, name: &str) -> Result<()> {
+    fn mount_automation(&mut self, hwnd: HWND, name: &str) -> Result<()> {
         if self.automation.is_none() {
             self.automation = Some(Projection::new(hwnd)?);
         }
@@ -312,17 +464,16 @@ impl Grid {
         Ok(())
     }
 
-    pub(crate) fn take_automation(&mut self) -> impl Iterator<Item = Action> + use<> {
+    fn take_automation(&mut self) -> VecDeque<Action> {
         self.automation
             .as_mut()
             .map_or_else(Default::default, |automation| {
                 automation.announce();
                 automation.drain()
             })
-            .into_iter()
     }
 
-    pub(crate) fn automation_action(
+    fn automation_action(
         &mut self,
         key: Key,
         hwnd: HWND,
@@ -390,7 +541,7 @@ impl Grid {
         Ok(None)
     }
 
-    pub(crate) fn publish_automation(&mut self, hwnd: HWND) {
+    fn publish_automation(&mut self, hwnd: HWND) {
         let Some(automation) = &self.automation else {
             return;
         };
@@ -468,7 +619,7 @@ impl Grid {
         });
     }
 
-    pub(crate) fn refresh_automation_interaction(&self, hwnd: HWND) {
+    fn refresh_automation_interaction(&self, hwnd: HWND) {
         if let Some(automation) = &self.automation {
             // SAFETY: GetFocus refers to the UI thread that owns the live grid.
             let focus = unsafe { GetFocus() };
@@ -480,67 +631,7 @@ impl Grid {
         }
     }
 
-    fn interaction_enabled(&self, hwnd: HWND) -> bool {
-        // SAFETY: These checks run on the UI thread with the mounted grid HWND.
-        self.enabled
-            && unsafe {
-                IsWindowVisible(hwnd) != 0
-                    && IsWindowEnabled(hwnd) != 0
-                    && IsWindowEnabled(GetAncestor(hwnd, GA_ROOT)) != 0
-            }
-    }
-}
-
-fn reveal_cell(hwnd: HWND, row: usize, column: usize) {
-    // SAFETY: The live report is owned by this grid on the UI thread.
-    unsafe {
-        SendMessageW(hwnd, LVM_ENSUREVISIBLE, row, 0);
-        if let Some(rect) = subitem_rect(hwnd, row, column) {
-            let mut client = RECT::default();
-            GetClientRect(hwnd, &mut client);
-            let scroll = if rect.left < 0 {
-                rect.left
-            } else {
-                (rect.right - client.right).clamp(0, rect.left)
-            };
-            if scroll != 0 {
-                SendMessageW(hwnd, LVM_SCROLL, scroll as usize, 0);
-            }
-        }
-        InvalidateRect(hwnd, null_mut(), 0);
-    }
-}
-
-fn rect_to_uia(rect: RECT) -> windows::Win32::UI::Accessibility::UiaRect {
-    windows::Win32::UI::Accessibility::UiaRect {
-        left: f64::from(rect.left),
-        top: f64::from(rect.top),
-        width: f64::from((rect.right - rect.left).max(0)),
-        height: f64::from((rect.bottom - rect.top).max(0)),
-    }
-}
-
-fn scroll_axis(hwnd: HWND, axis: i32) -> automation::ScrollAxis {
-    let mut info = SCROLLINFO {
-        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-        fMask: SIF_PAGE | SIF_POS | SIF_RANGE,
-        ..SCROLLINFO::default()
-    };
-    // SAFETY: The report lives on our UI thread and supplies the scrollbar state.
-    if unsafe { GetScrollInfo(hwnd, axis, &mut info) } == 0 {
-        return automation::ScrollAxis::default();
-    }
-    let length = (info.nMax - info.nMin + 1).max(0);
-    let page = (info.nPage as i32).clamp(0, length);
-    automation::ScrollAxis {
-        position: (info.nPos - info.nMin).clamp(0, length - page),
-        length,
-        page,
-    }
-}
-
-impl Grid {
-    pub(crate) fn navigate(&mut self, hwnd: HWND, key: u16, extend: bool) -> Result<()> {
+    fn navigate(&mut self, hwnd: HWND, key: u16, extend: bool) -> Result<()> {
         let report = self.report.projection();
         let Some(meta) = self.active.and_then(|id| self.cells.get(&id)) else {
             return Ok(());
@@ -561,7 +652,7 @@ impl Grid {
         self.move_to(hwnd, row, column)
     }
 
-    pub(crate) fn click(&mut self, hwnd: HWND, point: POINT) -> Result<bool> {
+    fn click(&mut self, hwnd: HWND, point: POINT) -> Result<bool> {
         let mut hit = LVHITTESTINFO {
             pt: point,
             ..LVHITTESTINFO::default()
@@ -575,7 +666,7 @@ impl Grid {
         Ok(true)
     }
 
-    pub(crate) fn begin(&mut self, hwnd: HWND, window: HWND, font: HFONT) -> Result<()> {
+    fn begin(&mut self, hwnd: HWND, window: HWND, font: HFONT) -> Result<()> {
         if self.editing.is_some() {
             return Ok(());
         }
@@ -628,7 +719,7 @@ impl Grid {
         Ok(())
     }
 
-    pub(crate) fn composition(&self) -> bool {
+    fn composition(&self) -> bool {
         let Some(editing) = &self.editing else {
             return false;
         };
@@ -644,7 +735,7 @@ impl Grid {
         }
     }
 
-    pub(crate) fn commit(&mut self, key: Key, hwnd: HWND) -> Option<Intent> {
+    fn commit(&mut self, key: Key, hwnd: HWND) -> Option<Intent> {
         let editing = self.editing.as_ref()?;
         let intent = Intent {
             grid: key,
@@ -655,7 +746,7 @@ impl Grid {
         Some(intent)
     }
 
-    pub(crate) fn fill(&self, text: &str) -> Result<()> {
+    fn fill(&self, text: &str) -> Result<()> {
         let editing = self.editing.as_ref().ok_or("no grid editor is open")?;
         if text.contains('\0') || text.encode_utf16().count() > TEXT_LIMIT {
             return Err("grid drafts allow at most 4096 UTF-16 units and no NUL".into());
@@ -664,7 +755,7 @@ impl Grid {
         Ok(())
     }
 
-    pub(crate) fn location(&self, row: usize, column: &str) -> Result<(usize, usize)> {
+    fn location(&self, row: usize, column: &str) -> Result<(usize, usize)> {
         let report = self.report.projection();
         if row >= report.rows.len() {
             return Err(format!("grid row {} is not mounted", row + 1));
@@ -677,11 +768,7 @@ impl Grid {
         Ok((row, column))
     }
 
-    pub(crate) fn text(&self, row: usize, column: usize) -> &str {
-        &self.report.projection().rows[row].cells[column]
-    }
-
-    pub(crate) fn native_text(&self, hwnd: HWND, row: usize, column: usize) -> String {
+    fn native_text(&self, hwnd: HWND, row: usize, column: usize) -> String {
         let size = self
             .text(row, column)
             .encode_utf16()
@@ -700,16 +787,16 @@ impl Grid {
         String::from_utf16_lossy(&utf16[..used.min(utf16.len())])
     }
 
-    pub(crate) fn error(&self, row: usize, column: usize) -> &str {
+    fn error(&self, row: usize, column: usize) -> &str {
         let key = self.report.projection().rows[row].mounted[column];
         &self.cells[&key].feedback
     }
 
-    pub(crate) fn active(&self, row: usize, column: usize) -> bool {
+    fn active(&self, row: usize, column: usize) -> bool {
         self.active == Some(self.report.projection().rows[row].mounted[column])
     }
 
-    pub(crate) fn status_text(&self) -> String {
+    fn status_text(&self) -> String {
         let mut status = if let Some(meta) = self.active.and_then(|key| self.cells.get(&key)) {
             let (row, column) = meta.position;
             let heading = &self.report.projection().columns[column].heading;
@@ -733,7 +820,7 @@ impl Grid {
         status
     }
 
-    pub(crate) fn arrange(
+    fn arrange(
         &mut self,
         hwnd: HWND,
         window: HWND,
@@ -768,7 +855,7 @@ impl Grid {
         Ok(self.status)
     }
 
-    pub(crate) fn position_editor(&mut self, hwnd: HWND, window: HWND) {
+    fn position_editor(&mut self, hwnd: HWND, window: HWND) {
         let Some(editing) = &self.editing else {
             return;
         };
@@ -792,7 +879,7 @@ impl Grid {
         );
     }
 
-    pub(crate) fn draw(&self, hwnd: HWND, details: &NMCUSTOMDRAW) -> isize {
+    fn draw(&self, hwnd: HWND, details: &NMCUSTOMDRAW) -> isize {
         match details.dwDrawStage {
             CDDS_PREPAINT => CDRF_NOTIFYPOSTPAINT as isize,
             CDDS_POSTPAINT => {

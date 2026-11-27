@@ -362,8 +362,11 @@ mod native {
                     let hwnd = window.0;
                     let surface = Surface::new(hwnd, self.preferences, self.font_registry.clone())?;
                     let icons = wanted.owner.is_none().then(|| WindowIcons::new(hwnd));
-                    let taskbar =
-                        (!self.driven && wanted.owner.is_none()).then(|| Taskbar::new(hwnd));
+                    let taskbar = if !self.driven && wanted.owner.is_none() {
+                        Taskbar::new(hwnd)
+                    } else {
+                        None
+                    };
                     self.handles.insert(hwnd as usize, id);
                     self.mounted.insert(
                         id,

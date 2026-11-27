@@ -1927,13 +1927,15 @@ app_name = |root| {
 
 simple_counter : Str -> Str
 simple_counter = |source_ref|
-	\\app [main] { pf: platform "${source_ref}" }
+	\\app [main, native] { pf: platform "${source_ref}" }
 	\\
 	\\import pf.Engine exposing [Elem, In, Root, State]
 	\\import pf.Win
 	\\
 	\\main : Engine.Program(_)
 	\\main = Engine.program(|| Engine.state(0.I64, view))
+	\\
+	\\native = Win.Features.use([])
 	\\
 	\\view : State(In(Root, I64), I64) -> Elem(In(Root, I64))
 	\\view = |count|

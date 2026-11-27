@@ -1396,7 +1396,7 @@ impl AnonStructB5d81caf03d08956 {
     /// `self` must own one live Roc reference for each refcounted field.
     pub unsafe fn decref(self, roc_host: &RocHost) {
         let value = self;
-        unsafe { decref_box_with(value.held as RocBox, core::mem::align_of::<CoreKept>(), true, Some(decref_box_payload_type6), roc_host); }
+        unsafe { decref_box_with(value.held as RocBox, core::mem::align_of::<CoreKept>(), true, Some(decref_box_payload_type7), roc_host); }
         unsafe { value.out.decref(roc_host); }
     }
 
@@ -1476,7 +1476,7 @@ impl AnonStructF29a1b847614096c {
 ///
 /// # Safety
 /// `value` must own one live Roc list reference.
-pub unsafe fn decref_list_of_box_of_type14(value: RocList<*mut u64>, roc_host: &RocHost) {
+pub unsafe fn decref_list_of_box_of_type15(value: RocList<*mut u64>, roc_host: &RocHost) {
     unsafe { value.release_with::<RocBoxSpineRelease<u64>>(roc_host); }
 }
 
@@ -1487,11 +1487,11 @@ pub unsafe fn decref_list_of_box_of_type14(value: RocList<*mut u64>, roc_host: &
 ///
 /// # Safety
 /// `value` must own one live Roc list reference.
-pub unsafe fn decref_list_of_box_of_type19(value: RocList<*mut u64>, roc_host: &RocHost) {
+pub unsafe fn decref_list_of_box_of_type20(value: RocList<*mut u64>, roc_host: &RocHost) {
     unsafe { value.release_with::<RocBoxSpineRelease<u64>>(roc_host); }
 }
 
-unsafe extern "C" fn decref_box_payload_type6(data_ptr: *mut c_void, roc_host: *mut RocHost) {
+unsafe extern "C" fn decref_box_payload_type7(data_ptr: *mut c_void, roc_host: *mut RocHost) {
     if data_ptr.is_null() || roc_host.is_null() {
         return;
     }
@@ -1600,6 +1600,38 @@ unsafe extern "C" {
     /// Hosted symbol for Hosted.size!
     /// Roc signature: U64 => U64
     pub fn roc_task_size(arg0: u64) -> u64;
+
+    /// Hosted symbol for Features.clipboard!
+    /// Roc signature: {} => U8
+    pub fn roc_windows_register_clipboard() -> u8;
+
+    /// Hosted symbol for Features.direct3d!
+    /// Roc signature: {} => U8
+    pub fn roc_windows_register_direct3d() -> u8;
+
+    /// Hosted symbol for Features.files!
+    /// Roc signature: {} => U8
+    pub fn roc_windows_register_files() -> u8;
+
+    /// Hosted symbol for Features.grid!
+    /// Roc signature: {} => U8
+    pub fn roc_windows_register_grid() -> u8;
+
+    /// Hosted symbol for Features.http!
+    /// Roc signature: {} => U8
+    pub fn roc_windows_register_http() -> u8;
+
+    /// Hosted symbol for Features.image_codecs!
+    /// Roc signature: {} => U8
+    pub fn roc_windows_register_image_codecs() -> u8;
+
+    /// Hosted symbol for Features.taskbar!
+    /// Roc signature: {} => U8
+    pub fn roc_windows_register_taskbar() -> u8;
+
+    /// Hosted symbol for Features.workers!
+    /// Roc signature: {} => U8
+    pub fn roc_windows_register_workers() -> u8;
 
 }
 
@@ -1772,7 +1804,7 @@ unsafe extern "C" {
     /// Entrypoint: forget_for_host
     pub fn roc_engine_forget(arg0: *mut CoreKept);
 
-    /// Entrypoint: init_for_host
+    /// Entrypoint: init_for_host!
     pub fn roc_engine_init(arg0: RocListWith<u8, false>) -> AnonStructF29a1b847614096c;
 
     /// Entrypoint: keys_for_host

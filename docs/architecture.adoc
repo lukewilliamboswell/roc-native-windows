@@ -21,6 +21,22 @@ worker retains textures and coalesces pending changes for each view.
 It reads back the committed frame for compositing in the native child
 window. Screenshots and recordings use that same frame.
 
+[#native-linking]
+== Link native features at startup
+
+An app's pure `native` configuration carries the registration functions
+it selects. The platform calls them on the UI thread before it mounts
+the first view. Registrations install function pointers or factories.
+The core calls optional native code through those registrations, so a
+direct reference from the core cannot keep the optional implementation
+in every executable. Worker jobs receive the selected function pointers
+when scheduled. Core control accessibility stays enabled, and an editable
+grid brings its accessibility provider with it.
+
+Use xref:apps.adoc#native-features[the feature configuration] to select
+implementations. Registration only supplies code. File choices and the
+manifest HTTP allowlist still control access to external resources.
+
 [#capability-boundary]
 == Authority at the application boundary
 

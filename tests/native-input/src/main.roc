@@ -1,9 +1,12 @@
-app [main] { pf: platform "../../../platform/main.roc" }
+app [main, native] { pf: platform "../../../platform/main.roc" }
 
 import pf.Engine
 import pf.Ui
+import pf.Win
 
 main = Engine.program_store({}, |_| store, |_| view())
+
+native = Win.Features.use([])
 
 store = Engine.store(
 	InputJig,

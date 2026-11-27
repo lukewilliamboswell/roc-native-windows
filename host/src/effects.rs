@@ -10,13 +10,15 @@ mod storage;
 mod system;
 mod workers;
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, POINT};
+use windows_sys::Win32::UI::Shell::{DragAcceptFiles, HDROP};
 
 use crate::clipboard;
 use crate::regional::{self, Snapshot};
@@ -34,6 +36,80 @@ const MAX_TIMEOUT: u32 = 600_000;
 const REFRESH_FAILED: u8 = 7;
 type Completion = (u32, Arc<AtomicBool>, Outcome);
 type Job = Box<dyn FnOnce(&AtomicBool, &dyn Fn(Vec<u8>)) -> Outcome + Send>;
+
+type WorkerRun = fn(workers::Order, &AtomicBool) -> Outcome;
+type NativeSave = fn(HWND, u64, u64, u64, &str) -> Result<()>;
+type FolderList = fn(folders::Request, &AtomicBool) -> Outcome;
+type CopyText = fn(HWND, &str) -> bool;
+type DroppedPaths = (Option<POINT>, Vec<PathBuf>);
+
+#[derive(Clone, Copy)]
+struct FileOperations {
+    open: fn(HWND, bool) -> Result<Option<files::Selection>>,
+    folder: fn(HWND) -> pickers::FolderChoice,
+    save: NativeSave,
+    run: fn(files::FileTask, &AtomicBool) -> Vec<u8>,
+    list: FolderList,
+    take_drop: fn(HDROP) -> DroppedPaths,
+    accept_drops: unsafe extern "system" fn(HWND, i32),
+}
+
+thread_local! {
+    static FILES: Cell<Option<FileOperations>> = const { Cell::new(None) };
+    static WORKER_RUN: Cell<Option<WorkerRun>> = const { Cell::new(None) };
+    static COPY_TEXT: Cell<Option<CopyText>> = const { Cell::new(None) };
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn roc_windows_register_files() -> u8 {
+    FILES.set(Some(FileOperations {
+        open: pickers::open,
+        folder: pickers::folder,
+        save: |owner, token, start, len, name| {
+            if let Err(error) = files::save(owner, token, start, len, name) {
+                pickers::save_error(owner, &error);
+            }
+            Ok(())
+        },
+        run: files::FileTask::run,
+        list: |request, stop| match request.folder.list(request.limit, stop) {
+            Ok((files, flags)) => Outcome::Folder { files, flags },
+            Err(_) => Outcome::Bytes(vec![15, 3]),
+        },
+        take_drop: crate::window::paths_from_drop,
+        accept_drops: DragAcceptFiles,
+    }));
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn roc_windows_register_workers() -> u8 {
+    WORKER_RUN.set(Some(workers::Order::run));
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn roc_windows_register_clipboard() -> u8 {
+    COPY_TEXT.set(Some(|owner, text| clipboard::write(owner, text).is_some()));
+    0
+}
+
+fn file_operations() -> Result<FileOperations> {
+    FILES
+        .get()
+        .ok_or("file operations require Win.Features.files!".into())
+}
+
+pub(crate) fn take_drop(drop: HDROP) -> Option<DroppedPaths> {
+    FILES.get().map(|files| (files.take_drop)(drop))
+}
+
+pub(crate) fn accept_drops(window: HWND, accept: bool) {
+    if let Some(files) = FILES.get() {
+        // SAFETY: The caller supplies its own live app window on the UI thread.
+        unsafe { (files.accept_drops)(window, i32::from(accept)) };
+    }
+}
 
 struct WorkOptions {
     timeout: u32,
@@ -442,6 +518,10 @@ impl Effects {
                     self.answer(id, http::policy_denied());
                     return Ok(());
                 }
+                let Some(transport) = http::transport() else {
+                    self.answer(id, http::failure("HTTP requires Win.Features.http!"));
+                    return Ok(());
+                };
                 if self.spec.as_ref().is_some_and(|spec| !spec.live_http) {
                     self.simulated
                         .hold(id, spec_effects::Kind::Http(request.spec_request()));
@@ -456,7 +536,7 @@ impl Effects {
                             unavailable: http::failure("HTTP worker unavailable"),
                         },
                         move |stop, report| {
-                            Outcome::Bytes(request.run(target, &policy, stop, report))
+                            Outcome::Bytes(transport(request, target, &policy, stop, report))
                         },
                     );
                 }
@@ -512,6 +592,10 @@ impl Effects {
             }
             8 => {
                 let order = workers::Order::read(reader)?;
+                let Some(run) = WORKER_RUN.get() else {
+                    self.answer(id, vec![11, 1]);
+                    return Ok(());
+                };
                 self.spawn(
                     id,
                     WorkOptions {
@@ -520,29 +604,23 @@ impl Effects {
                         finish_on_cancel: order.finish_on_cancel,
                         unavailable: vec![11, 6],
                     },
-                    move |stop, _| order.run(stop),
+                    move |stop, _| run(order, stop),
                 );
             }
             9 => match reader.string()? {
                 crate::wire::FOLDER_PORT => {
-                    if let Some(folders::Request {
-                        folder,
-                        limit,
-                        timeout,
-                    }) = folders::request(reader)?
+                    if let (Some(request), Some(operations)) =
+                        (folders::request(reader)?, FILES.get())
                     {
                         self.spawn(
                             id,
                             WorkOptions {
-                                timeout,
+                                timeout: request.timeout,
                                 timeout_tag: 7,
                                 finish_on_cancel: false,
                                 unavailable: vec![15, 2],
                             },
-                            move |stop, _| match folder.list(limit, stop) {
-                                Ok((files, flags)) => Outcome::Folder { files, flags },
-                                Err(_) => Outcome::Bytes(vec![15, 3]),
-                            },
+                            move |stop, _| (operations.list)(request, stop),
                         );
                     } else {
                         self.answer(id, vec![15, 3]);
@@ -550,6 +628,10 @@ impl Effects {
                 }
                 crate::wire::DECODE_IMAGE_PORT => {
                     let request = images::Request::read(reader)?;
+                    let Some((_, decoder)) = crate::raster::decoders() else {
+                        self.answer(id, images::answer(5, false));
+                        return Ok(());
+                    };
                     self.spawn(
                         id,
                         WorkOptions {
@@ -558,7 +640,7 @@ impl Effects {
                             finish_on_cancel: false,
                             unavailable: images::answer(5, false),
                         },
-                        move |_, _| match request.decode() {
+                        move |_, _| match request.decode(decoder) {
                             Ok(pixels) => Outcome::Raster(pixels),
                             Err(code) => Outcome::Bytes(images::answer(code, false)),
                         },
@@ -622,6 +704,10 @@ impl Effects {
             },
             11 | 13 | 14 => {
                 let task = files::FileTask::read(kind, reader)?;
+                let Some(operations) = FILES.get() else {
+                    self.answer(id, vec![13, 3]);
+                    return Ok(());
+                };
                 self.spawn(
                     id,
                     WorkOptions {
@@ -630,7 +716,7 @@ impl Effects {
                         finish_on_cancel: false,
                         unavailable: vec![13, 3],
                     },
-                    move |stop, _| Outcome::Bytes(task.run(stop)),
+                    move |stop, _| Outcome::Bytes((operations.run)(task, stop)),
                 );
             }
             16 | 18 => {
@@ -725,8 +811,11 @@ impl Effects {
         if text.contains('\0') {
             return false;
         }
+        let Some(copy) = COPY_TEXT.get() else {
+            return false;
+        };
         if self.spec.is_none() {
-            return clipboard::write(owner, text).is_some();
+            return copy(owner, text);
         }
         if std::mem::take(&mut self.clipboard_busy) {
             return false;
@@ -780,7 +869,7 @@ impl Effects {
         handler: u32,
         multiple: bool,
     ) -> Result<()> {
-        let selection = pickers::open(owner, multiple)?;
+        let selection = (file_operations()?.open)(owner, multiple)?;
         if let Some((record, handles)) = selection.and_then(files::selection_record) {
             self.send_files(node, handler, record, handles)?;
         }
@@ -788,7 +877,7 @@ impl Effects {
     }
 
     pub(crate) fn pick_folder(&mut self, owner: HWND, node: u32, handler: u32) -> Result<()> {
-        let entry = match pickers::folder(owner) {
+        let entry = match (file_operations()?.folder)(owner) {
             pickers::FolderChoice::Chosen(entry) => Some(entry),
             pickers::FolderChoice::Refused => None,
             pickers::FolderChoice::Canceled => return Ok(()),
@@ -803,6 +892,7 @@ impl Effects {
         handler: u32,
         path: Option<PathBuf>,
     ) -> Result<()> {
+        file_operations()?;
         let (record, handles) = files::folder_selection(path);
         self.send_files(node, handler, record, handles)
     }
@@ -813,6 +903,7 @@ impl Effects {
         handler: u32,
         paths: Vec<PathBuf>,
     ) -> Result<()> {
+        file_operations()?;
         if let Some((record, handles)) = files::selection(paths) {
             self.send_files(node, handler, record, handles)?;
         }
@@ -846,6 +937,7 @@ impl Effects {
         len: u64,
         name: &str,
     ) -> Result<()> {
+        let operations = file_operations()?;
         if let Some(spec) = &self.spec {
             if !valid_file_name(name) {
                 return Err("spec save needs an ordinary file name without a path".into());
@@ -854,10 +946,7 @@ impl Effects {
             std::fs::create_dir_all(&saved).map_err(storage_error)?;
             files::save_to(token, start, len, saved.join(name))
         } else {
-            if let Err(error) = files::save(owner, token, start, len, name) {
-                pickers::save_error(owner, &error);
-            }
-            Ok(())
+            (operations.save)(owner, token, start, len, name)
         }
     }
 }
@@ -911,6 +1000,7 @@ mod tests {
 
     #[test]
     fn raw_clipboard_denial_leaves_a_native_copy_and_its_fixture_available() {
+        roc_windows_register_clipboard();
         let (send, receive) = mpsc::channel();
         let mut effects = Effects::new(send, Declarations::default()).unwrap();
         effects.spec = Some(SpecOptions {

@@ -1,4 +1,4 @@
-app [main] { logic: "../logic/main.roc", pf: platform "../../../platform/main.roc" }
+app [main, native] { logic: "../logic/main.roc", pf: platform "../../../platform/main.roc" }
 
 import logic.Inspector
 import pf.Engine exposing [Elem, File, HandlerOf, Signal]
@@ -6,6 +6,8 @@ import pf.Win
 
 main : Engine.Program(_)
 main = Engine.program_store({}, |_boot| store, |_boot| view())
+
+native = Win.Features.use([Win.Features.direct3d!, Win.Features.files!, Win.Features.clipboard!])
 
 Queued : { key : Str, file : File }
 

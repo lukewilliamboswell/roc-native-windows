@@ -20,9 +20,44 @@ use worker::Worker;
 const SUBCLASS: usize = 0x5348_4452;
 
 thread_local! {
+    static BACKEND: Cell<Option<Backend>> = const { Cell::new(None) };
     static RENDERER: RefCell<Option<Worker>> = const { RefCell::new(None) };
     static NEXT_SURFACE: Cell<u64> = const { Cell::new(1) };
     static DRIVEN: Cell<bool> = const { Cell::new(false) };
+}
+
+#[derive(Clone, Copy)]
+struct Backend {
+    attach: fn(HWND) -> Result<Box<dyn ShaderView>>,
+    ready: fn() -> bool,
+    shutdown: fn(),
+}
+
+pub(crate) trait ShaderView {
+    fn set_inputs(&mut self, inputs: Inputs);
+    fn set_background(&mut self, color: u32);
+    fn set_size(&mut self, width: i32, height: i32);
+    fn poll(&mut self, root: HWND);
+    fn status(&self) -> &'static str;
+    fn pixel(&self, x: u32, y: u32) -> Result<[u8; 3]>;
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn roc_windows_register_direct3d() -> u8 {
+    crate::raster::register_codecs();
+    BACKEND.set(Some(Backend {
+        attach: |hwnd| Ok(Box::new(NativeShaderView::attach(hwnd)?)),
+        ready: || RENDERER.with_borrow(|worker| worker.as_ref().is_none_or(Worker::idle)),
+        shutdown: || drop(RENDERER.with_borrow_mut(Option::take)),
+    }));
+    0
+}
+
+pub(crate) fn attach(hwnd: HWND) -> Result<Box<dyn ShaderView>> {
+    let backend = BACKEND
+        .get()
+        .ok_or("shader views require Win.Features.direct3d!")?;
+    (backend.attach)(hwnd)
 }
 
 pub(crate) fn configure(driven: bool) {
@@ -30,12 +65,13 @@ pub(crate) fn configure(driven: bool) {
 }
 
 pub(crate) fn ready() -> bool {
-    RENDERER.with_borrow(|worker| worker.as_ref().is_none_or(Worker::idle))
+    BACKEND.get().is_none_or(|backend| (backend.ready)())
 }
 
 pub(crate) fn shutdown() {
-    let worker = RENDERER.with_borrow_mut(Option::take);
-    drop(worker);
+    if let Some(backend) = BACKEND.take() {
+        (backend.shutdown)();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,7 +215,7 @@ impl Display {
     }
 }
 
-pub(crate) struct ShaderView {
+struct NativeShaderView {
     hwnd: HWND,
     id: u64,
     display: Box<RefCell<Display>>,
@@ -190,8 +226,8 @@ pub(crate) struct ShaderView {
     sent: Option<(FrameSize, Inputs)>,
 }
 
-impl ShaderView {
-    pub(crate) fn attach(hwnd: HWND) -> Result<Self> {
+impl NativeShaderView {
+    fn attach(hwnd: HWND) -> Result<Self> {
         let id = NEXT_SURFACE.with(|next| {
             let current = next.get();
             next.set(
@@ -220,8 +256,10 @@ impl ShaderView {
             sent: None,
         })
     }
+}
 
-    pub(crate) fn set_inputs(&mut self, wanted: Inputs) {
+impl ShaderView for NativeShaderView {
+    fn set_inputs(&mut self, wanted: Inputs) {
         if self
             .wanted
             .as_ref()
@@ -232,11 +270,11 @@ impl ShaderView {
         self.wanted = Some(wanted);
     }
 
-    pub(crate) fn set_background(&mut self, color: u32) {
+    fn set_background(&mut self, color: u32) {
         self.picture.set_background(color);
     }
 
-    pub(crate) fn set_size(&mut self, width: i32, height: i32) {
+    fn set_size(&mut self, width: i32, height: i32) {
         if width == 0 || height == 0 {
             self.size = None;
             return;
@@ -250,7 +288,7 @@ impl ShaderView {
         }
     }
 
-    pub(crate) fn poll(&mut self, root: HWND) {
+    fn poll(&mut self, root: HWND) {
         let visible =
             DRIVEN.get() || unsafe { IsWindowVisible(self.hwnd) != 0 && IsIconic(root) == 0 };
         if !visible || self.size.is_none() {
@@ -291,11 +329,11 @@ impl ShaderView {
         }
     }
 
-    pub(crate) fn status(&self) -> &'static str {
+    fn status(&self) -> &'static str {
         self.display.borrow().status()
     }
 
-    pub(crate) fn pixel(&self, x: u32, y: u32) -> Result<[u8; 3]> {
+    fn pixel(&self, x: u32, y: u32) -> Result<[u8; 3]> {
         let display = self.display.borrow();
         let frame = display
             .pixels()
@@ -310,7 +348,9 @@ impl ShaderView {
             frame.bgra[index],
         ])
     }
+}
 
+impl NativeShaderView {
     fn retire(&self) {
         RENDERER.with_borrow(|worker| {
             if let Some(worker) = worker {
@@ -338,7 +378,7 @@ impl ShaderView {
     }
 }
 
-impl Drop for ShaderView {
+impl Drop for NativeShaderView {
     fn drop(&mut self) {
         self.retire();
         // SAFETY: Detach before dropping the Box registered as native user data.

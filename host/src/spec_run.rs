@@ -913,7 +913,7 @@ impl App {
             .surface
             .grid_mut(key)
             .ok_or("step requires a data grid")?;
-        let cell = |grid: &crate::grid::Grid, row: &str, column: &str| {
+        let cell = |grid: &dyn crate::grid::MountedGrid, row: &str, column: &str| {
             let index = number::<usize>(row)?
                 .checked_sub(1)
                 .ok_or("grid rows start at one")?;

@@ -1,4 +1,4 @@
-app [main] { logic: "../logic/main.roc", pf: platform "../../../platform/main.roc" }
+app [main, native] { logic: "../logic/main.roc", pf: platform "../../../platform/main.roc" }
 
 import ReadingStyle
 import logic.ReadingList
@@ -7,6 +7,8 @@ import pf.Win
 
 main : Engine.Program(_)
 main = Engine.program_store({}, |_| store, |_| view())
+
+native = Win.Features.use([Win.Features.image_codecs!])
 
 store = Engine.store(
 	ReadingRoom,
