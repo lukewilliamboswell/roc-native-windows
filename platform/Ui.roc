@@ -826,6 +826,40 @@ Ui := [].{
 		Engine.element("ui-grid-cell", attrs.concat(edit), [Engine.text_s(value)])
 	}
 
+	## Texture input for a shader's t0 or t1 slot.
+	ShaderTexture := [NoTexture, AssetTexture(Str), RasterTexture(Raster)]
+
+	ShaderParameter := { name : Str, value : F32 }
+
+	ShaderViewProps(ctx) := {
+		label : Str,
+		shader : Str,
+		width : U32,
+		height : U32,
+		texture : Signal(ctx, ShaderTexture) ?? Engine.const(NoTexture),
+		second_texture : Signal(ctx, ShaderTexture) ?? Engine.const(NoTexture),
+		parameters : Signal(ctx, List(ShaderParameter)) ?? Engine.const([]),
+		sampling : [Nearest, Linear] ?? Linear,
+		input : SurfaceInput(ctx) ?? ReadOnly,
+	}
+
+	## Draw one precompiled ps_5_0 pixel shader into a native child view.
+	shader_view : ShaderViewProps(ctx) -> Elem(ctx)
+	shader_view = |props| Engine.element(
+		"ui-shader-view",
+		[
+			Engine.attr("label", props.label),
+			Engine.attr("shader", props.shader),
+			Engine.attr("width", props.width.to_str()),
+			Engine.attr("height", props.height.to_str()),
+			Engine.attr_s("texture", props.texture.map(shader_texture)),
+			Engine.attr_s("second-texture", props.second_texture.map(shader_texture)),
+			Engine.attr_s("parameters", props.parameters.map(shader_parameters)),
+			Engine.attr("sampling", if (props.sampling == Nearest) "nearest" else "linear"),
+		].concat(Ui.surface_input(props.input)),
+		[shader_raster("0", props.texture), shader_raster("1", props.second_texture)],
+	)
+
 	## An image's accessible label and dimensions in device-independent pixels.
 	AssetImageProps := { label : Str, width : U32, height : U32, fit : [Stretch, Contain] ?? Stretch }
 
@@ -1149,3 +1183,36 @@ pointer_handler = |phase, binding| match binding {
 	NoHandler => []
 	Handle(handler) => [Engine.on_pointer(phase, handler)]
 }
+
+shader_texture : Ui.ShaderTexture -> Str
+shader_texture = |texture| match texture {
+	NoTexture => ""
+	AssetTexture(path) => "asset:${path}"
+	RasterTexture(_) => "raster"
+}
+
+shader_raster : Str, Signal(ctx, Ui.ShaderTexture) -> Elem(ctx)
+shader_raster = |slot, texture| {
+	source = texture.map(
+		|value| match value {
+			RasterTexture(raster) => RasterImage(raster)
+			_ => NoImage
+		},
+	)
+	Ui.with_raster_binding(source, |binding, attachment|
+		Engine.element("ui-shader-raster", [Engine.attr("slot", slot), binding], [attachment]))
+}
+
+shader_parameters : List(Ui.ShaderParameter) -> Str
+shader_parameters = |parameters| Str.join_with(
+	parameters.map(
+		|parameter| {
+			if parameter.name.contains("=") or parameter.name.contains("\n") or parameter.name.contains("\r") {
+				"invalid shader parameter"
+			} else {
+				"${parameter.name}=${parameter.value.to_str()}"
+			}
+		},
+	),
+	"\n",
+)

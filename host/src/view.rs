@@ -7,6 +7,7 @@ use crate::list_view::{ListView, Report};
 use crate::picture::Picture;
 use crate::progress::{Progress, native::ProgressBar};
 use crate::raster::Pixels;
+use crate::shader::{Inputs as ShaderInputs, ShaderView};
 use crate::slider::native::Slider;
 use crate::style::{
     Accent,
@@ -58,6 +59,7 @@ pub(crate) enum Control {
     Edit,
     TextArea,
     Image,
+    ShaderView,
     ComboBox,
     ListBox,
     RadioGroup,
@@ -91,6 +93,7 @@ impl Control {
             "ui-text-field" => Self::Edit,
             "textarea" => Self::TextArea,
             "ui-asset-image" | "ui-image" => Self::Image,
+            "ui-shader-view" => Self::ShaderView,
             "ui-combo-box" => Self::ComboBox,
             "ui-list-box" => Self::ListBox,
             "ui-radio-group" => Self::RadioGroup,
@@ -178,7 +181,7 @@ impl Control {
                     | WS_VSCROLL
                     | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_READONLY) as u32,
             ),
-            Self::Image => (0, w!("STATIC"), SS_LEFT | SS_NOPREFIX),
+            Self::Image | Self::ShaderView => (0, w!("STATIC"), SS_LEFT | SS_NOPREFIX),
             Self::ComboBox => (
                 0,
                 w!("COMBOBOX"),
@@ -232,6 +235,7 @@ struct View {
     font_role: FontRole,
     force_pending: bool,
     picture: Option<Picture>,
+    shader: Option<ShaderView>,
     choices: Choices,
     tree: TreeProjection,
     tab_owner: Option<Key>,
@@ -298,18 +302,19 @@ impl View {
             Toolbar::initialize(handle);
             Toolbar::default()
         });
-        let picture = if kind == Control::Image {
-            match Picture::new(handle) {
-                Ok(picture) => Some(picture),
-                Err(error) => {
-                    // SAFETY: A failed image mount has no live subclass.
-                    unsafe { DestroyWindow(handle) };
-                    return Err(error);
-                }
-            }
-        } else {
-            None
+        let mount_picture = || -> Result<_> {
+            let picture = (kind == Control::Image)
+                .then(|| Picture::new(handle))
+                .transpose()?;
+            let shader = (kind == Control::ShaderView)
+                .then(|| ShaderView::attach(handle))
+                .transpose()?;
+            Ok((picture, shader))
         };
+        let (picture, shader) = mount_picture().inspect_err(|_| {
+            // SAFETY: The failed control mount belongs to this thread.
+            unsafe { DestroyWindow(handle) };
+        })?;
         let view = Self {
             handle,
             label: null_mut(),
@@ -323,6 +328,7 @@ impl View {
             },
             force_pending: false,
             picture,
+            shader,
             choices: Choices::default(),
             tree: TreeProjection::default(),
             tab_owner: None,
@@ -821,6 +827,29 @@ impl Surface {
         Some(window_text(view.handle))
     }
 
+    pub(crate) fn poll_shaders(&mut self) {
+        for view in self.views.values_mut() {
+            if let Some(shader) = &mut view.shader {
+                shader.poll(self.window);
+            }
+        }
+    }
+
+    pub(crate) fn shader_status(&self, key: Key) -> Result<&'static str> {
+        Ok(self.shader_at(key)?.status())
+    }
+
+    pub(crate) fn shader_pixel(&self, key: Key, x: u32, y: u32) -> Result<[u8; 3]> {
+        self.shader_at(key)?.pixel(x, y)
+    }
+
+    fn shader_at(&self, key: Key) -> Result<&ShaderView> {
+        self.views
+            .get(&key)
+            .and_then(|view| view.shader.as_ref())
+            .ok_or("step requires a shader view".into())
+    }
+
     pub(crate) fn taskbar_progress(&self) -> Progress {
         self.taskbar_progress
     }
@@ -1128,6 +1157,9 @@ impl Surface {
             if let Some(picture) = &mut view.picture {
                 picture.set_background(background);
             }
+            if let Some(shader) = &mut view.shader {
+                shader.set_background(background);
+            }
         }
         for &child in &node.children {
             self.style_node(tree, child, background)?;
@@ -1222,9 +1254,14 @@ impl Surface {
                     | Control::TreeView
                     | Control::FileDropTarget => node.attr("label").unwrap_or("").into(),
                     Control::TextArea => canonical_lines(node.attr("value").unwrap_or("")),
-                    Control::Image | Control::Toolbar => node.attr("label").unwrap_or("").into(),
+                    Control::Image | Control::ShaderView | Control::Toolbar => {
+                        node.attr("label").unwrap_or("").into()
+                    }
                     _ => tree.caption(key),
                 };
+                let shader_inputs = (kind == Control::ShaderView).then(|| {
+                    ShaderInputs::read(&self.assets, tree, key, |child| self.raster(child))
+                });
                 let view = self.views.get_mut(&key).unwrap();
                 view.tab_owner = tab_owner;
                 if kind == Control::Text {
@@ -1268,6 +1305,10 @@ impl Surface {
                 }
                 if kind == Control::Slider {
                     view.slider.sync(view.handle, node)?;
+                }
+                if let (Some(shader), Some(inputs)) = (&mut view.shader, shader_inputs) {
+                    shader.set_inputs(inputs);
+                    return Ok(());
                 }
                 if kind == Control::ProgressBar {
                     let requested = Progress::parse(node.attr("progress").unwrap_or("idle"))?;
@@ -1432,6 +1473,9 @@ impl Surface {
             if let Some(picture) = &mut view.picture {
                 let contain = tree.node(item.key).attr("fit") == Some("contain");
                 picture.update(pixels, contain)?;
+            }
+            if let Some(shader) = &mut view.shader {
+                shader.set_size(item.width, item.height);
             }
             if !view.label.is_null() && view.props.label.is_empty() {
                 // SAFETY: The label belongs to this thread and is optional.
@@ -1830,7 +1874,7 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
                 * number(node, "visible-rows", 8).clamp(1, 100)
                 + dip(if view.props.label.is_empty() { 4 } else { 25 }),
         ),
-        Control::Image => (
+        Control::Image | Control::ShaderView => (
             dip(number(node, "width", 128)).max(1),
             dip(number(node, "height", 96)).max(1),
         ),

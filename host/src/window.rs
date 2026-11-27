@@ -94,6 +94,7 @@ impl App {
         let deterministic = options.as_ref().is_some_and(|options| !options.live_time);
         let initial_time = options.as_ref().map_or(0, |options| options.initial_time);
         let driven = options.is_some();
+        crate::shader::configure(driven);
         let pump = create_pump()?;
         let title = app_name(unsafe { GetModuleHandleW(null()) });
         let effects = Effects::new(pump.0, send);
@@ -420,7 +421,7 @@ impl App {
     }
 
     fn work_done(&self) -> bool {
-        self.effects.work_done() && self.rasters.ready()
+        self.effects.work_done() && self.rasters.ready() && crate::shader::ready()
     }
 
     fn command(&mut self, control: HWND, notification: u16) -> Result<()> {
@@ -1154,6 +1155,7 @@ fn clear_app() {
         let mut state = state.borrow_mut();
         drop(state.take());
     });
+    crate::shader::shutdown();
 }
 
 #[cfg(not(test))]

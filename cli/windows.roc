@@ -671,6 +671,15 @@ spec_step = |expr| {
 			index = spec_number(row, "mounted row number", 1, 1024)?
 			Ok(parts.concat([index, column, value]))
 		}
+		("expect-shader", [locator, Quoted(status, _)]) if ["rendered", "fallback", "error", "pending"].contains(status) =>
+			spec_locator(locator).map_ok(|parts| parts.append(status))
+		("expect-shader-pixel", [locator, x, y, Quoted(hex, _), tolerance]) => {
+			parts = spec_locator(locator)?
+			left = spec_number(x, "pixel column", 0, 4095)?
+			top = spec_number(y, "pixel row", 0, 4095)?
+			delta = spec_number(tolerance, "channel tolerance", 0, 255)?
+			Ok(parts.concat([left, top, hex, delta]))
+		}
 		("expect-list-rows", [locator, .. as keys]) => {
 			parts = spec_locator(locator)?
 			rows = spec_texts(keys, "Expected nonempty row keys in quotes")?

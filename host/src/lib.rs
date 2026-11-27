@@ -34,6 +34,10 @@ mod raster_bridge;
 #[cfg(windows)]
 #[allow(clippy::all)]
 mod roc_platform_abi;
+#[cfg(windows)]
+mod shader;
+#[cfg(any(test, windows))]
+mod shader_bytecode;
 #[cfg(any(test, windows))]
 mod slider;
 #[cfg(any(test, windows))]

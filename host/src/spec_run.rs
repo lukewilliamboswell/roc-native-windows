@@ -587,6 +587,7 @@ impl App {
                 | "paste-grid",
                 _,
             ) => self.control_step(step),
+            ("expect-shader" | "expect-shader-pixel", _) => self.control_step(step),
             _ => Err("unknown step or invalid arguments".into()),
         }
     }
@@ -714,6 +715,26 @@ impl App {
             ("set-slider", [value]) => {
                 let (handle, _) = self.surface.spec_slider(key, Some(number(value)?))?;
                 self.slider_changed(handle)
+            }
+            ("expect-shader", [status]) => expect(self.surface.shader_status(key)?, *status),
+            ("expect-shader-pixel", [x, y, hex, tolerance]) => {
+                let pixel = self.surface.shader_pixel(key, number(x)?, number(y)?)?;
+                let hex = hex.strip_prefix('#').unwrap_or(hex);
+                if hex.len() != 6 || !hex.bytes().all(|value| value.is_ascii_hexdigit()) {
+                    return Err("shader color must be six RGB hex digits".into());
+                }
+                let wanted = [0, 2, 4].map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap());
+                let tolerance: u8 = number(tolerance)?;
+                if pixel
+                    .iter()
+                    .zip(wanted)
+                    .any(|(&actual, wanted)| actual.abs_diff(wanted) > tolerance)
+                {
+                    return Err(format!(
+                        "expected shader pixel {wanted:?} ± {tolerance}, got {pixel:?}"
+                    ));
+                }
+                Ok(())
             }
             ("expect-visible", []) => Ok(()),
             ("drop-files", files) => self.spec_drop(Some(key), files),

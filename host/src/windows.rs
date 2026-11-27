@@ -484,6 +484,7 @@ mod native {
 
         pub(crate) fn poll(&mut self) {
             for entry in self.mounted.values_mut() {
+                entry.surface.poll_shaders();
                 if let Some(taskbar) = &mut entry.taskbar {
                     taskbar.poll();
                 }
