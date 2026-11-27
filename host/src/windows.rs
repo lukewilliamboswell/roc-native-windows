@@ -294,6 +294,9 @@ mod native {
             self.order.clear();
             for wanted in plan.declarations {
                 let id = wanted.id;
+                let inherited_accent = wanted
+                    .owner
+                    .map(|owner| self.mounted[&owner].surface.accent());
                 let title = self.title_for(&wanted).to_owned();
                 if !self.mounted.contains_key(&id) {
                     let window = if let Some(owner) = wanted.owner {
@@ -338,7 +341,8 @@ mod native {
                     window.declaration.wrapper,
                     window.declaration.content,
                 )?;
-                window.surface.sync(tree, chrome, &self.scope, id)?;
+                let accent = inherited_accent.unwrap_or(chrome.accent);
+                window.surface.sync(tree, chrome, &self.scope, id, accent)?;
                 if let Some(taskbar) = &mut window.taskbar {
                     taskbar.update(window.surface.taskbar_progress());
                 }

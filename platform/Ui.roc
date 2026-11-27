@@ -13,11 +13,17 @@ Ui := [].{
 	}
 
 	WindowProps(ctx) := {
+		appearance : AppearanceProps ?? {},
 		status_bar : [NoStatusBar, StatusBar(StatusBarProps(ctx))] ?? NoStatusBar,
 		taskbar_progress : Signal(ctx, Progress) ?? Engine.const(Idle),
 		title : Signal(ctx, WindowTitle) ?? Engine.const(AppTitle),
 		close : [UseDefaultClose, Handle(HandlerOf(ctx, {}))] ?? UseDefaultClose,
 	}
+
+	Rgb := { red : U8, green : U8, blue : U8 }
+
+	## The accent applies to panels and text that opt into accent styling.
+	AppearanceProps := { accent : [SystemAccent, CustomAccent(Rgb)] ?? SystemAccent }
 
 	WindowTitle := [AppTitle, Title(Str)]
 
@@ -42,6 +48,7 @@ Ui := [].{
 			]
 		}
 		attrs = [
+			Engine.attr("accent", accent_color(props.appearance)),
 			Engine.attr_s("taskbar-progress", props.taskbar_progress.map(progress_word)),
 			Engine.attr_s("window-title", props.title.map(window_title)),
 		]
@@ -50,6 +57,12 @@ Ui := [].{
 			Handle(handler) => attrs.append(close_listener(handler))
 		}
 		Engine.element("ui-window", listeners, [body].concat(chrome))
+	}
+
+	accent_color : AppearanceProps -> Str
+	accent_color = |appearance| match appearance.accent {
+		SystemAccent => ""
+		CustomAccent(rgb) => "${rgb.red.to_str()},${rgb.green.to_str()},${rgb.blue.to_str()}"
 	}
 
 	## Mount a keyed collection of independent Windows windows.
@@ -75,29 +88,74 @@ Ui := [].{
 	)
 
 	## Stack spacing and padding in device-independent pixels.
-	StackProps := { spacing : U32 ?? 8, padding : U32 ?? 0 }
+	StackProps := { spacing : U32 ?? 8, padding : U32 ?? 0, stack_below : U32 ?? 0 }
 
 	## Lay out children vertically.
 	vstack : StackProps, List(Elem(ctx)) -> Elem(ctx)
 	vstack = |props, children| stack("ui-vstack", props, children)
 
-	## Lay out children horizontally.
+	## Lay out children horizontally, or vertically below a configured width in DIP.
 	hstack : StackProps, List(Elem(ctx)) -> Elem(ctx)
 	hstack = |props, children| stack("ui-hstack", props, children)
+
+	## A padded surface for grouping related content.
+	PanelProps := {
+		surface : [Inset, AccentTint] ?? Inset,
+		border : [NoBorder, Outline] ?? NoBorder,
+		padding : U32 ?? 12,
+		width : [Natural, Fill] ?? Natural,
+	}
+
+	panel : PanelProps, Elem(ctx) -> Elem(ctx)
+	panel = |props, content| Engine.element(
+		"ui-panel",
+		[
+			Engine.attr("accent-tint", bool_word(props.surface == AccentTint)),
+			Engine.attr("outline", bool_word(props.border == Outline)),
+			Engine.attr("fill", bool_word(props.width == Fill)),
+			Engine.attr("padding", props.padding.to_str()),
+		],
+		[content],
+	)
 
 	## A label whose text follows a signal.
 	text : Signal(ctx, Str) -> Elem(ctx)
 	text = |value| Ui.text_with(value, {})
 
 	## Wrapped text or a single line with an ellipsis when it does not fit.
-	TextProps := { overflow : [Wrap, EllipsizeEnd] ?? Wrap }
+	TextProps := {
+		overflow : [Wrap, EllipsizeEnd] ?? Wrap,
+		style : [Body, Caption, Heading, Title, Display, Monospace] ?? Body,
+		tone : [PrimaryText, SecondaryText, AccentText] ?? PrimaryText,
+		align : [Start, Center, End] ?? Start,
+	}
 
 	## The full caption remains available when the display truncates it.
 	text_with : Signal(ctx, Str), TextProps -> Elem(ctx)
 	text_with = |value, props|
 		Engine.element(
 			"ui-text",
-			[Engine.attr("ellipsize-end", bool_word(props.overflow == EllipsizeEnd))],
+			[
+				Engine.attr("ellipsize-end", bool_word(props.overflow == EllipsizeEnd)),
+				Engine.attr("text-style", match props.style {
+					Body => "body"
+					Caption => "caption"
+					Heading => "heading"
+					Title => "title"
+					Display => "display"
+					Monospace => "monospace"
+				}),
+				Engine.attr("text-tone", match props.tone {
+					PrimaryText => "primary"
+					SecondaryText => "secondary"
+					AccentText => "accent"
+				}),
+				Engine.attr("text-align", match props.align {
+					Start => "start"
+					Center => "center"
+					End => "end"
+				}),
+			],
 			[Engine.text_s(value)],
 		)
 
@@ -696,6 +754,7 @@ stack = |kind, props, children|
 		[
 			Engine.attr("spacing", props.spacing.to_str()),
 			Engine.attr("padding", props.padding.to_str()),
+			Engine.attr("stack-below", props.stack_below.to_str()),
 		],
 		children,
 	)

@@ -5,6 +5,10 @@ use crate::command_icon::ButtonIcon;
 use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
 use crate::progress::{Progress, native::ProgressBar};
+use crate::style::{
+    Accent,
+    native::{FontRole, Fonts, Paint, Palette, StyledWindow},
+};
 use crate::toolbar::Toolbar;
 use crate::tree_view::{TreeIntent, TreeProjection};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
@@ -30,7 +34,7 @@ use windows_sys::Win32::UI::Controls::{
     TVM_GETITEMHEIGHT, TVS_DISABLEDRAGDROP, TVS_HASBUTTONS, TVS_HASLINES, TVS_LINESATROOT,
     TVS_SHOWSELALWAYS, WC_TABCONTROLW, WC_TREEVIEWW,
 };
-use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, IsWindowEnabled, SetFocus,
 };
@@ -43,6 +47,7 @@ use windows_sys::core::{PCWSTR, w};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Control {
     Text,
+    Panel,
     Button,
     FileButton,
     FileDropTarget,
@@ -74,6 +79,7 @@ impl Control {
             }
             "ui-window" => return Err("Ui.window must be the single outermost element".into()),
             "ui-text" => Self::Text,
+            "ui-panel" => Self::Panel,
             "ui-button" => Self::Button,
             "ui-file-button" => Self::FileButton,
             "ui-file-drop-target" => Self::FileDropTarget,
@@ -149,6 +155,7 @@ impl Control {
                     | (TBSTYLE_FLAT | TBSTYLE_LIST | TBSTYLE_WRAPABLE),
             ),
             Self::Text => (0, w!("STATIC"), SS_LEFT | SS_NOPREFIX),
+            Self::Panel => (0, w!("STATIC"), 0),
             Self::Button | Self::FileButton | Self::FolderButton => {
                 (0, w!("BUTTON"), WS_TABSTOP | BS_PUSHBUTTON as u32)
             }
@@ -215,6 +222,9 @@ struct View {
     label: HWND,
     kind: Control,
     props: Props,
+    styled: Option<StyledWindow>,
+    label_style: Option<StyledWindow>,
+    font_role: FontRole,
     force_pending: bool,
     image: HBITMAP,
     rendered_image: Option<(String, i32, i32)>,
@@ -286,6 +296,9 @@ impl View {
             handle,
             label: null_mut(),
             kind,
+            styled: None,
+            label_style: None,
+            font_role: FontRole::Body,
             props: Props {
                 enabled: true,
                 ..Props::default()
@@ -318,6 +331,15 @@ impl View {
                 SendMessageW(self.label, WM_SETFONT, font as usize, 0);
             }
         }
+    }
+
+    fn paint(&mut self, paint: Paint) -> Result<()> {
+        if let Some(style) = &mut self.styled {
+            style.update(paint);
+        } else {
+            self.styled = Some(StyledWindow::new(self.handle, paint)?);
+        }
+        Ok(())
     }
 
     fn update(&mut self, window: HWND, font: HFONT, desired: Props) -> Result<()> {
@@ -503,6 +525,9 @@ pub(crate) struct Surface {
     status: Option<StatusBar>,
     taskbar_progress: Progress,
     font: HFONT,
+    fonts: Fonts,
+    accent: Accent,
+    palette: Palette,
     dpi: u32,
     assets: PathBuf,
     views: BTreeMap<Key, View>,
@@ -518,12 +543,17 @@ impl Surface {
         let assets = std::env::current_exe()
             .map_err(|error| format!("cannot locate app assets: {error}"))?
             .with_file_name("assets");
+        let fonts = Fonts::new(dpi)?;
+        let accent = Accent::default();
         Ok(Self {
             window,
             content: ROOT,
             status: None,
             taskbar_progress: Progress::Idle,
-            font: make_font(dpi)?,
+            font: fonts.get(FontRole::Body),
+            fonts,
+            accent,
+            palette: Palette::new(accent, window),
             dpi,
             assets,
             views: BTreeMap::new(),
@@ -1028,9 +1058,20 @@ impl Surface {
     pub(crate) fn dpi_changed(&mut self, tree: &Tree) -> Result<()> {
         // SAFETY: WM_DPICHANGED names our live root HWND.
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
-        let font = make_font(dpi)?;
+        let fonts = Fonts::new(dpi)?;
+        let font = fonts.get(FontRole::Body);
+        for view in self.views.values() {
+            view.font(fonts.get(view.font_role));
+            if let Some(grid) = &view.grid {
+                grid.font(font);
+            }
+        }
+        if let Some(status) = &self.status {
+            status.font(font);
+        }
+        self.font = font;
+        self.fonts = fonts;
         for (&key, view) in &mut self.views {
-            view.font(font);
             if let Some(toolbar) = &mut view.toolbar {
                 toolbar.sync(view.handle, tree, key, &self.assets, dpi)?;
             }
@@ -1042,20 +1083,62 @@ impl Surface {
                 report.measure(view.handle, font, dpi)?;
             }
             if let Some(grid) = &mut view.grid {
-                grid.font(font);
                 grid.report.measure(view.handle, font, dpi)?;
             }
         }
-        if let Some(status) = &self.status {
-            status.font(font);
-        }
-        // SAFETY: All windows have selected the new font.
-        unsafe { DeleteObject(self.font) };
-        self.font = font;
         self.scroll_position =
             ((i64::from(self.scroll_position) * i64::from(dpi)) / i64::from(self.dpi)) as i32;
         self.dpi = dpi;
         self.arrange(tree)
+    }
+
+    pub(crate) fn theme_changed(&mut self, tree: &Tree) -> Result<()> {
+        self.palette = Palette::new(self.accent, self.window);
+        self.style_node(tree, self.content, self.palette.background())?;
+        self.dpi_changed(tree)
+    }
+
+    pub(crate) fn accent(&self) -> Accent {
+        self.accent
+    }
+
+    fn style_node(&mut self, tree: &Tree, key: Key, mut background: u32) -> Result<()> {
+        let node = tree.node(key);
+        let Kind::Element(tag) = &node.kind else {
+            return Ok(());
+        };
+        if tag == "ui-dialog" {
+            return Ok(());
+        }
+        if let Some(view) = self.views.get_mut(&key) {
+            if view.kind == Control::Panel {
+                let panel = self.palette.panel(
+                    node.attr("accent-tint").is_some_and(enabled_flag),
+                    node.attr("outline").is_some_and(enabled_flag),
+                );
+                background = panel.background;
+                view.paint(panel)?;
+            } else if view.kind == Control::Text {
+                view.paint(self.palette.text(
+                    background,
+                    node.attr("text-tone").unwrap_or(""),
+                    node.attr("text-align").unwrap_or(""),
+                    view.props.ellipsize,
+                ))?;
+            }
+            if !view.label.is_null() {
+                let label = self.palette.text(background, "primary", "start", true);
+                if let Some(style) = &mut view.label_style {
+                    style.update(label);
+                } else {
+                    view.label_style = Some(StyledWindow::new(view.label, label)?);
+                }
+            }
+        }
+        for &child in &node.children {
+            self.style_node(tree, child, background)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn sync(
@@ -1064,10 +1147,15 @@ impl Surface {
         wrapper: WindowDeclaration<'_>,
         scopes: &BTreeMap<Key, Key>,
         owner: Key,
+        accent: Accent,
     ) -> Result<()> {
         let owns = |key: &Key| scopes.get(key) == Some(&owner);
         self.focus_surviving_tab(&owns);
         self.content = wrapper.content;
+        if self.accent != accent {
+            self.accent = accent;
+            self.palette = Palette::new(accent, self.window);
+        }
         self.taskbar_progress = wrapper.taskbar_progress;
         if let Some(declaration) = wrapper.status {
             if self.status.is_none() {
@@ -1086,6 +1174,7 @@ impl Surface {
             }
         });
         self.sync_node(tree, self.content, None)?;
+        self.style_node(tree, self.content, self.palette.background())?;
         if self
             .views
             .values()
@@ -1128,6 +1217,7 @@ impl Surface {
                     slot.insert(view);
                 }
                 let caption = match kind {
+                    Control::Panel => String::new(),
                     Control::Checkbox | Control::AggregateCheckbox => {
                         node.attr("title").unwrap_or("").into()
                     }
@@ -1142,6 +1232,13 @@ impl Surface {
                 };
                 let view = self.views.get_mut(&key).unwrap();
                 view.tab_owner = tab_owner;
+                if kind == Control::Text {
+                    let role = FontRole::read(node.attr("text-style").unwrap_or(""));
+                    if role != view.font_role {
+                        view.font_role = role;
+                        view.font(self.fonts.get(role));
+                    }
+                }
                 view.update(
                     self.window,
                     self.font,
@@ -1404,6 +1501,28 @@ impl Surface {
             return (0, 0);
         }
         if let Some(view) = self.views.get(&key) {
+            if view.kind == Control::Panel {
+                let padding = scale(self.dpi, number(node, "padding", 12).clamp(0, 4096));
+                let inner = (max_width - padding * 2).max(1);
+                let (width, height) = node.children.first().map_or((0, 0), |&child| {
+                    self.layout(tree, child, dc, inner, x + padding, y + padding, placements)
+                });
+                let width = if node.attr("fill").is_some_and(enabled_flag) {
+                    max_width
+                } else {
+                    (width + padding * 2).min(max_width)
+                };
+                let height = height + padding * 2;
+                // Panels are sibling HWNDs behind their children, in both painting and capture.
+                placements.push(Placement {
+                    key,
+                    x,
+                    y,
+                    width,
+                    height,
+                });
+                return (width, height);
+            }
             if view.kind == Control::FileDropTarget {
                 let inset = scale(self.dpi, 12);
                 let header = scale(self.dpi, 24);
@@ -1471,7 +1590,16 @@ impl Surface {
                 );
                 return (max_width, label_height + header + page_height + inset * 2);
             }
+            let previous = if view.kind == Control::Text {
+                // SAFETY: Layout holds a live DC and the font belongs to this surface.
+                unsafe { SelectObject(dc, self.fonts.get(view.font_role)) }
+            } else {
+                null_mut()
+            };
             let (width, height) = natural(view, node, dc, self.dpi, max_width);
+            if !previous.is_null() {
+                unsafe { SelectObject(dc, previous) };
+            }
             placements.push(Placement {
                 key,
                 x,
@@ -1496,15 +1624,18 @@ impl Surface {
             .collect();
         let mut width = 0;
         let mut height = 0;
-        if tag == "ui-hstack" {
+        let breakpoint = scale(self.dpi, number(node, "stack-below", 0).clamp(0, 4096));
+        if tag == "ui-hstack" && max_width >= breakpoint {
             let count = i32::try_from(children.len()).unwrap_or(i32::MAX);
             let mut room = (inner - spacing.saturating_mul((count - 1).max(0))).max(1);
             // Place fixed-size controls before distributing the leftover
             // width to edit boxes, which benefit from stretching.
             let is_flex = |key| {
-                self.views
-                    .get(&key)
-                    .is_some_and(|view| view.kind.is_edit() || view.kind.civil().is_some())
+                tree.node(key).attr("fill").is_some_and(enabled_flag)
+                    || self
+                        .views
+                        .get(&key)
+                        .is_some_and(|view| view.kind.is_edit() || view.kind.civil().is_some())
             };
             let flex_count = children.iter().filter(|&&key| is_flex(key)).count() as i32;
             let preferred = children
@@ -1571,8 +1702,6 @@ impl Drop for Surface {
     fn drop(&mut self) {
         self.views.clear();
         self.status = None;
-        // SAFETY: All children using the font have been destroyed.
-        unsafe { DeleteObject(self.font) };
     }
 }
 
@@ -1672,7 +1801,7 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
                 }
                 + if view.grid.is_some() { dip(22) } else { 0 },
         ),
-        Control::Tabs | Control::FileDropTarget => {
+        Control::Tabs | Control::Panel | Control::FileDropTarget => {
             unreachable!("containers lay out their content separately")
         }
         Control::TreeView => (
@@ -1799,37 +1928,6 @@ fn position_visible(
             height,
             SWP_NOACTIVATE | visibility,
         );
-    }
-}
-
-fn make_font(dpi: u32) -> Result<HFONT> {
-    let mut metrics = NONCLIENTMETRICSW {
-        cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
-        ..NONCLIENTMETRICSW::default()
-    };
-    // SAFETY: The metrics pointer has the size indicated by cbSize.
-    unsafe {
-        if SystemParametersInfoForDpi(
-            SPI_GETNONCLIENTMETRICS,
-            metrics.cbSize,
-            (&mut metrics as *mut NONCLIENTMETRICSW).cast(),
-            0,
-            dpi,
-        ) == 0
-        {
-            return Err(format!(
-                "cannot read Windows message font: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let font = CreateFontIndirectW(&metrics.lfMessageFont);
-        if font.is_null() {
-            return Err(format!(
-                "cannot create Windows message font: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(font)
     }
 }
 

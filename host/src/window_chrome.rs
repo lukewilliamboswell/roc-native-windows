@@ -1,11 +1,13 @@
 use crate::Result;
 use crate::progress::Progress;
+use crate::style::Accent;
 use crate::wire::{Key, Kind, Tree};
 
 pub(crate) struct WindowDeclaration<'a> {
     pub(crate) content: Key,
     pub(crate) status: Option<StatusDeclaration<'a>>,
     pub(crate) taskbar_progress: Progress,
+    pub(crate) accent: Accent,
 }
 
 pub(crate) struct StatusDeclaration<'a> {
@@ -20,6 +22,7 @@ impl<'a> WindowDeclaration<'a> {
                 content: content_root,
                 status: None,
                 taskbar_progress: Progress::Idle,
+                accent: Accent::default(),
             });
         };
 
@@ -41,6 +44,7 @@ impl<'a> WindowDeclaration<'a> {
             taskbar_progress: Progress::parse(
                 tree.node(wrapper).attr("taskbar-progress").unwrap_or(""),
             )?,
+            accent: Accent::parse(tree.node(wrapper).attr("accent").unwrap_or(""))?,
         })
     }
 }

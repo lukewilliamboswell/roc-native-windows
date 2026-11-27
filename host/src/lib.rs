@@ -32,6 +32,7 @@ mod roc_platform_abi;
 mod spec_effects;
 #[cfg(any(test, windows))]
 mod spec_plan;
+mod style;
 #[cfg(any(test, windows))]
 mod taskbar;
 #[cfg(any(test, windows))]

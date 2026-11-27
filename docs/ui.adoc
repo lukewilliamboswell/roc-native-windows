@@ -52,7 +52,8 @@ for state, stores, and worker tasks.
 | Builder | Native role | Inputs
 | `Ui.vstack` | Vertical layout | Children, `spacing` and `padding`
 | `Ui.hstack` | Horizontal layout | Children, `spacing` and `padding`
-| `Ui.text`, `Ui.text_with` | Label | Text signal and optional `overflow` with `text_with`
+| `Ui.panel` | Padded grouping surface | Content and optional `surface`, `border`, `padding` and `width`
+| `Ui.text`, `Ui.text_with` | Label | Text signal and optional `style`, `tone`, `align` and `overflow` with `text_with`
 | `Ui.button` | Push button | Title, `on_press`, optional `enabled`
 | `Ui.toolbar` | Command toolbar | Group label, ordered commands and separators
 | `Ui.text_field` | Single-line edit control | Value, `on_input`, optional `label`, `placeholder` and `enabled`
@@ -74,9 +75,37 @@ for state, stores, and worker tasks.
 |===
 
 Stack spacing, padding and image dimensions use device-independent pixels.
+Set `stack_below` on a horizontal stack to lay its children out vertically
+when the available width in device-independent pixels drops below that
+value. The default of 0 keeps a horizontal layout at every width.
 An image path is relative to the app's `assets/` directory. Give each
 interactive control a meaningful caption or label. The test runner uses
 those names to locate controls.
+
+[#native-styling]
+=== Native styling
+
+`Ui.window` accepts an `appearance` record whose `accent` defaults to
+`SystemAccent`. Supply `CustomAccent({ red, green, blue })` using three
+`U8` channels for an app-specific accent. Owned dialogs inherit their
+window's appearance. Windows contrast themes use the system colors.
+
+`Ui.text_with` defaults to `Body` style, `PrimaryText` tone and `Start`
+alignment. Other styles are `Caption`, `Heading`, `Title`, `Display` and
+`Monospace`. `SecondaryText` de-emphasizes supporting labels, and
+`AccentText` draws from the window accent with a readable foreground.
+Alignment can be `Start`, `Center` or `End`. Start and end follow the
+interface reading direction. Text wraps by default. Use `EllipsizeEnd`
+for a single line that retains its full accessible caption.
+
+`Ui.panel(props, content)` defaults to `Inset` surface, `NoBorder`,
+12 DIP of padding and `Natural` width. Use `AccentTint` for a tinted
+surface, `Outline` for a border, and `Fill` for the width available after
+fixed-width siblings and gaps. A panel uses a single element as its
+content. Use a stack inside it to group several controls.
+
+See Counter for a centered display value and Reading List for a title and
+an accent that carries across the app.
 
 Each `Ui.Choice` contains a string `key` and `label`. Use a nonempty key
 unique within the control and keep it stable when renaming or reordering

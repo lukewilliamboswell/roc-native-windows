@@ -1119,6 +1119,10 @@ pub(crate) unsafe extern "system" fn window_proc(
     // SAFETY: The OS calls this on its window's UI thread with documented
     // WPARAM/LPARAM payloads. Nested callbacks skip app state if busy.
     unsafe {
+        let theme_change = matches!(
+            message,
+            WM_THEMECHANGED | WM_SYSCOLORCHANGE | WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED
+        );
         if message == WM_NOTIFY && lparam != 0 {
             let header = &*(lparam as *const NMHDR);
             if header.code == NM_CUSTOMDRAW {
@@ -1138,9 +1142,24 @@ pub(crate) unsafe extern "system" fn window_proc(
             }
         }
         match message {
-            WM_CLOSE | WM_COMMAND | WM_NOTIFY | REPORT_EVENTS | GRID_EVENTS | CLOSE_EVENTS
-            | WM_SIZE | WM_TIMER | WM_DPICHANGED | WM_VSCROLL | WM_MOUSEWHEEL | WM_DROPFILES
-            | APPLY_PENDING_EDIT | APPLY_TREE_INTENT => {
+            WM_CLOSE
+            | WM_COMMAND
+            | WM_NOTIFY
+            | REPORT_EVENTS
+            | GRID_EVENTS
+            | CLOSE_EVENTS
+            | WM_SIZE
+            | WM_TIMER
+            | WM_DPICHANGED
+            | WM_VSCROLL
+            | WM_MOUSEWHEEL
+            | WM_DROPFILES
+            | WM_THEMECHANGED
+            | WM_SYSCOLORCHANGE
+            | WM_SETTINGCHANGE
+            | WM_DWMCOLORIZATIONCOLORCHANGED
+            | APPLY_PENDING_EDIT
+            | APPLY_TREE_INTENT => {
                 let paths = (message == WM_DROPFILES).then(|| paths_from_drop(wparam as HDROP));
                 let handled = APP.with(|state| {
                     let Ok(mut state) = state.try_borrow_mut() else {
@@ -1165,6 +1184,17 @@ pub(crate) unsafe extern "system" fn window_proc(
                             _ => return Ok(false),
                         }
                         return Ok(true);
+                    }
+                    if theme_change {
+                        if let Some(surface) = app
+                            .surface
+                            .for_handle(hwnd)
+                            .and_then(|id| app.surface.at_mut(id))
+                        {
+                            surface.theme_changed(&app.tree)?;
+                        }
+                        // Let standard controls and dialogs refresh their native theme resources.
+                        return Ok(false);
                     }
                     if !app.select_message(hwnd) {
                         return Ok(false);
