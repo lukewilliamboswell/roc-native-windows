@@ -50,7 +50,8 @@ source checks on macOS, cross-builds on Linux, and checks the Win32
 behavior scenarios on Windows x64. Run the interactive desktop
 checks below for Narrator, input focus, and display settings.
 The workflow's manual options run the external UI Automation probe and
-native ARM64 scenarios when those runners are available. The `standalone`
+native ARM64 scenarios. The macOS runner stages ARM64 apps and scenario
+plans so the ARM64 runners can execute them directly. The `standalone`
 option stages a local release preview on macOS and verifies a Reading List
 project generated from that preview on Windows x64 with a fresh Roc cache.
 
@@ -313,6 +314,12 @@ roc ../../cli/windows.roc -- package --target x64mingw
 
 [#stage-a-release]
 == Stage a release
+
+The Release Windows platform workflow stages the public assets and a loopback
+preview, then uses the preview to bootstrap Reading List and test MSI
+installation, upgrade, launch, and removal on Windows x64 and ARM64. Run it
+on `main` with `publish` enabled to attest the staged files, verify the GitHub
+draft assets, and publish. The final job bootstraps from the public URLs.
 
 On Apple Silicon macOS, add the Intel macOS and Linux musl Rust targets
 for the release packagers. Build the platform bundle and pass its
