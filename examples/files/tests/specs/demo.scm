@@ -1,5 +1,5 @@
 (demo "Inspect a scan and compare it with a calibration image"
-  (setup (window-size 680 500))
+  (setup (window-size 680 548))
   (steps
     (drop-files (file-drop-target "Drop files here") "tests/fixtures/inspection.png")
     (await-work)

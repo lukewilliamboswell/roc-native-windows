@@ -90,6 +90,29 @@ Use \`select-cell-range\` with the grid and two row-column pairs to set a
 rectangle. \`paste-grid\` supplies tab-separated text to the grid's normal
 paste handler without using the shared desktop clipboard.
 
+Custom surfaces accept `pointer-down`, `pointer-move`, `pointer-up` and
+`pointer-cancel` steps with an image or shader locator. Positions are
+normalized to 0–10000 per axis. Use `outside` for a move or release
+outside the zone. Send several positions in one move step to exercise
+latest-only delivery. A native slider accepts `set-slider`,
+`expect-slider` and navigation via `key-press`.
+
+[source,scheme]
+----
+(pointer-down (shader-view "Image comparison") 4200 5000)
+(pointer-move (shader-view "Image comparison") 4500 5000 7000 5000)
+(pointer-up (shader-view "Image comparison") outside)
+(expect-slider (slider "Comparison divider") 70)
+(key-press (slider "Comparison divider") "ArrowLeft")
+(await-work)
+(expect-shader (shader-view "Image comparison") "rendered")
+----
+
+Shader statuses include `rendered`, `fallback` and `error`. Wait for
+work before checking a frame or capturing it with `screenshot`.
+Use `(expect-shader-pixel LOCATOR X Y "RRGGBB" TOLERANCE)` to check a
+committed frame at an integer pixel coordinate from the upper left.
+
 Use `(expect-progress (progress-bar "Request progress") indeterminate)`
 while a request is held. An assertion can also check `idle` or
 `(determinate COMPLETED TOTAL)`. It reads the native bar's visibility,
@@ -165,7 +188,7 @@ hashes files through the production file adapter.
 `(folder "tests/fixtures/photos")` supplies a directory to a folder picker
 and runs the same bounded listing as a live selection. `(folder)`
 simulates cancelling the dialog. Fixture paths are relative to the app.
-`(await-work)` waits for file and Roc worker work to settle with a
+`(await-work)` waits for file, Roc worker, image and shader work to settle with a
 real-time bound. Use `(setup (live-effects http))` to exercise the real
 HTTP adapter or `(setup (live-effects time))` for real timers. Use a
 loopback HTTP fixture for an integration test that can run independently.

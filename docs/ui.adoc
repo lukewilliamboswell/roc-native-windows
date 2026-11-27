@@ -71,7 +71,10 @@ for state, stores, and worker tasks.
 | `Ui.file_button` | System file picker | Title, `on_files` handler, and optional `selection` (`SingleFile` or `MultipleFiles`)
 | `Ui.list_view` | Single-selection report | Label, columns, rows, selected key and handlers
 | `Ui.data_grid` | Editable report grid | Label, columns and table rows
-| `Ui.asset_image` | Bitmap image | Asset path, accessible `label`, `width` and `height`
+| `Ui.asset_image` | Packaged image | Asset path, accessible `label`, `width`, `height` and optional `fit`
+| `Ui.image` | Raster image | Raster source signal, accessible `label`, `width`, `height` and optional `fit`
+| `Ui.shader_view` | Shader-drawn surface | Packaged pixel shader, accessible `label`, size, optional textures and parameter signals
+| `Ui.slider` | Horizontal trackbar | Integer value signal, accessible `label`, `on_change`, optional range, step and focus reference
 |===
 
 Stack spacing, padding and image dimensions use device-independent pixels.
@@ -81,31 +84,6 @@ value. The default of 0 keeps a horizontal layout at every width.
 An image path is relative to the app's `assets/` directory. Give each
 interactive control a meaningful caption or label. The test runner uses
 those names to locate controls.
-
-[#native-styling]
-=== Native styling
-
-`Ui.window` accepts an `appearance` record whose `accent` defaults to
-`SystemAccent`. Supply `CustomAccent({ red, green, blue })` using three
-`U8` channels for an app-specific accent. Owned dialogs inherit their
-window's appearance. Windows contrast themes use the system colors.
-
-`Ui.text_with` defaults to `Body` style, `PrimaryText` tone and `Start`
-alignment. Other styles are `Caption`, `Heading`, `Title`, `Display` and
-`Monospace`. `SecondaryText` de-emphasizes supporting labels, and
-`AccentText` draws from the window accent with a readable foreground.
-Alignment can be `Start`, `Center` or `End`. Start and end follow the
-interface reading direction. Text wraps by default. Use `EllipsizeEnd`
-for a single line that retains its full accessible caption.
-
-`Ui.panel(props, content)` defaults to `Inset` surface, `NoBorder`,
-12 DIP of padding and `Natural` width. Use `AccentTint` for a tinted
-surface, `Outline` for a border, and `Fill` for the width available after
-fixed-width siblings and gaps. A panel uses a single element as its
-content. Use a stack inside it to group several controls.
-
-See Counter for a centered display value and Reading List for a title and
-an accent that carries across the app.
 
 Each `Ui.Choice` contains a string `key` and `label`. Use a nonempty key
 unique within the control and keep it stable when renaming or reordering
@@ -294,3 +272,112 @@ corner for the pasted rectangle. A selected range must match the paste size.
 A paste that exceeds the mounted rows, includes read-only cells or has
 unequal line lengths returns a paste error before any cells change.
 Ctrl+V in the open cell editor uses the native EDIT clipboard behavior.
+
+[#native-styling]
+== Native styling
+
+`Ui.window` accepts an `appearance` record whose `accent` defaults to
+`SystemAccent`. Supply `CustomAccent({ red, green, blue })` using three
+`U8` channels for an app-specific accent. Owned dialogs inherit their
+window's appearance. Windows contrast themes use the system colors.
+
+`Ui.text_with` defaults to `Body` style, `PrimaryText` tone and `Start`
+alignment. Other styles are `Caption`, `Heading`, `Title`, `Display` and
+`Monospace`. `SecondaryText` de-emphasizes supporting labels, and
+`AccentText` draws from the window accent with a readable foreground.
+Alignment can be `Start`, `Center` or `End`. Start and end follow the
+interface reading direction. Text wraps by default. Use `EllipsizeEnd`
+for a single line that retains its full accessible caption.
+
+`Ui.panel(props, content)` defaults to `Inset` surface, `NoBorder`,
+12 DIP of padding and `Natural` width. Use `AccentTint` for a tinted
+surface, `Outline` for a border, and `Fill` for the width available after
+fixed-width siblings and gaps. A panel uses a single element as its
+content. Use a stack inside it to group several controls.
+
+See Counter for a centered display value and Reading List for a title and
+an accent that carries across the app.
+
+[#raster-images]
+== Raster images
+
+Place PNG, JPEG (`.jpg` or `.jpeg`), and BMP artwork under `assets/`.
+`Ui.asset_image(path, props)` resolves its path from that directory. Pass
+an empty path to clear the picture. Use `fit: Contain` to center the
+picture in the requested size while keeping its aspect ratio. The default
+`Stretch` uses the full box. PNG alpha blends over the surrounding
+surface, and JPEG orientation is applied before fitting.
+
+To preview a picked or dropped `Engine.File`, issue `Ui.decode_image(file)`
+with `Engine.watch_latest`. Keep the resulting `Ui.Raster` in app state.
+Show it as `RasterImage(raster)` with `Ui.image`, or pass `NoImage` to clear
+the surface. Use `Ui.raster({ width, height, rgba })` when the app already
+has the pixels, such as a heatmap or rendered report page. Supply
+8-bit, straight-alpha sRGB bytes in top-down, row-major RGBA order.
+The decode path assumes sRGB for image colors.
+The constructor checks the dimensions and requires exactly four bytes per
+pixel. Images can be up to 8,192 pixels on either axis and 8,388,608
+pixels in total. Encoded preview inputs can be up to 32 MiB.
+
+Selected files remain opaque capabilities. The decoder passes an immutable
+host-held raster by capability. App-produced RGBA crosses through a typed
+binary attachment and is converted to premultiplied BGRA for presentation.
+The Files example uses one decoded image in an ordinary view and in a
+shader and supplies a second raster generated in Roc.
+
+[#shader-views]
+== Shader views
+
+Use `Ui.shader_view({ label, shader, width, height, ... })` for one
+Direct3D 11 pixel pass. Put precompiled shader-model 5.0 DXBC (`.cso`) in
+the app's assets directory. Keep the HLSL source alongside the app source.
+To compile the Files example shader on Windows, run this command from
+the example directory with FXC available.
+
+[source,powershell]
+----
+fxc /T ps_5_0 /E main /Fo assets/scan-contrast.cso shaders/scan-contrast.hlsl
+----
+
+Roc builds and packages the checked-in shader asset on macOS, Linux and
+Windows. The executable uses the Windows Direct3D 11 runtime.
+
+The host supplies a full-screen triangle with normalized `TEXCOORD0`
+coordinates from the upper left. Set `texture` for slot `t0` and
+`second_texture` for slot `t1`. Either can be `NoTexture` (the default),
+`AssetTexture(path)` or `RasterTexture(raster)`. The source spans UV 0–1
+on each axis. The `s0` sampler clamps at the edges and defaults to
+`Linear`. Use `Nearest` when exact texels matter. Sampled colors use
+normalized sRGB-encoded channels and premultiplied alpha. Return color
+in the same format for compositing.
+
+Declare named scalar floats in one constant buffer at `b0`. Supply all
+reflected values as `{ name, value: F32 }` records through the reactive
+`parameters` prop. The host checks names, finite values and supported
+bindings. A parameter change reuses the live texture. Windows uses a
+hardware device where available and can fall back to WARP, then to the
+unprocessed first texture or a visible diagnostic.
+
+[#custom-surface-input]
+== Surface input and sliders
+
+`Ui.image` and `Ui.shader_view` default to `ReadOnly`. Use
+`input: Interactive({ pointer, keys })` to opt into input. A `Pointer`
+binding gives the zone a name and supplies the needed `down`, `move`,
+`up` and `cancel` handlers. Choose `CaptureOnPress` to continue receiving
+mouse reports during a drag outside the surface, and `LatestMove` for
+the latest waiting move per frame. Coordinates are in 0–10000 inside the
+zone. An outside report is `Outside`. A pending move is delivered before
+the gesture ends.
+
+`FocusedKeys({ key, handle })` opts the surface into focus traversal.
+The host supports arrows, Home, End, Page Up and Page Down with a rendered
+`Engine.Keymap`. A pointer-only surface can use a companion native
+control for keyboard access.
+
+`Ui.slider(value, { label, on_change })` uses an `I32` signal. Its
+default range is `{ min: 0, max: 100 }` with a keyboard increment of 1.
+Set `range` and positive `step` to change them. The handler receives a
+requested position. Update the signal to commit the value. Use
+`reference` with a `Focus` command to move focus to the slider when
+a user drags its companion graphic.

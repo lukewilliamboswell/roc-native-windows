@@ -1,5 +1,5 @@
 (test "compare an app-produced raster with a picked image"
-  (setup (window-size 700 475))
+  (setup (window-size 700 548))
   (steps
     (files "tests/fixtures/inspection.png" "tests/fixtures/hello.txt")
     (await-work)

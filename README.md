@@ -45,9 +45,9 @@ Select a recording to open its example folder. [Run the examples on Windows](doc
   </tr>
   <tr>
     <td width="33%" valign="top">
-      <a href="examples/files/"><img src="docs/images/files.gif" width="100%" alt="Files displays a text preview and SHA-256 digest"></a><br>
+      <a href="examples/files/"><img src="docs/images/files.gif" width="100%" alt="Files adjusts scan contrast, moves a comparison divider, and shows the SHA-256 digest"></a><br>
       <a href="examples/files/"><strong>Files</strong></a><br>
-      Preview a file and check its SHA-256 digest.
+      Preview a scan, adjust contrast, and check its SHA-256 digest.
     </td>
     <td width="33%" valign="top">
       <a href="examples/http/"><img src="docs/images/http.gif" width="100%" alt="HTTP fetches a guide and shows the response"></a><br>

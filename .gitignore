@@ -8,4 +8,5 @@
 /examples/*/build/
 /examples/*/dist/
 /examples/*/.roc-fuzz/
+/tests/native-input/build/
 .zig-cache/

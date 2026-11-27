@@ -14,6 +14,13 @@ results from the host event pump. When an app no longer wants a result,
 the host can discard the reply while a pure computation finishes.
 A Roc crash in a worker stops the process.
 
+Windows Imaging Component decodes bounded images off the window thread.
+The image worker resamples large images to their display size and keeps
+the immutable source available for shader input. A separate Direct3D 11
+worker retains textures and coalesces pending changes for each view.
+It reads back the committed frame for compositing in the native child
+window. Screenshots and recordings use that same frame.
+
 [#redistributable-inputs]
 == What the bundle contains
 

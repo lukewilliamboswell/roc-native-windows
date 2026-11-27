@@ -135,6 +135,6 @@ the executable, `assets/`, and any top-level `LICENSE` or
 | Counter | Local state and a label updated by button actions
 | Todos | Tasks, due dates, and notes in a modal dialog
 | Workers | A stock-count grid with validation and snapshot reconciliation on a Roc worker
-| Files | File selection, previews, SHA-256, and comparison in a second window
+| Files | File selection, text and raster previews, contrast adjustment, image comparison and SHA-256
 | HTTP | WinHTTP requests and bounded response previews
 |===
