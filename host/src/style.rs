@@ -176,15 +176,19 @@ pub(crate) mod native {
                     }
                 });
                 GetLocaleInfoEx(null(), LOCALE_IREADINGLAYOUT, direction.as_mut_ptr(), 2);
+                let style = GetWindowLongPtrW(window, GWL_EXSTYLE) as u32;
+                let (background, foreground) = if style & WS_EX_DLGMODALFRAME != 0 {
+                    (COLOR_BTNFACE, COLOR_BTNTEXT)
+                } else {
+                    (COLOR_WINDOW, COLOR_WINDOWTEXT)
+                };
                 Self {
-                    background: GetSysColor(COLOR_BTNFACE),
-                    foreground: GetSysColor(COLOR_BTNTEXT),
+                    background: GetSysColor(background),
+                    foreground: GetSysColor(foreground),
                     accent,
                     high_contrast,
                     rtl: direction[0] == b'1' as u16
-                        || GetWindowLongPtrW(window, GWL_EXSTYLE) as u32
-                            & (WS_EX_LAYOUTRTL | WS_EX_RTLREADING)
-                            != 0,
+                        || style & (WS_EX_LAYOUTRTL | WS_EX_RTLREADING) != 0,
                 }
             }
         }
