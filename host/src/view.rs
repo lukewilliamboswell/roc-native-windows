@@ -2666,12 +2666,14 @@ mod tests {
             let dc = CreateCompatibleDC(null_mut());
             assert!(!dc.is_null());
             let previous = SelectObject(dc, fonts.get(FontRole::Body));
+            let mut metrics = TEXTMETRICW::default();
+            assert_ne!(GetTextMetricsW(dc, &mut metrics), 0);
             let single = grid_status_height(dc, text, 1500, 96);
             let wrapped = grid_status_height(dc, text, 160, 96);
             SelectObject(dc, previous);
             DeleteDC(dc);
-            assert!(single > scale(96, 22));
-            assert!(wrapped > single);
+            assert!(single >= metrics.tmHeight);
+            assert!(wrapped >= single + metrics.tmHeight);
         }
     }
 

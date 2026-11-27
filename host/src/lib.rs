@@ -14,6 +14,8 @@ mod accessibility_grid;
 
 #[cfg(windows)]
 mod abi;
+#[cfg(all(test, windows))]
+mod abi_test_app;
 #[cfg(windows)]
 mod app_resource;
 #[cfg(windows)]

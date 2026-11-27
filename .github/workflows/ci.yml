@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      accessibility:
+        description: Run the external Windows UI Automation probe
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -51,9 +56,15 @@ jobs:
         run: rustup show
       - name: Run the Blueprint source or build checks
         run: blueprint run ${{ matrix.task }}
+      - name: Run Windows host unit tests
+        if: runner.os == 'Windows'
+        run: cargo test --locked --manifest-path host/Cargo.toml
       - name: Run native Windows scenarios
         if: runner.os == 'Windows'
         run: blueprint run test-native -- --target x64mingw
+      - name: Probe Windows UI Automation
+        if: runner.os == 'Windows' && inputs.accessibility
+        run: blueprint run test-accessibility
       - name: Build the documentation
         if: runner.os == 'macOS'
         run: blueprint run docs
