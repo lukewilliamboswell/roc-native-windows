@@ -55,9 +55,9 @@ Select a recording to open its example folder. [Run the examples on Windows](doc
       Fetch a response and inspect its status and body.
     </td>
     <td width="33%" valign="top">
-      <a href="examples/workers/"><img src="docs/images/workers.gif" width="100%" alt="Workers shows the calculation result and a tap counted while computing"></a><br>
+      <a href="examples/workers/"><img src="docs/images/workers.gif" width="100%" alt="Workers edits a stock count and shows the reconciliation result"></a><br>
       <a href="examples/workers/"><strong>Workers</strong></a><br>
-      Run a Roc calculation in the background.
+      Reconcile stock counts in a background worker.
     </td>
   </tr>
 </table>
