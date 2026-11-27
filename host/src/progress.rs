@@ -67,7 +67,7 @@ pub(crate) mod native {
         PBM_GETPOS, PBM_GETRANGE, PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_STYLE, GetWindowLongPtrW, IsWindowVisible, SendMessageW, SetWindowLongPtrW,
+        GWL_STYLE, GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, WS_VISIBLE,
     };
 
     #[derive(Default)]
@@ -111,9 +111,11 @@ pub(crate) mod native {
         pub(crate) fn expect(hwnd: HWND, expected: Progress) -> Result<()> {
             // SAFETY: This spec locator resolves to a live progress bar on its UI thread.
             let actual = unsafe {
-                if IsWindowVisible(hwnd) == 0 {
+                // Driven specs may keep the top-level window hidden.
+                let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+                if style & WS_VISIBLE as isize == 0 {
                     NativeProgress::Hidden
-                } else if GetWindowLongPtrW(hwnd, GWL_STYLE) & PBS_MARQUEE as isize != 0 {
+                } else if style & PBS_MARQUEE as isize != 0 {
                     NativeProgress::Marquee
                 } else {
                     let low = SendMessageW(hwnd, PBM_GETRANGE, 1, 0);
