@@ -3,6 +3,7 @@
 #![allow(non_upper_case_globals)] // UI Automation identifiers follow the Windows SDK spelling.
 
 use crate::accessibility::{Mount, boolean, integer, string, text_changed, unavailable};
+use crate::accessibility_abi::{FragmentAbi, FragmentRootAbi, HwndOverrideAbi, SimpleAbi};
 use crate::wire::Key;
 use std::collections::{BTreeMap, VecDeque};
 use std::ptr::null_mut;
@@ -273,10 +274,10 @@ impl Drop for Projection {
 }
 
 #[implement(
-    IRawElementProviderSimple,
-    IRawElementProviderFragment,
-    IRawElementProviderFragmentRoot,
-    IRawElementProviderHwndOverride,
+    SimpleAbi,
+    FragmentAbi,
+    FragmentRootAbi,
+    HwndOverrideAbi,
     IGridProvider,
     IGridItemProvider,
     ITableProvider,
@@ -295,7 +296,8 @@ struct Provider {
 
 impl Provider {
     fn element(hwnd: usize, state: Arc<Mutex<State>>, item: Item) -> IRawElementProviderSimple {
-        Self { hwnd, state, item }.into()
+        let provider: SimpleAbi = Self { hwnd, state, item }.into();
+        provider.into_provider()
     }
 }
 
@@ -536,7 +538,7 @@ impl IRawElementProviderFragmentRoot_Impl for Provider_Impl {
     }
 }
 
-#[implement(IRawElementProviderSimple)]
+#[implement(SimpleAbi)]
 struct EditorOverride {
     hwnd: usize,
     context: IRawElementProviderSimple,
@@ -576,11 +578,12 @@ impl IRawElementProviderHwndOverride_Impl for Provider_Impl {
                 .editor
                 .filter(|(_, editor)| *editor == hwnd.0 as usize)
                 .ok_or_else(absent)?;
-            Ok(EditorOverride {
+            let provider: SimpleAbi = EditorOverride {
                 hwnd: editor,
                 context: self.other(Item::Cell(key)),
             }
-            .into())
+            .into();
+            Ok(provider.into_provider())
         })
     }
 }

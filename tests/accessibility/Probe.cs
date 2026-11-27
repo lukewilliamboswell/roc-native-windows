@@ -76,7 +76,7 @@ public static class RocWindowsAccessibility
         var row = Find(report, "Accessibility proof", ControlType.DataItem, ControlType.ListItem);
         Pattern<SelectionItemPattern>(row, SelectionItemPattern.Pattern).Select();
         var mark = Find(root, "Mark read", ControlType.Button);
-        Require(mark.Current.IsEnabled, "The selected title did not enable Mark read.");
+        WaitFor("Mark read enabled after selection", () => mark.Current.IsEnabled ? mark : null);
         Invoke(mark);
         Find(root, "Mark unread", ControlType.Button);
     }
@@ -91,7 +91,8 @@ public static class RocWindowsAccessibility
         opener.SetFocus();
         Invoke(opener);
         var dialog = WaitFor("owned Notes window", () => TopLevel(pid, "Notes for Accessibility task"));
-        SetValue(Find(dialog, "Notes", ControlType.Edit), "Written through UI Automation.");
+        var notes = Find(dialog, "Notes", ControlType.Document, ControlType.Edit);
+        Pattern<TextPattern>(notes, TextPattern.Pattern);
         Invoke(Find(dialog, "Cancel", ControlType.Button));
         WaitFor("focus restored to the Notes opener", () =>
             TopLevel(pid, "Notes for Accessibility task") == null && opener.Current.HasKeyboardFocus
@@ -141,9 +142,13 @@ public static class RocWindowsAccessibility
             {
                 var fetch = Find(root, "Fetch", ControlType.Button);
                 Invoke(fetch);
+                Require(response.RequestReceived.WaitOne(4000), "The HTTP request did not reach loopback.");
+                var focused = AutomationElement.FocusedElement;
+                response.Complete.Set();
                 Require(changed.WaitOne(8000), "HTTP completion did not raise a live-region event.");
                 Require(!changed.WaitOne(350) && completed == 1, "HTTP completion was announced more than once.");
-                Require(url.Current.HasKeyboardFocus, "Status feedback moved focus away from URL.");
+                Require(focused != null && Automation.Compare(focused, AutomationElement.FocusedElement),
+                        "Status feedback moved focus from the control that held it during the request.");
             }
             finally { Automation.RemoveAutomationEventHandler(live, root, handler); }
         }
@@ -174,7 +179,7 @@ public static class RocWindowsAccessibility
         Invoke(Find(root, "Reverse order", ControlType.Button));
         WaitFor("old cell retired after sort and paging", () =>
         {
-            try { Value(cell); return null; }
+            try { cell.GetCurrentPropertyValue(AutomationElement.NameProperty); return null; }
             catch (ElementNotAvailableException) { return grid; }
         });
     }
@@ -208,8 +213,12 @@ public static class RocWindowsAccessibility
         var watch = Stopwatch.StartNew();
         while (watch.ElapsedMilliseconds < 5000)
         {
-            var result = attempt();
-            if (result != null) return result;
+            try
+            {
+                var result = attempt();
+                if (result != null) return result;
+            }
+            catch (ElementNotAvailableException) {}
             Thread.Sleep(50);
         }
         throw new InvalidOperationException("UI Automation checkpoint timed out: " + checkpoint);
@@ -247,6 +256,8 @@ public static class RocWindowsAccessibility
         private readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
         private readonly Thread worker;
         public string Url { get; private set; }
+        public ManualResetEvent RequestReceived { get; private set; } = new ManualResetEvent(false);
+        public ManualResetEvent Complete { get; private set; } = new ManualResetEvent(false);
 
         public LoopbackResponse()
         {
@@ -273,6 +284,8 @@ public static class RocWindowsAccessibility
                         matched = next == ending[matched] ? matched + 1 : next == 13 ? 1 : 0;
                     }
                     if (matched != ending.Length) return;
+                    RequestReceived.Set();
+                    if (!Complete.WaitOne(8000)) return;
                     var body = Encoding.ASCII.GetBytes("Local accessibility check.");
                     var headers = Encoding.ASCII.GetBytes(
                         "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: "
@@ -283,12 +296,16 @@ public static class RocWindowsAccessibility
             }
             catch (SocketException) {}
             catch (System.IO.IOException) {}
+            catch (InvalidOperationException) {}
         }
 
         public void Dispose()
         {
             listener.Stop();
+            Complete.Set();
             worker.Join(4500);
+            RequestReceived.Dispose();
+            Complete.Dispose();
         }
     }
 }

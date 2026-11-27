@@ -4,6 +4,8 @@
 #[cfg(windows)]
 mod accessibility;
 #[cfg(windows)]
+mod accessibility_abi;
+#[cfg(windows)]
 mod accessibility_grid;
 
 #[cfg(windows)]

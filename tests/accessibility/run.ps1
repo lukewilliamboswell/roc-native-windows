@@ -10,7 +10,14 @@ param(
 $ErrorActionPreference = "Stop"
 if ($AppPid -gt 0) {
     try {
-        Add-Type -Path (Join-Path $PSScriptRoot "Probe.cs") -ReferencedAssemblies "System.dll", "System.Core.dll", "UIAutomationClient.dll", "UIAutomationTypes.dll", "WindowsBase.dll"
+        Add-Type -AssemblyName "UIAutomationClient", "UIAutomationTypes", "WindowsBase"
+        $references = @(
+            "System.dll", "System.Core.dll",
+            [System.Windows.Automation.AutomationElement].Assembly.Location,
+            [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location,
+            [System.Windows.Rect].Assembly.Location
+        )
+        Add-Type -Path (Join-Path $PSScriptRoot "Probe.cs") -ReferencedAssemblies $references
         [RocWindowsAccessibility]::Check([Diagnostics.Process]::GetProcessById($AppPid), $Check)
         exit 0
     } catch {

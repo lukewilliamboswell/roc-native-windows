@@ -3,7 +3,9 @@
 #![allow(non_upper_case_globals)] // UI Automation identifiers follow the Windows SDK spelling.
 
 use crate::Result;
+use crate::accessibility_abi::SimpleAbi;
 use crate::view::wide;
+use std::cell::RefCell;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{E_NOINTERFACE, HWND, LPARAM, VARIANT_BOOL, WPARAM};
@@ -20,8 +22,27 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, IsWindowVisible, OBJID_CLIENT, WM_GETOBJECT, WM_NCDESTROY,
+    GA_ROOT, GetAncestor, ISMEX_NOSEND, InSendMessageEx, IsWindowVisible, OBJID_CLIENT,
+    WM_GETOBJECT, WM_NCDESTROY,
 };
+
+thread_local! {
+    static RETIRING: RefCell<Vec<IRawElementProviderSimple>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn disconnect_retired() {
+    // SAFETY: Only the owning UI thread calls this, and UIA forbids disconnect
+    // during an inter-thread synchronous message.
+    unsafe {
+        if InSendMessageEx(std::ptr::null()) != ISMEX_NOSEND {
+            return;
+        }
+        let pending = RETIRING.with(|queue| std::mem::take(&mut *queue.borrow_mut()));
+        for provider in pending {
+            let _ = UiaDisconnectProvider(&provider);
+        }
+    }
+}
 
 pub(crate) struct Apartment;
 
@@ -134,7 +155,7 @@ pub(crate) struct Semantics {
     pub(crate) role: Role,
 }
 
-#[implement(IRawElementProviderSimple)]
+#[implement(SimpleAbi)]
 struct Element {
     hwnd: usize,
     semantics: Arc<Mutex<Option<Semantics>>>,
@@ -247,13 +268,13 @@ pub(crate) struct ElementProvider {
 impl ElementProvider {
     pub(crate) fn new(hwnd: RawHwnd, initial: Semantics) -> Result<Self> {
         let semantics = Arc::new(Mutex::new(Some(initial.clone())));
-        let provider = Element {
+        let provider: SimpleAbi = Element {
             hwnd: hwnd as usize,
             semantics: semantics.clone(),
         }
         .into();
         Ok(Self {
-            mount: Mount::new(hwnd, provider)?,
+            mount: Mount::new(hwnd, provider.into_provider())?,
             semantics,
             announced: initial,
         })
@@ -356,9 +377,22 @@ impl Drop for Mount {
         // SAFETY: Remove the subclass before releasing its owned data pointer.
         unsafe {
             RemoveWindowSubclass(self.hwnd, Some(serve), 1);
-            let _ = UiaDisconnectProvider(self.provider());
+            clear_event_map(self.hwnd);
         }
+        RETIRING.with(|queue| queue.borrow_mut().push(self.provider().clone()));
     }
+}
+
+unsafe fn clear_event_map(hwnd: RawHwnd) {
+    // SAFETY: This call releases UIA's event associations with the retiring HWND.
+    unsafe {
+        UiaReturnRawElementProvider(
+            HWND(hwnd),
+            WPARAM(0),
+            LPARAM(0),
+            None::<&IRawElementProviderSimple>,
+        )
+    };
 }
 
 unsafe extern "system" fn serve(
@@ -382,6 +416,7 @@ unsafe extern "system" fn serve(
         }
         if message == WM_NCDESTROY {
             RemoveWindowSubclass(hwnd, Some(serve), id);
+            clear_event_map(hwnd);
         }
         DefSubclassProc(hwnd, message, wp, lp)
     }

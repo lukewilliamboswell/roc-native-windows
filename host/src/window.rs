@@ -137,6 +137,7 @@ impl App {
     }
 
     fn poll(&mut self) -> Result<()> {
+        crate::accessibility::disconnect_retired();
         if self.exited() {
             return Ok(());
         }
@@ -1078,6 +1079,7 @@ fn run_message_loop() -> Result<()> {
     // SAFETY: Translate and dispatch messages from this thread's own queue.
     unsafe {
         loop {
+            crate::accessibility::disconnect_retired();
             match GetMessageW(&mut message, null_mut(), 0, 0) {
                 -1 => return Err(last_error("read the Windows message queue")),
                 0 if message.wParam == 0 => return Ok(()),
@@ -1196,6 +1198,7 @@ fn clear_app() {
         drop(state.take());
     });
     crate::shader::shutdown();
+    crate::accessibility::disconnect_retired();
 }
 
 #[cfg(not(test))]
