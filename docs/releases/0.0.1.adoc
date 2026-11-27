@@ -1,0 +1,51 @@
+= roc-native-windows 0.0.1
+
+The first release builds native Win32 desktop apps for Windows x64 and ARM64.
+The included CLI creates a Reading List or Counter starter and packages apps
+as MSI installers or ZIPs.
+
+== Roc compiler
+
+Built and tested with Roc `{roc-version}`. Earlier versions may be incompatible.
+Use `roc version` to check your installation.
+https://github.com/roc-lang/nightlies/releases/tag/{roc-version}[Download the tested Roc nightly].
+
+== Use this release
+
+The Reading List starter uses this header in `src/main.roc`. Use the
+`pf` declaration to pin the same platform bundle in your own app.
+
+[source,roc]
+----
+app [main, native] {
+    logic: "../logic/main.roc",
+    pf: platform "{platform-url}",
+}
+----
+
+== Getting started
+
+With the tested compiler available as `roc`, run this in PowerShell on Windows x64.
+
+[source,powershell]
+----
+$tool = '{cli-url}'
+roc $tool -- init reading-list
+Set-Location reading-list
+roc windows.roc -- test --target x64mingw
+roc windows.roc -- package --target x64mingw
+----
+
+The `init` command creates the app and writes `windows.roc`. Packaging
+downloads the matching MSI packager and writes `dist/reading-list-x64mingw.msi`.
+Open the installer and launch Reading List from the Start menu, or run
+it directly during development.
+
+[source,powershell]
+----
+roc windows.roc -- run --target x64mingw
+----
+
+Use `--target arm64mingw` for Windows ARM64. To start with a single-file
+Counter, run `roc $tool -- init --simple counter` from the parent directory.
+https://lukewilliamboswell.github.io/roc-native-windows/apps.html[App manual].
