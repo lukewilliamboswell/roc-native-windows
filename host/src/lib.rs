@@ -1,6 +1,10 @@
 //! Native host for the Roc signals engine. The wire model is portable, while
 //! the allocator ABI and HWNDs are confined to the Windows host.
 
+// The Windows test harness replaces the Roc-linked entry point. Production
+// builds still lint the native runtime with the entry point enabled.
+#![cfg_attr(all(test, windows), allow(dead_code))]
+
 #[cfg(windows)]
 mod accessibility;
 #[cfg(windows)]

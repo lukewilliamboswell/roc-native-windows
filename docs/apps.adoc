@@ -80,7 +80,7 @@ Import `pf.Clipboard` and issue `Clipboard.text(value)` through
 action even when two consecutive copies have the same text. Native edit
 controls also support their usual Windows clipboard shortcuts.
 
-[#ship-a-windows-app]
+[#system-services]
 == Read time and regional settings
 
 `boot.now_ms` and `Engine.timer(0)` provide signed Unix milliseconds.
@@ -128,6 +128,7 @@ worker and only the current effect can deliver a response. Regional
 facts, timestamps, and bytes stay in the app until it chooses to share
 them. Clipboard export is a separate user action.
 
+[#ship-a-windows-app]
 == Package an app for distribution
 
 Set app and MSI metadata in `windows.json` at the app root, beside `windows.roc`.
