@@ -486,6 +486,17 @@ Ui := [].{
 			props.tabs.map(static_choice).append(Engine.element("ui-tab-panel", [], [page])),
 		)
 
+	## A labeled area that receives Explorer file drops.
+	FileDropTargetProps(ctx) := { label : Str, on_files : Engine.FilesHandler(ctx) }
+
+	## Mount content inside a native file drop target.
+	file_drop_target : FileDropTargetProps(ctx), Elem(ctx) -> Elem(ctx)
+	file_drop_target = |props, content|
+		Engine.element("ui-file-drop-target", [
+			Engine.attr("label", props.label),
+			Engine.on_files(Drop, props.on_files),
+		], [content])
+
 	## Receive handles for the files selected by the user.
 	FileButtonProps(ctx) := {
 		on_files : Engine.FilesHandler(ctx),

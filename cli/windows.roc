@@ -713,7 +713,12 @@ spec_step = |expr| {
 			}?
 			Ok(parts.append(word))
 		}
-		("files", _) => spec_texts(args, "Expected a fixture path in quotes")
+		("drop-files", [locator, .. as files]) => {
+			parts = spec_locator(locator)?
+			fixtures = spec_texts(files, "Expected a fixture path in quotes")?
+			Ok(parts.concat(fixtures))
+		}
+		("files", _) | ("drop-files-outside", _) => spec_texts(args, "Expected a fixture path in quotes")
 		("folder", []) | ("folder", [Quoted(_, _)]) => spec_texts(args, "Expected a fixture directory in quotes")
 		("await-work", []) | ("clipboard-busy", []) => Ok([])
 		("expect-clipboard", [count, Quoted(value, _)]) =>
@@ -831,7 +836,7 @@ spec_locator = |expr| {
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button", "tree-view"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "file-drop-target", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button", "tree-view"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?

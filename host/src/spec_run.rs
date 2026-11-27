@@ -302,6 +302,7 @@ impl App {
     fn spec_step(&mut self, step: &Step<'_>) -> Result<()> {
         match (step.command, step.args.as_slice()) {
             ("files", _) => self.spec_files(&step.args),
+            ("drop-files-outside", _) => self.spec_drop(None, &step.args),
             ("folder", []) => Ok(()),
             ("folder", [name]) => self.spec_folder(name),
             ("clipboard-busy", []) => {
@@ -392,7 +393,7 @@ impl App {
                 "click" | "fill" | "toggle" | "press-enter" | "expect-visible" | "expect-absent"
                 | "expect-text" | "expect-checked" | "expect-disabled" | "select"
                 | "expect-selection" | "set-date" | "expect-date" | "set-time" | "expect-time"
-                | "expect-progress" | "expand" | "collapse" | "expect-expanded",
+                | "expect-progress" | "expand" | "collapse" | "expect-expanded" | "drop-files",
                 _,
             ) => self.control_step(step),
             (
@@ -452,6 +453,16 @@ impl App {
         self.poll()
     }
 
+    fn spec_drop(&mut self, target: Option<Key>, args: &[&str]) -> Result<()> {
+        let point = self.surface.spec_drop_point(&self.tree, target)?;
+        let files = args
+            .iter()
+            .map(|name| fixture_path(name))
+            .collect::<Result<Vec<_>>>()?;
+        self.dropped(Some(point), files)?;
+        self.poll()
+    }
+
     fn spec_folder(&mut self, fixture: &str) -> Result<()> {
         let key = self.one_control(&[("folder-button", "")])?;
         if self.surface.spec_disabled(key)? {
@@ -486,6 +497,7 @@ impl App {
         let key = self.one_control(&selectors)?;
         match (step.command, args) {
             ("expect-visible", []) => Ok(()),
+            ("drop-files", files) => self.spec_drop(Some(key), files),
             ("expect-text", [expected]) => expect(self.surface.spec_text(key)?.as_str(), *expected),
             ("expect-checked", [value]) => {
                 if self.surface.spec_handle(key).is_none() || !self.surface.kind(key).is_checkbox()

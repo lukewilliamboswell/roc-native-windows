@@ -16,7 +16,7 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemServices::{
@@ -34,7 +34,9 @@ use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi}
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetFocus, IsWindowEnabled, SetFocus,
 };
-use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows_sys::Win32::UI::Shell::{
+    DefSubclassProc, DragAcceptFiles, RemoveWindowSubclass, SetWindowSubclass,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::{PCWSTR, w};
 
@@ -43,6 +45,7 @@ pub(crate) enum Control {
     Text,
     Button,
     FileButton,
+    FileDropTarget,
     FolderButton,
     Checkbox,
     AggregateCheckbox,
@@ -72,6 +75,7 @@ impl Control {
             "ui-text" => Self::Text,
             "ui-button" => Self::Button,
             "ui-file-button" => Self::FileButton,
+            "ui-file-drop-target" => Self::FileDropTarget,
             "ui-folder-button" => Self::FolderButton,
             "ui-checkbox" => Self::Checkbox,
             "ui-aggregate-checkbox" => Self::AggregateCheckbox,
@@ -147,6 +151,7 @@ impl Control {
             Self::Button | Self::FileButton | Self::FolderButton => {
                 (0, w!("BUTTON"), WS_TABSTOP | BS_PUSHBUTTON as u32)
             }
+            Self::FileDropTarget => (0, w!("BUTTON"), BS_GROUPBOX as u32 | WS_CLIPSIBLINGS),
             Self::Checkbox => (0, w!("BUTTON"), WS_TABSTOP | BS_AUTOCHECKBOX as u32),
             Self::AggregateCheckbox => (0, w!("BUTTON"), WS_TABSTOP | BS_3STATE as u32),
             Self::Edit => (
@@ -572,6 +577,100 @@ impl Surface {
             return Err("expect-selection requires a choice control".into());
         }
         Ok(view.choices.selected_key(view.handle, view.kind))
+    }
+
+    pub(crate) fn register_file_drop(&self, root_listener: bool) {
+        let accepted = root_listener
+            || self
+                .views
+                .values()
+                .any(|view| view.kind == Control::FileDropTarget);
+        // SAFETY: This is the live app window on the UI thread.
+        unsafe {
+            let style = GetWindowLongPtrW(self.window, GWL_EXSTYLE);
+            if ((style & WS_EX_ACCEPTFILES as isize) != 0) != accepted {
+                DragAcceptFiles(self.window, i32::from(accepted));
+            }
+        }
+    }
+
+    pub(crate) fn drop_target(&self, tree: &Tree, point: POINT) -> Option<Key> {
+        // SAFETY: The point is in the root coordinate system. The lookup
+        // follows the live child HWND in z order, including system controls.
+        let hwnd = unsafe { ChildWindowFromPointEx(self.window, point, CWP_SKIPINVISIBLE) };
+        if hwnd.is_null() || hwnd == self.window {
+            return None;
+        }
+        let mut key = self.key(hwnd).or_else(|| {
+            self.views
+                .iter()
+                .find_map(|(&key, view)| (hwnd == view.label).then_some(key))
+        })?;
+        loop {
+            if self
+                .views
+                .get(&key)
+                .is_some_and(|view| view.kind == Control::FileDropTarget)
+            {
+                return Some(key);
+            }
+            key = tree.parent(key)?;
+        }
+    }
+
+    pub(crate) fn spec_drop_point(&self, tree: &Tree, target: Option<Key>) -> Result<POINT> {
+        // SAFETY: The rectangles are writable and their HWNDs are live views.
+        let candidates = unsafe {
+            let mut client = RECT::default();
+            GetClientRect(self.window, &mut client);
+            let bounds = if let Some(key) = target {
+                let view = self
+                    .views
+                    .get(&key)
+                    .filter(|view| view.kind == Control::FileDropTarget)
+                    .ok_or("drop-files requires a file drop target")?;
+                let mut frame = RECT::default();
+                GetWindowRect(view.handle, &mut frame);
+                MapWindowPoints(null_mut(), self.window, (&mut frame as *mut RECT).cast(), 2);
+                RECT {
+                    left: frame.left.max(client.left),
+                    top: frame.top.max(client.top),
+                    right: frame.right.min(client.right),
+                    bottom: frame.bottom.min(client.bottom),
+                }
+            } else {
+                client
+            };
+            if bounds.right <= bounds.left || bounds.bottom <= bounds.top {
+                return Err("drop area is outside the viewport".into());
+            }
+            [
+                POINT {
+                    x: bounds.left,
+                    y: bounds.top,
+                },
+                POINT {
+                    x: bounds.right - 1,
+                    y: bounds.top,
+                },
+                POINT {
+                    x: bounds.left,
+                    y: bounds.bottom - 1,
+                },
+                POINT {
+                    x: bounds.right - 1,
+                    y: bounds.bottom - 1,
+                },
+                POINT {
+                    x: (bounds.left + bounds.right) / 2,
+                    y: (bounds.top + bounds.bottom) / 2,
+                },
+            ]
+        };
+        candidates
+            .into_iter()
+            .find(|&point| self.drop_target(tree, point) == target)
+            .ok_or_else(|| "no exposed point for the requested drop area".into())
     }
 
     pub(crate) fn tree_notification(
@@ -1006,9 +1105,10 @@ impl Surface {
                         node.attr("title").unwrap_or("").into()
                     }
                     Control::Edit => node.attr("value").unwrap_or("").into(),
-                    Control::RadioGroup | Control::Tabs | Control::TreeView => {
-                        node.attr("label").unwrap_or("").into()
-                    }
+                    Control::RadioGroup
+                    | Control::Tabs
+                    | Control::TreeView
+                    | Control::FileDropTarget => node.attr("label").unwrap_or("").into(),
                     Control::TextArea => canonical_lines(node.attr("value").unwrap_or("")),
                     Control::Image | Control::Toolbar => node.attr("label").unwrap_or("").into(),
                     _ => tree.caption(key),
@@ -1274,6 +1374,28 @@ impl Surface {
             return (0, 0);
         };
         if let Some(view) = self.views.get(&key) {
+            if view.kind == Control::FileDropTarget {
+                let inset = scale(self.dpi, 12);
+                let header = scale(self.dpi, 24);
+                let inner = (max_width - inset * 2).max(1);
+                let mut height = header;
+                for &child in &node.children {
+                    height += self
+                        .layout(tree, child, dc, inner, x + inset, y + height, placements)
+                        .1;
+                }
+                height += inset;
+                // Paint the native frame behind the content HWNDs without
+                // changing the tab order of the interactive children.
+                placements.push(Placement {
+                    key,
+                    x,
+                    y,
+                    width: max_width,
+                    height,
+                });
+                return (max_width, height);
+            }
             if view.kind == Control::Tabs
                 && let Some(panel) = tab_panel(tree, node)
             {
@@ -1518,7 +1640,9 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
                 }
                 + if view.grid.is_some() { dip(22) } else { 0 },
         ),
-        Control::Tabs => unreachable!("tab containers lay out their panels separately"),
+        Control::Tabs | Control::FileDropTarget => {
+            unreachable!("containers lay out their content separately")
+        }
         Control::TreeView => (
             max_width,
             // SAFETY: This measures a live native tree using the current UI font.

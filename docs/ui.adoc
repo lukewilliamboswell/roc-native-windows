@@ -48,6 +48,7 @@ for state, stores, and worker tasks.
 | `Ui.radio_group` | Labeled radio buttons | `label`, static `choices`, `selected` key, `on_select`, optional `enabled`
 | `Ui.tree_view` | Hierarchical selection | `label`, `nodes`, `selected`, `on_select`, `expanded`, `on_expand`, optional `enabled` and `visible_rows` (default 8)
 | `Ui.tabs` | Tab strip and active page | `label`, static `tabs`, `selected` key, `on_select` and the page element
+| `Ui.file_drop_target` | Labeled Explorer drop area | `label`, `on_files` and content
 | `Ui.file_button` | System file picker | Title, `on_files` handler, and optional `selection` (`SingleFile` or `MultipleFiles`)
 | `Ui.list_view` | Single-selection report | Label, columns, rows, selected key and handlers
 | `Ui.data_grid` | Editable report grid | Label, columns and table rows
@@ -109,6 +110,12 @@ Use `Ui.Progress.Indeterminate` while work is active and its total is
 unknown. `Determinate({ completed, total })` caps completed work at total.
 A zero total resolves to `Idle`. The bar and its label keep their layout
 space while idle, and the animation runs in the native control.
+
+`Ui.file_drop_target(props, content)` accepts an Explorer file drop over
+its frame or content. A drop over nested targets goes to the innermost
+target. Its `on_files` handler receives the same file capabilities and
+refusal count as the file picker. Keep a file picker in the area so users
+can also open files with the keyboard.
 
 A multi-file confirmation delivers its files and refusal count in one
 event. Cancelling the picker leaves the app's selection alone.

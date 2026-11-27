@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{SystemTime, UNIX_EPOCH};
-use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
 use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOW;
 use windows_sys::Win32::Security::Cryptography::{
@@ -41,7 +41,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F2, VK_LEFT, VK_MENU,
     VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
+use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, DragQueryPoint, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use windows_sys::core::w;
 
@@ -227,6 +227,8 @@ impl App {
         if let Some(taskbar) = &mut self.taskbar {
             taskbar.update(self.surface.taskbar_progress());
         }
+        self.surface
+            .register_file_drop(self.tree.event(crate::wire::ROOT, "drop").is_some());
         for (op, id) in references {
             if let Some(key) = self.tree.reference(id) {
                 self.surface.reference(op, key);
@@ -594,8 +596,11 @@ impl App {
         Ok(())
     }
 
-    fn dropped(&mut self, paths: Vec<PathBuf>) -> Result<()> {
-        if let Some((node, listener)) = self.tree.event(crate::wire::ROOT, "drop") {
+    fn dropped(&mut self, point: Option<POINT>, paths: Vec<PathBuf>) -> Result<()> {
+        let target = point
+            .and_then(|point| self.surface.drop_target(&self.tree, point))
+            .unwrap_or(crate::wire::ROOT);
+        if let Some((node, listener)) = self.tree.event(target, "drop") {
             self.effects.deliver_paths(node, listener.handler, paths)?;
         }
         Ok(())
@@ -686,11 +691,14 @@ fn zone_offset() -> i32 {
     }
 }
 
-fn paths_from_drop(drop: HDROP) -> Vec<PathBuf> {
+fn paths_from_drop(drop: HDROP) -> (Option<POINT>, Vec<PathBuf>) {
     let mut paths = Vec::new();
+    let mut point = POINT::default();
+    let client;
     // SAFETY: The drop handle came from WM_DROPFILES; each UTF-16 buffer
     // includes room for the nul terminator, and DragFinish consumes it.
     unsafe {
+        client = DragQueryPoint(drop, &mut point) != 0;
         let count = DragQueryFileW(drop, u32::MAX, null_mut(), 0);
         for index in 0..count {
             let len = DragQueryFileW(drop, index, null_mut(), 0);
@@ -702,7 +710,7 @@ fn paths_from_drop(drop: HDROP) -> Vec<PathBuf> {
         }
         DragFinish(drop);
     }
-    paths
+    (client.then_some(point), paths)
 }
 
 fn embedded_display_name(instance: HMODULE) -> Option<String> {
@@ -829,7 +837,6 @@ fn run() -> Result<()> {
         }
 
         mount(window, None)?;
-        DragAcceptFiles(window, 1);
         if SetTimer(window, PUMP, 15, None) == 0 {
             return Err(last_error("start Roc event pump"));
         }
@@ -1046,7 +1053,10 @@ unsafe extern "system" fn window_proc(
                             app.surface
                                 .scroll(&app.tree, 0, Some((wparam >> 16) as i16))?
                         }
-                        WM_DROPFILES if !app.driven => app.dropped(paths.unwrap_or_default())?,
+                        WM_DROPFILES if !app.driven => {
+                            let (point, files) = paths.unwrap_or_default();
+                            app.dropped(point, files)?;
+                        }
                         _ => return Ok::<_, String>(false),
                     }
                     Ok(true)

@@ -392,6 +392,11 @@ impl Tree {
         &self.nodes[&key]
     }
 
+    #[cfg(windows)]
+    pub(crate) fn parent(&self, key: Key) -> Option<Key> {
+        self.nodes.get(&key)?.parent
+    }
+
     pub(crate) fn contains(&self, key: Key) -> bool {
         self.nodes.contains_key(&key)
     }
