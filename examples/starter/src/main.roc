@@ -48,8 +48,8 @@ view = || {
 			Ui.hstack(
 				{},
 				[
-					Ui.asset_image("reading-list.bmp", { label: "A checklist", width: 48, height: 48 }),
-					Ui.text("Reading list"),
+					Ui.asset_image("reading-list.bmp", { label: "A checklist", width: 40, height: 40 }),
+					Ui.text_with("Reading list", { style: Title, tone: AccentText }),
 				],
 			),
 			Ui.hstack(
@@ -144,7 +144,13 @@ view = || {
 	)
 	visible_count = visible_items.map(|list| "${list.len().to_str()} visible")
 	unread_count = items.map(|list| "${ReadingList.remaining(list).to_str()} unread")
-	Ui.window({ status_bar: StatusBar({ text: visible_count, trailing: [{ text: unread_count }] }) }, content)
+	Ui.window(
+		{
+			appearance: { accent: CustomAccent({ red: 123, green: 75, blue: 42 }) },
+			status_bar: StatusBar({ text: visible_count, trailing: [{ text: unread_count }] }),
+		},
+		content,
+	)
 }
 
 change : ReadingList.Action -> Engine.Write(_)

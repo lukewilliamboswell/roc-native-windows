@@ -35,17 +35,17 @@ view = || {
 	new_todo = { draft, due_date, due_time, id: cells.next_id.signal() }.Signal.map(
 		|{ draft: text, due_date: date, due_time: time, id }| { id, title: text.trim(), done: Bool.False, notes: "", due_date: date, due_time: time },
 	)
-	Ui.vstack(
+	content = Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
 			Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("todos.bmp", { label: "A three-item checklist", width: 48, height: 48 }),
-					Ui.text("To-do list"),
+					Ui.asset_image("todos.bmp", { label: "A three-item checklist", width: 32, height: 32 }),
+					Ui.text_with("To-do list", { style: Heading }),
 				],
 			),
-			Ui.text(todos.map(TaskList.remaining)),
+			Ui.text_with(todos.map(TaskList.remaining), { style: Caption, tone: SecondaryText }),
 			Ui.aggregate_checkbox(
 				"Complete all visible tasks",
 				{
@@ -76,6 +76,7 @@ view = || {
 			),
 		],
 	)
+	Ui.window({ appearance: { accent: CustomAccent({ red: 35, green: 106, blue: 84 }) } }, content)
 }
 
 todo_row = |item| {
@@ -117,7 +118,7 @@ todo_row = |item| {
 					),
 				],
 			),
-			Ui.text(item.map(TaskList.summary)),
+			Ui.text_with(item.map(TaskList.summary), { style: Caption, tone: SecondaryText }),
 		],
 	)
 }
@@ -145,7 +146,7 @@ notes_panel = || {
 	)
 	Ui.dialog(
 		{ title, open: is_open, on_close_request: Engine.handle(|_| [cells.note_editor.set(Closed)]) },
-		Ui.vstack(
+		Ui.panel({ surface: AccentTint, width: Fill }, Ui.vstack(
 			{},
 			[
 				Ui.text_area(draft, { label: "Notes", rows: 4, mode: Editable(Engine.handle(write_note)) }),
@@ -157,7 +158,7 @@ notes_panel = || {
 					],
 				),
 			],
-		),
+		)),
 	)
 }
 

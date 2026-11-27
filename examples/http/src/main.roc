@@ -32,21 +32,29 @@ view = || {
 			Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("http.bmp", { label: "A request arrow and a response arrow", width: 48, height: 48 }),
-					Ui.text("HTTP"),
+					Ui.asset_image("http.bmp", { label: "A request arrow and a response arrow", width: 28, height: 28 }),
+					Ui.text_with("HTTP", { style: Title }),
 				],
 			),
-			Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
 			Ui.hstack(
 				{},
 				[
+					Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
 					Ui.button("Fetch", { enter_action: WindowDefault, enabled: start.map(|r| !r.url.is_empty()), on_press: Engine.handle_by(start, |r, _| [cells.request.set(r), cells.status.set("Fetching…"), cells.body.set("")]) }),
 					Ui.button("Cancel", { enabled: request.map(|r| r.active), on_press: Engine.handle(|_| [cells.request.update(|r| { ..r, active: Bool.False }), cells.status.set("Cancelled.")]) }),
 				],
 			),
-			Ui.text(cells.status.signal()),
 			Ui.progress_bar(progress, { label: "Request progress" }),
-			Ui.text(cells.body.signal()),
+			Ui.panel(
+				{ border: Outline, width: Fill },
+				Ui.vstack(
+					{},
+					[
+						Ui.text_with(cells.status.signal(), { style: Heading }),
+						Ui.text_with(cells.body.signal(), { style: Monospace }),
+					],
+				),
+			),
 			Engine.watch_latest(
 				request,
 				|r| if (r.active) [Engine.http({ url: r.url, timeout: Ms(15_000), cache: NoStore })] else [],

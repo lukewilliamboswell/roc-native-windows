@@ -94,11 +94,11 @@ view = || {
 			Ui.hstack(
 				{ spacing: 12 },
 				[
-					Ui.asset_image("workers.bmp", { label: "Work splitting into two threads", width: 48, height: 48 }),
-					Ui.text("Stock count reconciliation"),
+					Ui.asset_image("workers.bmp", { label: "Work splitting into two threads", width: 28, height: 28 }),
+					Ui.text_with("Stock count reconciliation", { style: Heading }),
 				],
 			),
-			Ui.text("Edit a Counted cell with Enter or F2. Hold Shift and use the arrows to select a range for Ctrl+V."),
+			Ui.text_with("Edit a Counted cell with Enter or F2. Hold Shift and use the arrows to select a range for Ctrl+V.", { style: Caption, tone: SecondaryText }),
 			Ui.hstack(
 				{},
 				[
@@ -188,7 +188,7 @@ view = || {
 					),
 				],
 			),
-			Ui.text(cells.status.signal()),
+			Ui.panel({ width: Fill }, Ui.text_with(cells.status.signal(), { tone: AccentText })),
 			Engine.watch_latest(
 				job,
 				|run| if (run.running) [reconcile.ask(run.counts)] else [],
