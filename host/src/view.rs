@@ -452,6 +452,7 @@ pub(crate) struct Surface {
     window: HWND,
     content: Key,
     status: Option<StatusBar>,
+    taskbar_progress: Progress,
     font: HFONT,
     dpi: u32,
     assets: PathBuf,
@@ -472,6 +473,7 @@ impl Surface {
             window,
             content: ROOT,
             status: None,
+            taskbar_progress: Progress::Idle,
             font: make_font(dpi)?,
             dpi,
             assets,
@@ -597,6 +599,10 @@ impl Surface {
             return Some(view.props.label.clone());
         }
         Some(window_text(view.handle))
+    }
+
+    pub(crate) fn taskbar_progress(&self) -> Progress {
+        self.taskbar_progress
     }
 
     pub(crate) fn status_texts(&self) -> Vec<String> {
@@ -814,6 +820,7 @@ impl Surface {
         self.focus_surviving_tab(tree);
         let wrapper = WindowDeclaration::read(tree)?;
         self.content = wrapper.content;
+        self.taskbar_progress = wrapper.taskbar_progress;
         if let Some(declaration) = wrapper.status {
             if self.status.is_none() {
                 self.status = Some(StatusBar::new(self.window, self.font)?);

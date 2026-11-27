@@ -15,6 +15,12 @@ optional `width` in device-independent pixels, with a default of 128.
 The primary pane fills the remaining width. At narrow widths, trailing
 panes drop from the right so the primary status stays available.
 
+Set `taskbar_progress` to a `Ui.Progress` signal to reflect work in
+the app's Windows taskbar button. It defaults to `Idle` and shares
+the in-window indicator's progress modes and normalization. The
+taskbar receives the current value when its button becomes available,
+including after Explorer recreates it.
+
 [#controls]
 == Control reference
 

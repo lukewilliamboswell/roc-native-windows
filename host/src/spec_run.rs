@@ -5,6 +5,7 @@ use crate::Result;
 use crate::capture::{self, Recorder};
 use crate::civil::{Kind as CivilKind, Value as CivilValue};
 use crate::effects::SpecOptions;
+use crate::progress::Progress;
 use crate::spec_plan::{MAX_PLAN_BYTES, Mode, PROTOCOL, Plan, Step, valid_file_name};
 use crate::view::Control;
 use crate::wire::{Key, Kind, ROOT};
@@ -351,6 +352,9 @@ impl App {
                 )
             }
             ("expect-cancelled", [count]) => expect(self.effects.cancelled(number(count)?)?, true),
+            ("expect-taskbar-progress", [wanted]) => {
+                expect(self.surface.taskbar_progress(), Progress::parse(wanted)?)
+            }
             ("expect-status", panes) => {
                 let texts = self.surface.status_texts();
                 expect(

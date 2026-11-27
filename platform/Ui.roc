@@ -14,6 +14,7 @@ Ui := [].{
 
 	WindowProps(ctx) := {
 		status_bar : [NoStatusBar, StatusBar(StatusBarProps(ctx))] ?? NoStatusBar,
+		taskbar_progress : Signal(ctx, Progress) ?? Engine.const(Idle),
 	}
 
 	## Configure the app's one outermost native window.
@@ -36,7 +37,7 @@ Ui := [].{
 				),
 			]
 		}
-		Engine.element("ui-window", [], [body].concat(chrome))
+		Engine.element("ui-window", [Engine.attr_s("taskbar-progress", props.taskbar_progress.map(progress_word))], [body].concat(chrome))
 	}
 
 	## Stack spacing and padding in device-independent pixels.

@@ -26,7 +26,7 @@ view = || {
 	progress = request.map(|pending| if (pending.active) Ui.Progress.Indeterminate else Ui.Progress.Idle)
 	url = cells.url.signal()
 	start = { url, previous: request }.Signal.map(|{ url: typed, previous }| { url: typed.trim(), serial: previous.serial + 1, active: Bool.True })
-	Ui.vstack(
+	content = Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
 			Ui.hstack(
@@ -54,6 +54,7 @@ view = || {
 			),
 		],
 	)
+	Ui.window({ taskbar_progress: progress }, content)
 }
 
 answered : Request, Try(Engine.Response, Engine.HttpFailure) -> List(Engine.Write(_))

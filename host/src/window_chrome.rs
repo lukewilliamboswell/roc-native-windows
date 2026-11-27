@@ -1,9 +1,11 @@
 use crate::Result;
+use crate::progress::Progress;
 use crate::wire::{Key, Kind, ROOT, Tree};
 
 pub(crate) struct WindowDeclaration<'a> {
     pub(crate) content: Key,
     pub(crate) status: Option<StatusDeclaration<'a>>,
+    pub(crate) taskbar_progress: Progress,
 }
 
 pub(crate) struct StatusDeclaration<'a> {
@@ -18,6 +20,7 @@ impl<'a> WindowDeclaration<'a> {
             return Ok(Self {
                 content: ROOT,
                 status: None,
+                taskbar_progress: Progress::Idle,
             });
         };
         if roots.count() != 1 {
@@ -39,6 +42,9 @@ impl<'a> WindowDeclaration<'a> {
         Ok(Self {
             content: content.ok_or("Ui.window needs a content element")?,
             status,
+            taskbar_progress: Progress::parse(
+                tree.node(wrapper).attr("taskbar-progress").unwrap_or(""),
+            )?,
         })
     }
 }
@@ -288,6 +294,7 @@ mod tests {
         let window = WindowDeclaration::read(&tree).unwrap();
         assert_eq!(window.content, ROOT);
         assert!(window.status.is_none());
+        assert_eq!(window.taskbar_progress, Progress::Idle);
     }
 
     #[test]

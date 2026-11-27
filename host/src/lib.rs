@@ -28,14 +28,16 @@ mod roc_platform_abi;
 mod spec_effects;
 #[cfg(any(test, windows))]
 mod spec_plan;
+#[cfg(any(test, windows))]
+mod taskbar;
 #[cfg(windows)]
 mod view;
 #[cfg(windows)]
 mod window;
-#[cfg(windows)]
-mod window_icons;
 #[cfg(any(test, windows))]
 mod window_chrome;
+#[cfg(windows)]
+mod window_icons;
 #[cfg(any(test, windows))]
 pub(crate) mod wire;
 

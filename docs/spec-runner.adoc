@@ -79,7 +79,9 @@ paste handler without using the shared desktop clipboard.
 Use `(expect-progress (progress-bar "Request progress") indeterminate)`
 while a request is held. An assertion can also check `idle` or
 `(determinate COMPLETED TOTAL)`. It reads the native bar's visibility,
-mode and determinate position.
+mode and determinate position. `(expect-taskbar-progress indeterminate)`
+checks the requested window progress. It works without a Windows
+taskbar button.
 
 Use `(expect-status "2 visible" "1 unread")` to check the native
 status panes in order. Narrow windows may have fewer trailing panes.

@@ -1,8 +1,10 @@
-(test "cancel a held HTTP request"
+(test "replace a held HTTP request and cancel its replacement"
   (steps
     (expect-progress (progress-bar "Request progress") idle)
+    (expect-taskbar-progress idle)
     (click (button "Fetch"))
     (expect-request 1 :method "GET")
+    (expect-taskbar-progress indeterminate)
     (expect-progress (progress-bar "Request progress") indeterminate)
     (fill (text-field "URL") "https://example.test/replacement")
     (expect-progress (progress-bar "Request progress") indeterminate)
@@ -10,9 +12,11 @@
     (expect-cancelled 1)
     (expect-request 2 :method "GET" :url "https://example.test/replacement")
     (expect-pending-effects 1)
+    (expect-taskbar-progress indeterminate)
     (expect-progress (progress-bar "Request progress") indeterminate)
     (click (button "Cancel"))
     (expect-cancelled 2)
     (expect-progress (progress-bar "Request progress") idle)
+    (expect-taskbar-progress idle)
     (expect-pending-effects 0)
     (expect-visible (text "Cancelled."))))

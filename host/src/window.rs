@@ -2,6 +2,7 @@ use crate::abi::Engine;
 use crate::civil::{self, Value as CivilValue};
 use crate::effects::{Effects, SpecOptions};
 use crate::grid::Intent as GridIntent;
+use crate::taskbar::native::Taskbar;
 use crate::view::{Surface, wide};
 use crate::window_icons::WindowIcons;
 use crate::wire::{Declarations, EFFECT_NODE, Key, Reader, Tree};
@@ -68,6 +69,7 @@ struct App {
     grid_intents: VecDeque<GridIntent>,
     focus_departures: BTreeSet<Key>,
     driven: bool,
+    taskbar: Option<Taskbar>,
 }
 
 impl App {
@@ -89,6 +91,7 @@ impl App {
             grid_intents: VecDeque::new(),
             focus_departures: BTreeSet::new(),
             driven: options.is_some(),
+            taskbar: options.is_none().then(|| Taskbar::new(window)),
         };
         if let Some(options) = options {
             app.effects.configure_spec(options)?;
@@ -121,6 +124,9 @@ impl App {
     }
 
     fn poll(&mut self) -> Result<()> {
+        if let Some(taskbar) = &mut self.taskbar {
+            taskbar.poll();
+        }
         self.effects.poll();
         if let Some(generation) = self.opportunity.take() {
             let mut payload = vec![255];
@@ -214,6 +220,9 @@ impl App {
             }
         }
         self.surface.sync(&self.tree)?;
+        if let Some(taskbar) = &mut self.taskbar {
+            taskbar.update(self.surface.taskbar_progress());
+        }
         for (op, id) in references {
             if let Some(key) = self.tree.reference(id) {
                 self.surface.reference(op, key);
@@ -850,6 +859,9 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if Taskbar::queue_if_button_created(message) {
+        return 0;
+    }
     // SAFETY: The OS calls this on its window's UI thread with documented
     // WPARAM/LPARAM payloads. Nested callbacks skip app state if busy.
     unsafe {
@@ -944,6 +956,13 @@ unsafe extern "system" fn window_proc(
             }
             WM_DESTROY => {
                 KillTimer(hwnd, PUMP);
+                APP.with(|state| {
+                    if let Ok(mut state) = state.try_borrow_mut()
+                        && let Some(taskbar) = state.as_mut().and_then(|app| app.taskbar.as_mut())
+                    {
+                        taskbar.clear();
+                    }
+                });
                 PostQuitMessage(0);
                 return 0;
             }

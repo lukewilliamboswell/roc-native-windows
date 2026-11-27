@@ -685,6 +685,7 @@ spec_step = |expr| {
 			}
 			Ok($texts)
 		}
+		("expect-taskbar-progress", [value]) => spec_progress(value).map_ok(|mode| [mode])
 		("expect-progress", [locator, value]) => {
 			parts = spec_locator(locator)?
 			encoded = spec_progress(value)?
