@@ -80,10 +80,23 @@ public static class RocWindowsAccessibility
         Require(expected != IntPtr.Zero, "The app's UI Automation root has no native window handle.");
         if (GetForegroundWindow() == expected) return;
         var activated = SetForegroundWindow(expected);
+        var altEvents = 0u;
+        if (!activated && Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true")
+        {
+            // On the hosted test desktop, exercise the Alt-key handoff that
+            // Windows allows when a background process requests activation.
+            var altUp = AltKey(0x0002); // KEYEVENTF_KEYUP
+            var size = Marshal.SizeOf(typeof(NativeInput));
+            altEvents = SendInput(2, new[] { AltKey(0), altUp }, size);
+            if (altEvents == 1) SendInput(1, new[] { altUp }, size);
+        }
         WaitFor("the app owns the interactive desktop foreground", () =>
-            GetForegroundWindow() == expected ? window : null,
-            () => String.Format("Expected HWND 0x{0:x}, PID {1}. SetForegroundWindow returned {2}. {3}",
-                expected.ToInt64(), appPid, activated, ForegroundWindowDetails()));
+        {
+            if (GetForegroundWindow() == expected) return window;
+            if (altEvents != 0) activated = SetForegroundWindow(expected);
+            return GetForegroundWindow() == expected ? window : null;
+        }, () => String.Format("Expected HWND 0x{0:x}, PID {1}. SetForegroundWindow returned {2}, sent {3} Alt events. {4}",
+                expected.ToInt64(), appPid, activated, altEvents, ForegroundWindowDetails()));
     }
 
     private static string ForegroundWindowDetails()
@@ -91,8 +104,59 @@ public static class RocWindowsAccessibility
         var foreground = GetForegroundWindow();
         uint pid;
         GetWindowThreadProcessId(foreground, out pid);
-        return String.Format("Observed foreground HWND 0x{0:x}, PID {1}.", foreground.ToInt64(), pid);
+        string processName = "unavailable";
+        if (pid != 0)
+        {
+            try
+            {
+                using (var process = Process.GetProcessById((int)pid)) processName = process.ProcessName;
+            }
+            catch (ArgumentException) {}
+            catch (InvalidOperationException) {}
+            catch (Win32Exception) {}
+        }
+        return String.Format("Observed foreground HWND 0x{0:x}, PID {1} ({2}).", foreground.ToInt64(), pid, processName);
     }
+
+    private static NativeInput AltKey(uint flags)
+    {
+        return new NativeInput { Type = 1, Data = new InputData {
+            Keyboard = new KeyboardInput { VirtualKey = 0x12, Flags = flags } // VK_MENU
+        } };
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeInput
+    {
+        public uint Type;
+        public InputData Data;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputData
+    {
+        [FieldOffset(0)] public KeyboardInput Keyboard;
+        [FieldOffset(0)] public MouseInput Mouse; // The largest INPUT member sets its native size.
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KeyboardInput
+    {
+        public ushort VirtualKey, ScanCode;
+        public uint Flags, Time;
+        public UIntPtr ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MouseInput
+    {
+        public int X, Y;
+        public uint MouseData, Flags, Time;
+        public UIntPtr ExtraInfo;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern uint SendInput(uint count, [In] NativeInput[] inputs, int size);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();

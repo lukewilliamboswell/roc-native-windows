@@ -49,7 +49,7 @@ $windows = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\Cu
 Write-Output "Windows build $($windows.CurrentBuild).$($windows.UBR), app target $Target"
 
 function Invoke-ExampleProbe($name, $directory, $tool, $label, $builtDirectory) {
-    Push-Location $directory
+    Push-Location -LiteralPath $directory
     try {
         if (-not $builtDirectory) {
             & $Roc $tool -- build --target $Target --profile $BuildProfile
@@ -91,16 +91,14 @@ $launcher = Join-Path $repo "cli/windows.roc"
 $failures = @()
 foreach ($name in $Example) {
     try {
-        if ($BuiltApps) {
-            $directory = Join-Path $BuiltApps $name
-            Invoke-ExampleProbe $name $directory $null $name $directory
-        } elseif ($Starter -and $name -eq "starter") {
+        if ($Starter -and $name -eq "starter") {
             $directory = (Resolve-Path $Starter).Path
             Invoke-ExampleProbe $name $directory (Join-Path $directory "windows.roc") "supplied starter"
-        } elseif ($name -eq "progress") {
-            Invoke-ExampleProbe $name (Join-Path $PSScriptRoot "progress") $launcher "determinate progress fixture"
         } else {
-            Invoke-ExampleProbe $name (Join-Path $repo "examples/$name") $launcher $name
+            $directory = if ($name -eq "progress") { Join-Path $PSScriptRoot "progress" } else { Join-Path $repo "examples/$name" }
+            $label = if ($name -eq "progress") { "determinate progress fixture" } else { $name }
+            $builtDirectory = if ($BuiltApps) { Join-Path $BuiltApps $name }
+            Invoke-ExampleProbe $name $directory $launcher $label $builtDirectory
         }
     } catch {
         $failures += "$name ($Target): $_"
