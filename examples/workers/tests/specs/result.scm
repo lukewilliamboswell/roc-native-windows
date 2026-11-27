@@ -1,5 +1,17 @@
-(test "settle a real Roc worker"
+(test "reconcile the submitted snapshot while the grid remains editable"
   (steps
-    (click (button "Compute"))
+    (begin-cell (data-grid "Stock counts") 1 "counted")
+    (fill-cell (data-grid "Stock counts") "7")
+    (commit-cell (data-grid "Stock counts"))
+    (click (button "Reconcile"))
+    (begin-cell (data-grid "Stock counts") 1 "counted")
+    (fill-cell (data-grid "Stock counts") "2")
+    (commit-cell (data-grid "Stock counts"))
     (await-work)
-    (expect-visible (text "Sum of squares modulo 1,000,000,007: 347464"))))
+    (expect-visible (text "Submitted snapshot: 3 matched, 0 short, 3 surplus."))
+    (expect-cell-text (data-grid "Stock counts") 1 "counted" "2")
+    (click (button "Reconcile"))
+    (click (button "Reconcile"))
+    (await-work)
+    (expect-visible (text "Submitted snapshot: 3 matched, 2 short, 0 surplus."))
+    (expect-cell-text (data-grid "Stock counts") 1 "counted" "2")))

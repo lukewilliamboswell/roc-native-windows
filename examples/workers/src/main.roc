@@ -1,35 +1,64 @@
 app [main] { pf: platform "../../../platform/main.roc" }
 
+import Stock
 import pf.Engine exposing [Elem, Signal]
 import pf.Ui
 import pf.Worker
 
 main : Engine.Program(_)
-main = Engine.program_store({}, |_boot| store, |_boot| view()).with_workers([squares.registration()])
+main = Engine.program_store({}, |_| store, |_| view()).with_workers([reconcile.registration()])
 
-squares : Worker.Task(U64, U64, Worker.Never)
-squares = Worker.task({ name: "roc-native-windows.example/workers/squares", run!: |count| Ok(sum_squares(count)) })
+reconcile : Worker.Task(List(Stock.Count), Stock.Summary, Worker.Never)
+reconcile = Worker.task({
+	name: "roc-native-windows.example/workers/reconcile",
+	run!: |counts| Ok(Stock.reconcile(counts)),
+})
 
-sum_squares : U64 -> U64
-sum_squares = |count|
-	(0.U64).until(count).fold(0, |sum, value| (sum + value * value) % 1_000_000_007)
+inventory =
+	match Engine.Table.from_list([
+		{ key: 1.U64, row: Stock.new("Paper", 4) },
+		{ key: 2.U64, row: Stock.new("Labels", 8) },
+		{ key: 3.U64, row: Stock.new("Folders", 3) },
+		{ key: 4.U64, row: Stock.new("Notebooks", 12) },
+	]) {
+		Ok(table) => table
+		Err(DuplicateKey(key)) => crash "Duplicate inventory key: ${key.to_str()}"
+	}
+
+Query : { reverse : Bool, mismatches : Bool }
+
+Job : { serial : U64, running : Bool, counts : List(Stock.Count) }
+
+initial_job : Job
+initial_job = { serial: 0, running: Bool.False, counts: [] }
 
 store = Engine.store(
-	Workers,
+	Inventory,
 	{
-		serial: Engine.cell(0.U64),
-		running: Engine.cell(Bool.False),
-		status: Engine.cell("Press Compute to start a worker."),
-		clicks: Engine.cell(0.U64),
+		counts: Engine.table(inventory),
+		reverse: Engine.cell(Bool.False),
+		mismatches: Engine.cell(Bool.False),
+		second_page: Engine.cell(Bool.False),
+		job: Engine.cell(initial_job),
+		status: Engine.cell("Edit a count, then reconcile a snapshot."),
 	}.Engine.Cells,
 )
 
 cells = store.cells()
 
+plan : Query -> Engine.QueryPlan(U64, Stock.Item, (U64, U64))
+plan = |query|
+	Engine.sort_by({
+		keep: |_, item| !query.mismatches or item.counted != item.expected,
+		sort: |key, _| if (query.reverse) 4 - key else key,
+	})
+
 view : () -> Elem(Engine.StoreRoot(_))
 view = || {
-	running = cells.running.signal()
-	job = { active: running, serial: cells.serial.signal() }.Signal.map(|value| value)
+	query = { reverse: cells.reverse.signal(), mismatches: cells.mismatches.signal() }.Signal.map(|value| value)
+	page = cells.second_page.signal()
+	window = page.map(|second| { start: if (second) 3 else 0, count: 3 })
+	job = cells.job.signal()
 	Ui.vstack(
 		{ padding: 16, spacing: 12 },
 		[
@@ -37,28 +66,94 @@ view = || {
 				{ spacing: 12 },
 				[
 					Ui.asset_image("workers.bmp", { label: "Work splitting into two threads", width: 48, height: 48 }),
-					Ui.text("Workers"),
+					Ui.text("Stock count reconciliation"),
 				],
 			),
-			Ui.text(cells.status.signal()),
+			Ui.text("Select a Counted cell and press Enter or F2 to edit."),
 			Ui.hstack(
 				{},
 				[
-					Ui.button("Compute", { on_press: Engine.handle(|_| [cells.serial.update(|n| n + 1), cells.running.set(Bool.True), cells.status.set("Computing…")]) }),
-					Ui.button("Cancel", { enabled: running, on_press: Engine.handle(|_| [cells.running.set(Bool.False), cells.status.set("Cancelled.")]) }),
+					Ui.button("Reverse order", { on_press: Engine.handle(|_| [cells.reverse.update(|reverse| !reverse)]) }),
+					Ui.button(
+						cells.mismatches.signal().map(|only| if (only) "All items" else "Mismatches only"),
+						{ on_press: Engine.handle(|_| [cells.mismatches.update(|only| !only), cells.second_page.set(Bool.False)]) },
+					),
+					Ui.button(
+						page.map(|second| if (second) "First page" else "Next page"),
+						{
+							enabled: cells.mismatches.signal().map(|only| !only),
+							on_press: Engine.handle(|_| [cells.second_page.update(|second| !second)]),
+						},
+					),
 				],
 			),
-			Ui.button("Tap while computing", { on_press: Engine.handle(|_| [cells.clicks.update(|n| n + 1)]) }),
-			Ui.text(cells.clicks.signal().map(|n| "Taps: ${n.to_str()}")),
+			Ui.data_grid(
+				{
+					label: "Stock counts",
+					columns: [
+						{ key: "item", heading: "Item", width: Fixed(140) },
+						{ key: "expected", heading: "Expected", width: Fixed(90) },
+						{ key: "counted", heading: "Counted", width: Fixed(90) },
+					],
+					visible_rows: 3,
+				},
+				Engine.table_view(
+					cells.counts,
+					{ query, plan, window },
+					|_, row| {
+						value = row.signal()
+						Ui.grid_row([
+							Ui.grid_cell(value.map(|item| item.name), { column: "item" }),
+							Ui.grid_cell(value.map(|item| item.expected.to_str()), { column: "expected" }),
+							Ui.grid_cell(
+								value.map(|item| item.counted.to_str()),
+								{
+									column: "counted",
+									editor: TextEditor(row.set_value(Stock.recount)),
+									feedback: value.map(|item| item.feedback),
+								},
+							),
+						])
+					},
+				),
+			),
+			Ui.hstack(
+				{},
+				[
+					Ui.button(
+						"Reconcile",
+						{
+							on_press: Engine.handle_by(
+								cells.counts.signal(),
+								|table, _| {
+									snapshot = table.fold([], |counts, _, item| counts.append(Stock.count(item)))
+									[
+										cells.job.update(|before| { serial: before.serial + 1, running: Bool.True, counts: snapshot }),
+										cells.status.set("Reconciling submitted counts…"),
+									]
+								},
+							),
+						},
+					),
+					Ui.button(
+						"Cancel",
+						{
+							enabled: job.map(|run| run.running),
+							on_press: Engine.handle(|_| [cells.job.update(|run| { ..run, running: Bool.False }), cells.status.set("Reconciliation cancelled.")]),
+						},
+					),
+				],
+			),
+			Ui.text(cells.status.signal()),
 			Engine.watch_latest(
 				job,
-				|{ active, .. }| if (active) [squares.ask(2_000_000)] else [],
+				|run| if (run.running) [reconcile.ask(run.counts)] else [],
 				Engine.react(
 					|_, result| [
-						cells.running.set(Bool.False),
+						cells.job.update(|run| { ..run, running: Bool.False }),
 						cells.status.set(
 							match result {
-								Ok(n) => "Sum of squares modulo 1,000,000,007: ${n.to_str()}"
+								Ok(totals) => "Submitted snapshot: ${totals.matched.to_str()} matched, ${totals.short.to_str()} short, ${totals.surplus.to_str()} surplus."
 								Err(error) => "Worker failed: ${Str.inspect(error)}"
 							},
 						),
@@ -69,4 +164,4 @@ view = || {
 	)
 }
 
-expect sum_squares(4) == 14
+expect Engine.mounts(main) > 0
