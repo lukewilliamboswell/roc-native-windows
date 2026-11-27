@@ -4,6 +4,7 @@ mod files;
 mod folders;
 mod http;
 mod images;
+mod storage;
 mod system;
 mod workers;
 
@@ -97,7 +98,7 @@ pub(crate) struct Effects {
     running: Arc<std::sync::atomic::AtomicUsize>,
     timers: HashMap<u32, Timer>,
     session: HashMap<String, String>,
-    local: Option<PathBuf>,
+    local: Option<storage::Local>,
     queued: VecDeque<Queued>,
     spec: Option<SpecOptions>,
     pub(crate) simulated: Simulated,
@@ -109,15 +110,6 @@ pub(crate) struct Effects {
 impl Effects {
     pub(crate) fn new(window: HWND, send: mpsc::Sender<Event>, declarations: Declarations) -> Self {
         let (complete, completed) = mpsc::channel();
-        let local = std::env::var_os("LOCALAPPDATA").and_then(|directory| {
-            let executable = std::env::current_exe().ok()?;
-            Some(
-                PathBuf::from(directory)
-                    .join("roc-native-windows")
-                    .join(executable.file_stem()?)
-                    .join("storage"),
-            )
-        });
         Self {
             window,
             started: Instant::now(),
@@ -129,7 +121,7 @@ impl Effects {
             running: Arc::default(),
             timers: HashMap::new(),
             session: HashMap::new(),
-            local,
+            local: storage::Local::discover(),
             queued: VecDeque::new(),
             spec: None,
             simulated: Simulated::default(),
@@ -140,7 +132,7 @@ impl Effects {
     }
 
     pub(crate) fn configure_spec(&mut self, mut options: SpecOptions) -> Result<()> {
-        self.local = Some(options.storage.clone());
+        self.local = storage::Local::fixture(&options.storage);
         self.simulated.now = options.initial_time;
         for (key, value) in std::mem::take(&mut options.local) {
             self.storage(1, &key, Some(value))?;
@@ -732,26 +724,22 @@ impl Effects {
         if session {
             return self.session.get(key).cloned();
         }
-        std::fs::read_to_string(self.local_path(key)?).ok()
+        self.local.as_ref()?.read(key).ok()
     }
 
     pub(crate) fn storage(&mut self, op: u8, key: &str, value: Option<String>) -> Result<()> {
         match op {
             1 | 2 => {
-                let path = self
-                    .local_path(key)
+                let local = self
+                    .local
+                    .as_ref()
                     .ok_or("local app data directory is unavailable")?;
                 if op == 1 {
-                    std::fs::create_dir_all(path.parent().ok_or("invalid storage directory")?)
+                    local
+                        .write(key, value.as_deref().ok_or("missing local storage value")?)
                         .map_err(storage_error)?;
-                    let staging = path.with_extension(format!("{}.tmp", std::process::id()));
-                    std::fs::write(&staging, value.ok_or("missing local storage value")?)
-                        .map_err(storage_error)?;
-                    std::fs::rename(staging, path).map_err(storage_error)?;
-                } else if let Err(error) = std::fs::remove_file(path)
-                    && error.kind() != io::ErrorKind::NotFound
-                {
-                    return Err(storage_error(error));
+                } else {
+                    local.remove(key).map_err(storage_error)?;
                 }
             }
             3 => {
@@ -766,16 +754,6 @@ impl Effects {
             _ => return Err(format!("unsupported storage operation {op}")),
         }
         Ok(())
-    }
-
-    fn local_path(&self, key: &str) -> Option<PathBuf> {
-        let hash = files::sha256(key.as_bytes())?;
-        let mut file = String::with_capacity(64);
-        for byte in hash {
-            use std::fmt::Write;
-            let _ = write!(file, "{byte:02x}");
-        }
-        Some(self.local.as_ref()?.join(file))
     }
 
     pub(crate) fn pick(

@@ -9,16 +9,24 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Component, Path, Prefix};
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
-    FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_INFORMATION, FILE_NON_DIRECTORY_FILE,
+    FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
+    FILE_SYNCHRONOUS_IO_NONALERT, FileDispositionInformation, FileRenameInformation, NtCreateFile,
+    NtSetInformationFile,
 };
 use windows_sys::Win32::Foundation::{RtlNtStatusToDosError, UNICODE_STRING};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK, GetFileType, SYNCHRONIZE,
+    DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK,
+    GetFileType, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+const NAME_LIMIT: usize = 255;
+const DIRECTORY_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
+const SHARE_FILE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+const SHARE_ALL: u32 = SHARE_FILE | FILE_SHARE_DELETE;
 
 pub(crate) struct Directory(File);
 
@@ -36,7 +44,7 @@ impl Directory {
             return Err(invalid_name());
         }
         let root = OpenOptions::new()
-            .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .access_mode(DIRECTORY_ACCESS)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(format!("{drive}:\\"))?;
         checked(&root, true)?;
@@ -51,14 +59,83 @@ impl Directory {
     }
 
     pub(crate) fn subdir(&self, name: &OsStr) -> io::Result<Self> {
-        self.open_relative(name, true).map(Self)
+        self.open_relative(name, true, DIRECTORY_ACCESS, SHARE_ALL, FILE_OPEN)
+            .map(Self)
+    }
+
+    pub(crate) fn create_subdir(&self, name: &OsStr) -> io::Result<Self> {
+        self.open_relative(name, true, DIRECTORY_ACCESS, SHARE_ALL, FILE_OPEN_IF)
+            .map(Self)
     }
 
     pub(crate) fn read(&self, name: &OsStr) -> io::Result<File> {
-        self.open_relative(name, false)
+        self.open_relative(name, false, FILE_GENERIC_READ, SHARE_ALL, FILE_OPEN)
     }
 
-    fn open_relative(&self, name: &OsStr, is_dir: bool) -> io::Result<File> {
+    pub(crate) fn create_file(&self, name: &OsStr) -> io::Result<File> {
+        self.open_relative(
+            name,
+            false,
+            FILE_GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ,
+            FILE_CREATE,
+        )
+    }
+
+    pub(crate) fn open_for_removal(&self, name: &OsStr) -> io::Result<File> {
+        self.open_relative(
+            name,
+            false,
+            DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            SHARE_FILE,
+            FILE_OPEN,
+        )
+    }
+
+    pub(crate) fn replace(&self, staged: &File, name: &OsStr) -> io::Result<()> {
+        const HEADER: usize = std::mem::size_of::<FILE_RENAME_INFORMATION>();
+        const NAME_OFFSET: usize = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
+        const BUFFER: usize = NAME_LIMIT + (HEADER - NAME_OFFSET).div_ceil(2);
+        #[repr(C)]
+        struct Rename {
+            replace: u32,
+            root: windows_sys::Win32::Foundation::HANDLE,
+            length: u32,
+            name: [u16; BUFFER],
+        }
+
+        let name = checked_name(name)?;
+        let mut request = Rename {
+            replace: 1,
+            root: self.0.as_raw_handle(),
+            length: (name.len() * 2) as u32,
+            name: [0; BUFFER],
+        };
+        request.name[..name.len()].copy_from_slice(&name);
+        const _: () = assert!(NAME_OFFSET == std::mem::offset_of!(Rename, name));
+        let length = (HEADER + name.len() * 2) as u32;
+        let mut status = IO_STATUS_BLOCK::default();
+        // SAFETY: Both handles and the aligned rename buffer are live for this
+        // synchronous call. The destination is one validated child of root.
+        checked_status(unsafe {
+            NtSetInformationFile(
+                staged.as_raw_handle(),
+                &mut status,
+                std::ptr::from_ref(&request).cast(),
+                length,
+                FileRenameInformation,
+            )
+        })
+    }
+
+    fn open_relative(
+        &self,
+        name: &OsStr,
+        is_dir: bool,
+        access: u32,
+        sharing: u32,
+        disposition: u32,
+    ) -> io::Result<File> {
         let mut name = checked_name(name)?;
         let length = (name.len() * 2) as u16;
         let mut object_name = UNICODE_STRING {
@@ -75,13 +152,10 @@ impl Directory {
         };
         let mut handle = std::ptr::null_mut();
         let mut status = IO_STATUS_BLOCK::default();
-        let (access, kind) = if is_dir {
-            (
-                FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                FILE_DIRECTORY_FILE,
-            )
+        let kind = if is_dir {
+            FILE_DIRECTORY_FILE
         } else {
-            (FILE_GENERIC_READ, FILE_NON_DIRECTORY_FILE)
+            FILE_NON_DIRECTORY_FILE
         };
         // SAFETY: The root, bounded object name, and output storage remain live
         // throughout this synchronous call. NT does not consume the root handle.
@@ -93,24 +167,45 @@ impl Directory {
                 &mut status,
                 std::ptr::null(),
                 FILE_ATTRIBUTE_NORMAL,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                FILE_OPEN,
+                sharing,
+                disposition,
                 kind | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
                 std::ptr::null(),
                 0,
             )
         };
-        if result < 0 {
-            // SAFETY: Convert the NTSTATUS returned by NtCreateFile.
-            return Err(io::Error::from_raw_os_error(
-                unsafe { RtlNtStatusToDosError(result) } as i32,
-            ));
-        }
+        checked_status(result)?;
         // SAFETY: Successful NtCreateFile transferred a unique handle.
         let file = unsafe { File::from_raw_handle(handle) };
         checked(&file, is_dir)?;
         Ok(file)
     }
+}
+
+pub(crate) fn remove(file: &File) -> io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFORMATION { DeleteFile: true };
+    let mut status = IO_STATUS_BLOCK::default();
+    // SAFETY: The file was opened for deletion, and the input and output
+    // storage stay live for this synchronous call.
+    checked_status(unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &mut status,
+            std::ptr::from_ref(&disposition).cast(),
+            std::mem::size_of_val(&disposition) as u32,
+            FileDispositionInformation,
+        )
+    })
+}
+
+fn checked_status(status: i32) -> io::Result<()> {
+    if status >= 0 {
+        return Ok(());
+    }
+    // SAFETY: Convert the NTSTATUS returned by the native file operation.
+    Err(io::Error::from_raw_os_error(
+        unsafe { RtlNtStatusToDosError(status) } as i32,
+    ))
 }
 
 pub(crate) fn read_asset(root: &Path, name: &str) -> crate::Result<File> {
@@ -156,8 +251,8 @@ pub(crate) fn identity(file: &File) -> io::Result<Identity> {
 }
 
 fn checked_name(name: &OsStr) -> io::Result<Vec<u16>> {
-    let units = name.encode_wide().take(256).collect::<Vec<_>>();
-    if !(1..=255).contains(&units.len())
+    let units = name.encode_wide().take(NAME_LIMIT + 1).collect::<Vec<_>>();
+    if !(1..=NAME_LIMIT).contains(&units.len())
         || matches!(units.last(), Some(32 | 46))
         || units
             .iter()

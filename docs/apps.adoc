@@ -82,6 +82,15 @@ The Windows loader rejects traversal, alternate streams, reserved device
 names, and reparse points. Use a drive-letter installation path with regular
 files and directories.
 
+[#local-storage]
+== Persist app settings
+
+Local storage uses the current user's Windows Local App Data Known Folder
+and keeps the existing `roc-native-windows/<executable-stem>/storage`
+directory and key names. Renaming the executable changes this namespace.
+Storage opens directories relative to held handles, refuses reparse points
+and multiply linked entries, and stages replacements in the same directory.
+
 [#copy-text]
 == Copy text from an app action
 
