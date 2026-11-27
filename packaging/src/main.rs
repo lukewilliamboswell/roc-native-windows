@@ -21,11 +21,27 @@ fn main() -> ExitCode {
     }
 }
 
+const USAGE: &str =
+    "usage: roc-windows-msi TARGET NAME ID VERSION PUBLISHER STAGE OUTPUT [DISPLAY_NAME]";
+
 fn run() -> Result<()> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let [target, name, identifier, version, publisher, stage, output] = args.as_slice() else {
-        return Err("usage: roc-windows-msi TARGET NAME ID VERSION PUBLISHER STAGE OUTPUT".into());
+    let [
+        target,
+        name,
+        identifier,
+        version,
+        publisher,
+        stage,
+        output,
+        optional @ ..,
+    ] = args.as_slice()
+    else {
+        return Err(USAGE.into());
     };
+    if optional.len() > 1 {
+        return Err(USAGE.into());
+    }
     let text = |arg: &OsStr| {
         arg.to_str()
             .map(str::to_owned)
@@ -41,9 +57,11 @@ fn run() -> Result<()> {
     let identifier = text(identifier)?;
     let version = text(version)?;
     let publisher = text(publisher)?;
+    let display_name = optional.first().map(|arg| text(arg)).transpose()?;
     let spec = spec(
         arch,
         &name,
+        display_name.as_deref(),
         &identifier,
         &version,
         &publisher,
@@ -67,12 +85,14 @@ fn build(spec: &MsiSpec, output: &Path) -> Result<()> {
 fn spec(
     arch: MsiArch,
     name: &str,
+    display_name: Option<&str>,
     identifier: &str,
     version: &str,
     publisher: &str,
     stage: &Path,
 ) -> Result<MsiSpec> {
-    validate_metadata(name, identifier, version, publisher)?;
+    let display_name = display_name.unwrap_or(name);
+    validate_metadata(name, display_name, identifier, version, publisher)?;
     let mut files = Vec::new();
     let main_executable = format!("{name}.exe");
     add_file(stage, &main_executable, &mut files)?;
@@ -100,6 +120,11 @@ fn spec(
         hash.update((text.len() as u64).to_le_bytes());
         hash.update(text);
     }
+    if display_name != name {
+        hash.update(b"display_name\0");
+        hash.update((display_name.len() as u64).to_le_bytes());
+        hash.update(display_name);
+    }
     for file in &files {
         hash.update((file.dest.len() as u64).to_le_bytes());
         hash.update(&file.dest);
@@ -118,11 +143,11 @@ fn spec(
     );
     Ok(MsiSpec {
         name: name.into(),
-        display_name: name.into(),
+        display_name: display_name.into(),
         version,
         identifier: identifier.into(),
         publisher: publisher.into(),
-        description: name.into(),
+        description: display_name.into(),
         homepage: None,
         arch,
         main_executable,
@@ -144,11 +169,21 @@ impl Write for HashWriter<'_> {
     }
 }
 
-fn validate_metadata(name: &str, identifier: &str, version: &str, publisher: &str) -> Result<()> {
+fn validate_metadata(
+    name: &str,
+    display_name: &str,
+    identifier: &str,
+    version: &str,
+    publisher: &str,
+) -> Result<()> {
     if !valid_segment(name) || name.len() > 64 || name.contains(['[', ']', '|']) {
         return Err(
             "the application name must be a Windows-safe ASCII name of at most 64 bytes".into(),
         );
+    }
+    if !valid_segment(display_name) || display_name.len() > 64 || display_name.contains(['[', ']'])
+    {
+        return Err("display_name must be a Windows-safe ASCII name of at most 64 bytes".into());
     }
     let labels = identifier.split('.').collect::<Vec<_>>();
     if identifier.len() > 96
@@ -267,9 +302,30 @@ mod tests {
         fs::write(dir.join("demo.exe"), b"demo program").unwrap();
         fs::write(dir.join("assets/images/sample.bmp"), b"demo asset").unwrap();
         fs::write(dir.join("LICENSE"), b"demo license").unwrap();
+        let default_name = spec(
+            MsiArch::X86_64,
+            "demo",
+            None,
+            "org.example.demo",
+            "1.2.3",
+            "Example",
+            dir,
+        )
+        .unwrap();
+        assert_eq!(default_name.display_name, "demo");
+        assert_eq!(default_name.main_executable, "demo.exe");
         let mut identities = Vec::new();
         for arch in [MsiArch::X86_64, MsiArch::Aarch64] {
-            let input = spec(arch, "demo", "org.example.demo", "1.2.3", "Example", dir).unwrap();
+            let input = spec(
+                arch,
+                "demo",
+                Some("Reading List"),
+                "org.example.demo",
+                "1.2.3",
+                "Example",
+                dir,
+            )
+            .unwrap();
             let output = dir.join(format!("{}.msi", arch.template()));
             build(&input, &output).unwrap();
             let first = fs::read(&output).unwrap();
@@ -293,6 +349,19 @@ mod tests {
                 .collect::<std::collections::BTreeMap<_, _>>();
             assert_eq!(properties["ProductVersion"], "1.2.3");
             assert_eq!(properties["Manufacturer"], "Example");
+            assert_eq!(properties["ProductName"], "Reading List");
+            let shortcuts = package
+                .select_rows(Select::table("Shortcut"))
+                .unwrap()
+                .collect::<Vec<_>>();
+            let [shortcut] = shortcuts.as_slice() else {
+                panic!("expected one Start menu shortcut")
+            };
+            assert_eq!(shortcut[1].as_str(), Some("ProgramMenuFolder"));
+            assert!(shortcut[2].as_str().unwrap().ends_with("|Reading List"));
+            assert_eq!(shortcut[8], msi::Value::Null); // Default icon comes from the target.
+            assert_eq!(shortcut[11].as_str(), Some("INSTALLDIR"));
+            let target = shortcut[4].as_str().unwrap().to_owned();
             let files = package
                 .select_rows(Select::table("File"))
                 .unwrap()
@@ -303,6 +372,23 @@ mod tests {
                     )
                 })
                 .collect::<Vec<_>>();
+            let executable = files
+                .iter()
+                .find(|(_, name)| name.ends_with("|demo.exe"))
+                .unwrap();
+            assert_eq!(target, format!("[#{}]", executable.0));
+            let actions = package
+                .select_rows(Select::table("InstallExecuteSequence"))
+                .unwrap()
+                .map(|row| {
+                    (
+                        row[0].as_str().unwrap().to_owned(),
+                        row[2].as_int().unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert!(actions["RemoveExistingProducts"] < actions["CreateShortcuts"]);
+            assert!(actions["RemoveShortcuts"] < actions["RemoveFiles"]);
             let msi_file = files
                 .iter()
                 .find(|(_, name)| name.ends_with("sample.bmp"))
@@ -340,6 +426,25 @@ mod tests {
         assert_ne!(identities[0].0, identities[1].0);
         assert_ne!(identities[0].1, identities[1].1);
         assert_eq!(identities[0].2, identities[1].2);
+    }
+
+    #[test]
+    fn validates_the_display_name_before_packaging() {
+        for name in ["", "Invalid/Name", "Unclosed [", "COM1", "Non-ASCII é"] {
+            assert!(
+                validate_metadata("demo", name, "org.example.demo", "1.2.3", "Example").is_err()
+            );
+        }
+        assert!(
+            validate_metadata(
+                "demo",
+                "Reading List",
+                "org.example.demo",
+                "1.2.3",
+                "Example"
+            )
+            .is_ok()
+        );
     }
 
     struct Cleanup(std::path::PathBuf);

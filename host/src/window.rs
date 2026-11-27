@@ -16,13 +16,15 @@ use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{SystemTime, UNIX_EPOCH};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
 use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOW;
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{
+    FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
+};
 use windows_sys::Win32::System::SystemServices::TIME_ZONE_ID_DAYLIGHT;
 use windows_sys::Win32::System::Time::{
     GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
@@ -703,7 +705,42 @@ fn paths_from_drop(drop: HDROP) -> Vec<PathBuf> {
     paths
 }
 
-fn app_name() -> String {
+fn embedded_display_name(instance: HMODULE) -> Option<String> {
+    // Keep the RT_RCDATA identifier in sync with display_name_resource in the CLI.
+    const RT_RCDATA: *const u16 = 10usize as *const u16;
+    const DISPLAY_NAME: *const u16 = 501usize as *const u16;
+    // SAFETY: The module is the current executable and remains loaded.
+    // Integer resource identifiers are passed as low-word pointer values.
+    unsafe {
+        let resource = FindResourceW(instance, DISPLAY_NAME, RT_RCDATA);
+        if resource.is_null() {
+            return None;
+        }
+        let len = SizeofResource(instance, resource) as usize;
+        if !(1..=64).contains(&len) {
+            return None;
+        }
+        let loaded = LoadResource(instance, resource);
+        if loaded.is_null() {
+            return None;
+        }
+        let data = LockResource(loaded);
+        if data.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(data.cast::<u8>(), len);
+        if bytes.iter().all(|&byte| (b' '..=b'~').contains(&byte)) {
+            std::str::from_utf8(bytes).ok().map(str::to_owned)
+        } else {
+            None
+        }
+    }
+}
+
+fn app_name(instance: HMODULE) -> String {
+    if let Some(title) = embedded_display_name(instance) {
+        return title;
+    }
     std::env::current_exe()
         .ok()
         .and_then(|path| {
@@ -765,7 +802,7 @@ fn run() -> Result<()> {
         if RegisterClassExW(&window_class) == 0 {
             return Err(last_error("register Roc window class"));
         }
-        let title = wide(&app_name());
+        let title = wide(&app_name(instance));
         let window = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             class,

@@ -27,7 +27,7 @@ PackageOptions : { target : Str, format : PackageFormat, id : Str, version : Str
 
 MsiMetadata : { id : Str, version : Str, publisher : Str }
 
-AppMetadata : { installer : MsiMetadata, icon : Try(Str, [Missing]) }
+AppMetadata : { installer : MsiMetadata, icon : Try(Str, [Missing]), display_name : Try(Str, [Missing]) }
 
 app_manifest = "windows.json"
 
@@ -944,7 +944,7 @@ build_with_metadata! = |requested, settings| {
 	name = app_name(Env.cwd!()?.display())
 	ensure_dir!("build")?
 	stage = Env.create_temp_dir_in!(Path.utf8("build"), ".windows-")?.display()
-	outcome = stage_build!(entry, name, target, stage, dir, settings.icon)
+	outcome = stage_build!(entry, name, target, stage, dir, settings)
 	match outcome {
 		Err(BuildRecovery(_)) => {}
 		_ => Path.delete_all!(Path.utf8(stage)) ?? {}
@@ -954,8 +954,8 @@ build_with_metadata! = |requested, settings| {
 	Ok({ dir, name, target })
 }
 
-stage_build! : Str, Str, Str, Str, Str, Try(Str, [Missing]) => Try({}, _)
-stage_build! = |entry, name, target, stage, dir, icon| {
+stage_build! : Str, Str, Str, Str, Str, AppMetadata => Try({}, _)
+stage_build! = |entry, name, target, stage, dir, settings| {
 	fresh = "${stage}/candidate"
 	backup = "${stage}/previous"
 	ensure_dir!(fresh)?
@@ -966,12 +966,18 @@ stage_build! = |entry, name, target, stage, dir, icon| {
 		return Err(MissingExecutable(program))
 	}
 	binary = gui_executable(Path.read_bytes!(image)?, target)?
-	updated = match icon {
-		Err(Missing) => binary
-		Ok(asset) => {
-			frames = read_icon!(asset)?
-			pe_with_icon(binary, frames) ? |detail| BadExecutable(detail)
-		}
+	icon_resources = match settings.icon {
+		Err(Missing) => []
+		Ok(asset) => icon_resource_types(read_icon!(asset)?)
+	}
+	resources = match settings.display_name {
+		Err(Missing) => icon_resources
+		Ok(title) => icon_resources.append(display_name_resource(title))
+	}
+	updated = if resources.is_empty() {
+		binary
+	} else {
+		pe_with_resources(binary, resources) ? |detail| BadExecutable(detail)
 	}
 	Path.write_bytes!(image, updated)?
 	if Path.exists!(Path.utf8("assets"))? {
@@ -1131,7 +1137,7 @@ package! = |options| {
 	}
 	stage = Env.create_temp_dir_in!(Path.utf8("dist"), ".windows-")?
 	file = stage.join("candidate.${extension}")
-	saved = match write_package!(built, options.format, metadata, stage, file) {
+	saved = match write_package!(built, options.format, metadata, settings.display_name, stage, file) {
 		Ok({}) => Path.rename!(file, path)
 		Err(problem) => Err(problem)
 	}
@@ -1144,20 +1150,32 @@ empty_metadata : MsiMetadata
 empty_metadata = { id: "", version: "", publisher: "" }
 
 empty_app_metadata : AppMetadata
-empty_app_metadata = { installer: empty_metadata, icon: Err(Missing) }
+empty_app_metadata = { installer: empty_metadata, icon: Err(Missing), display_name: Err(Missing) }
 
 parse_metadata : Str -> Try(AppMetadata, Str)
 parse_metadata = |source| {
 	fields : Dict(Str, Str)
 	fields = Json.parse(source) ? |_| "expected a JSON object with string values"
-	if fields.keys().any(|key| !["id", "version", "publisher", "icon"].contains(key)) {
-		return Err("use id, version, publisher or icon")
+	if fields.keys().any(|key| !["id", "version", "publisher", "icon", "display_name"].contains(key)) {
+		return Err("use id, version, publisher, icon or display_name")
+	}
+	display_name = fields.get("display_name").map_err(|_| Missing)
+	match display_name {
+		Ok(title) if !valid_display_name(title) => return Err("display_name must be a Windows-safe ASCII name of at most 64 bytes")
+		_ => {}
 	}
 	Ok({
 		installer: { id: fields.get("id") ?? "", version: fields.get("version") ?? "", publisher: fields.get("publisher") ?? "" },
 		icon: fields.get("icon").map_err(|_| Missing),
+		display_name,
 	})
 }
+
+valid_display_name : Str -> Bool
+valid_display_name = |name|
+	name.count_utf8_bytes() <= 64
+		and valid_asset_name(name)
+		and name.to_utf8().all(|byte| byte >= 32 and byte <= 126 and byte != '[' and byte != ']')
 
 metadata_override = |flag, setting, fallback|
 	[flag, setting].find_first(|value| !value.is_empty()) ?? fallback
@@ -1221,11 +1239,15 @@ download! = |url, limit| {
 	response.read_to_end!(MaxBytes(limit)).map_err(|problem| DownloadFailed(url, Str.inspect(problem)))
 }
 
-write_package! = |built, format, metadata, stage, file| {
+write_package! = |built, format, metadata, display_name, stage, file| {
 	if format == Msi {
 		helper = msi_helper!(stage)?
 		id = if (metadata.id.is_empty()) "org.roc-lang.local.${built.name}" else metadata.id
-		args = [built.target, built.name, id, metadata.version, metadata.publisher, built.dir, file.display()]
+		common = [built.target, built.name, id, metadata.version, metadata.publisher, built.dir, file.display()]
+		args = match display_name {
+			Ok(title) => common.append(title)
+			Err(Missing) => common
+		}
 		outcome = Cmd.new(OsStr.from_str(helper)).args(args.map(OsStr.from_str)).inherit_stdio().run!()?
 		check_exit(outcome.status, "MSI packaging")
 	} else {
@@ -1565,7 +1587,7 @@ expect {
 }
 expect parse_text(["package"]) == Ok(Package({ target: "", format: Msi, id: "", version: "", publisher: "" }))
 expect parse_text(["package", "--format", "zip", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", format: Zip, id: "", version: "", publisher: "" }))
-expect parse_metadata("{\"id\":\"com.example.app\",\"version\":\"1.2.3\"}") == Ok({ installer: { id: "com.example.app", version: "1.2.3", publisher: "" }, icon: Err(Missing) })
+expect parse_metadata("{\"id\":\"com.example.app\",\"version\":\"1.2.3\"}") == Ok({ installer: { id: "com.example.app", version: "1.2.3", publisher: "" }, icon: Err(Missing), display_name: Err(Missing) })
 expect parse_metadata("{\"icon\":\"app.ico\"}").map_ok(|settings| settings.icon) == Ok(Ok("app.ico"))
 expect parse_metadata("{\"id\": 1}").is_err()
 expect parse_metadata("{\"product\":\"App\"}").is_err()
@@ -1639,7 +1661,7 @@ icon_frames = |source| {
 	}
 	var $frames = []
 	var $ranges = []
-	for i in 0.U64.until(count) {
+	for i in (0.U64).until(count) {
 		at = 6 + 16 * i
 		size = little_endian(source, at + 8, 4)
 		start = little_endian(source, at + 12, 4)
@@ -1656,7 +1678,7 @@ icon_frames = |source| {
 			header = little_endian(frame, 0, 4)
 			header >= 40 and header <= frame.len() and little_endian(frame, 4, 4) == width and little_endian(frame, 8, 4) == height * 2 and little_endian(frame, 12, 2) == 1 and valid_icon_dib(frame, header, width, height)
 		}
-		if !valid return Err("ICO image format or dimensions are invalid")
+		if (!valid) return Err("ICO image format or dimensions are invalid")
 		$frames = $frames.append({ directory: source.sublist({ start: at, len: 12 }), bytes: frame })
 		$ranges = $ranges.append((start, start + size))
 	}
@@ -1673,12 +1695,12 @@ valid_icon_png = |frame| {
 	while $at + 12 <= frame.len() {
 		count = big_endian(frame, $at)
 		end = $at + 12 + count
-		if end > frame.len() return Bool.False
+		if (end > frame.len()) return Bool.False
 		kind = frame.sublist({ start: $at + 4, len: 4 })
 		if kind == [73, 68, 65, 84] and count > 0 {
 			$image = Bool.True
 		}
-		if kind == [73, 69, 78, 68] return count == 0 and $image and end == frame.len()
+		if (kind == [73, 69, 78, 68]) return count == 0 and $image and end == frame.len()
 		$at = end
 	}
 	Bool.False
@@ -1690,7 +1712,7 @@ valid_icon_dib = |frame, header, width, height| {
 		return Bool.False
 	}
 	colors = little_endian(frame, 32, 4)
-	palette = if (bits > 8) 0 else if (colors == 0) 1.U64.shl_wrap(bits.to_u8_wrap()) else colors
+	palette = if (bits > 8) 0 else if (colors == 0) (1.U64).shl_wrap(bits.to_u8_wrap()) else colors
 	image = (align_to(width * bits, 32) // 8) * height
 	mask = (align_to(width, 32) // 8) * height
 	minimum = header + 4 * palette + image
@@ -1710,11 +1732,13 @@ align_to : U64, U64 -> U64
 align_to = |value, unit| ((value + unit - 1) // unit) * unit
 
 ResourceLanguage : { id : U64, code_page : U64, bytes : List(U8) }
+
 ResourceName : { id : U64, languages : List(ResourceLanguage) }
+
 ResourceType : { id : U64, names : List(ResourceName) }
 
 # Integer resource identifiers are sufficient for the platform's manifest.
-# Retain other integer resources from the input executable when adding icons.
+# Retain other integer resources from the input executable.
 resource_entries : List(U8), U64, Bool -> Try(List((U64, U64)), Str)
 resource_entries = |bytes, dir, subdirectory| {
 	count = little_endian(bytes, dir + 14, 2)
@@ -1723,7 +1747,7 @@ resource_entries = |bytes, dir, subdirectory| {
 	}
 	var $entries = []
 	var $previous = 0
-	for index in 0.U64.until(count) {
+	for index in (0.U64).until(count) {
 		at = dir + 16 + 8 * index
 		id = little_endian(bytes, at, 4)
 		offset = little_endian(bytes, at + 4, 4)
@@ -1776,6 +1800,31 @@ icon_resource_types = |frames| {
 	]
 }
 
+# The host reads this neutral RT_RCDATA resource as bounded UTF-8.
+display_name_resource : Str -> ResourceType
+display_name_resource = |title|
+	{ id: 10, names: [{ id: 501, languages: [{ id: 0, code_page: 65001, bytes: title.to_utf8() }] }] }
+
+merge_resources : List(ResourceType), List(ResourceType) -> Try(List(ResourceType), Str)
+merge_resources = |original, added| {
+	var $resources = original
+	for resource in added {
+		match $resources.find_first(|kind| kind.id == resource.id) {
+			Ok(existing) => {
+				if resource.names.any(|entry| existing.names.any(|old| old.id == entry.id)) {
+					return Err("application resource collides with an existing resource")
+				}
+				names = existing.names.concat(resource.names).sort_with(|a, b| if (a.id < b.id) Before else if (a.id > b.id) After else Same)
+				$resources = $resources.map(|kind| if (kind.id == resource.id) { ..kind, names } else kind)
+			}
+			Err(_) => {
+				$resources = $resources.append(resource)
+			}
+		}
+	}
+	Ok($resources.sort_with(|a, b| if (a.id < b.id) Before else if (a.id > b.id) After else Same))
+}
+
 resource_dir = |count| List.repeat(0.U8, 14).concat(u16_bytes(count))
 
 pack_resource_tree : List(ResourceType), U64 -> List(U8)
@@ -1819,8 +1868,8 @@ pack_languages = |langs, offset, rva| {
 	$head.concat($records).concat($body)
 }
 
-pe_with_icon : List(U8), List(IconFrame) -> Try(List(U8), Str)
-pe_with_icon = |bytes, icon| {
+pe_with_resources : List(U8), List(ResourceType) -> Try(List(U8), Str)
+pe_with_resources = |bytes, added| {
 	pe = little_endian(bytes, 60, 4)
 	header = pe + 24
 	header_size = little_endian(bytes, pe + 20, 2)
@@ -1829,7 +1878,7 @@ pe_with_icon = |bytes, icon| {
 	new_header = table + 40 * count
 	headers_end = little_endian(bytes, header + 60, 4)
 	if bytes.take_first(2) != [77, 90] or bytes.sublist({ start: pe, len: 4 }) != [80, 69, 0, 0] or little_endian(bytes, header, 2) != 0x20b or count == 0 or count >= 96 or header_size < 152 or new_header + 40 > headers_end or headers_end > bytes.len() {
-		return Err("the linked PE has no space for an icon resource section")
+		return Err("the linked PE has no space for an application resource section")
 	}
 	if little_endian(bytes, header + 108, 4) < 5 or little_endian(bytes, header + 144, 8) != 0 {
 		return Err("the linked PE has unsupported data directories or a certificate")
@@ -1849,7 +1898,7 @@ pe_with_icon = |bytes, icon| {
 	}
 	var $original = Err("resource directory is outside the executable")
 	var $memory_end = 0
-	for index in 0.U64.until(count) {
+	for index in (0.U64).until(count) {
 		s = table + 40 * index
 		rva = little_endian(bytes, s + 12, 4)
 		memory_size = little_endian(bytes, s + 8, 4)
@@ -1864,17 +1913,18 @@ pe_with_icon = |bytes, icon| {
 		}
 	}
 	original = pe_input_resources($original?, resource_rva)?
-	if !original.any(|item| item.id == 24) or original.any(|item| item.id == 3 or item.id == 14) {
-		return Err("expected the Windows manifest and room for an application icon")
+	if !original.any(|item| item.id == 24) {
+		return Err("expected the platform's Windows manifest")
 	}
+	resources = merge_resources(original, added)?
 	rva = align_to($memory_end, mem_align)
-	data = pack_resource_tree(icon_resource_types(icon).concat(original).sort_with(|a, b| if (a.id < b.id) Before else if (a.id > b.id) After else Same), rva)
+	data = pack_resource_tree(resources, rva)
 	raw_size = align_to(data.len(), file_align)
 	raw_at = align_to(bytes.len(), file_align)
 	image_size = align_to(rva + data.len(), mem_align)
 	init_size = little_endian(bytes, header + 8, 4) + raw_size
 	if image_size > 0xffffffff or raw_at + raw_size > 0xffffffff or init_size > 0xffffffff {
-		return Err("icon resources exceed the size of a PE32+ image")
+		return Err("application resources exceed the size of a PE32+ image")
 	}
 	entry = ".winres\u(0000)".to_utf8().concat(u32_bytes(data.len())).concat(u32_bytes(rva)).concat(u32_bytes(raw_size)).concat(u32_bytes(raw_at)).concat(List.repeat(0, 12)).concat(u32_bytes(0x40000040))
 	updated = patch_bytes(bytes, pe + 6, u16_bytes(count + 1))
@@ -1898,7 +1948,7 @@ read_icon! : Str => Try(List(IconFrame), _)
 read_icon! = |asset| {
 	name = icon_path(asset) ? |detail| InvalidIcon(asset, detail)
 	path = Path.utf8(name)
-	if !Path.is_file!(path)? return Err(InvalidIcon(name, "file is missing"))
+	if (!Path.is_file!(path)?) return Err(InvalidIcon(name, "file is missing"))
 	icon_frames(Path.read_bytes!(path)?).map_err(|detail| InvalidIcon(name, detail))
 }
 
@@ -1914,3 +1964,18 @@ expect {
 	tables = icon_resource_types([ico]).append(manifest)
 	pe_input_resources(pack_resource_tree(tables, base), base) == Ok(tables)
 }
+
+expect parse_metadata("{\"display_name\":\"Reading List\"}").map_ok(|settings| settings.display_name) == Ok(Ok("Reading List"))
+expect parse_metadata("{\"display_name\":\"bad/name\"}").is_err()
+expect ["", "Árbol", "A|B", "Reserved [X]", "CON", "Ends in space "].all(|name| !valid_display_name(name))
+
+expect {
+	old = { id: 10, names: [{ id: 1, languages: [{ id: 0, code_page: 0, bytes: [1, 2, 3] }] }] }
+	title = display_name_resource("Reading List")
+	match merge_resources([old], [title]) {
+		Ok(resources) => pe_input_resources(pack_resource_tree(resources, 4096), 4096) == Ok([{ id: 10, names: old.names.concat(title.names) }])
+		Err(_) => Bool.False
+	}
+}
+
+expect merge_resources([display_name_resource("One")], [display_name_resource("Two")]).is_err()

@@ -83,7 +83,12 @@ controls also support their usual Windows clipboard shortcuts.
 [#ship-a-windows-app]
 == Package an app for distribution
 
-Set MSI metadata in `windows.json` at the app root, beside `windows.roc`.
+Set app and MSI metadata in `windows.json` at the app root, beside `windows.roc`.
+The optional `display_name` supplies the initial window title, the MSI
+product name and the Start shortcut label. It also names the MSI's default
+installation folder. Use a Windows-safe ASCII name of up to 64 bytes.
+The name defaults to the executable's basename. The ZIP retains the
+title through the executable resource.
 Set `icon` to an `.ico` path relative to `assets/` to brand the executable
 on both Windows architectures. A multi-size icon serves the window, Start
 shortcut and Explorer. The launcher embeds it in the staged executable and
@@ -98,7 +103,9 @@ product version. The ID, publisher, and asset filenames use ASCII.
 {
   "id": "com.example.reading-list",
   "version": "1.0.0",
-  "publisher": "Example"
+  "publisher": "Example",
+  "display_name": "Reading List",
+  "icon": "reading-list.ico"
 }
 ----
 
