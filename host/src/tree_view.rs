@@ -119,17 +119,16 @@ impl TreeProjection {
 
     pub(crate) fn restore(&self, hwnd: HWND) {
         for key in &self.model.order {
-            if self.model.is_branch(key) {
+            if self.model.is_branch(key) && self.model.nodes[key].item.expanded {
                 let item = self.handles[key];
-                let desired = self.model.nodes[key].item.expanded;
-                if is_expanded(hwnd, item) != desired {
-                    expand(hwnd, item, desired);
+                if !is_expanded(hwnd, item) {
+                    expand(hwnd, item, true);
                 }
             }
         }
 
-        // A hidden controlled selection keeps a visible native caret on its
-        // outermost collapsed ancestor without emitting a second intent.
+        // Move the caret out of a subtree before collapsing it. Win32 can
+        // reveal a selected descendant while moving its native caret.
         let caret = self
             .model
             .visible_ancestor(&self.selected)
@@ -137,6 +136,14 @@ impl TreeProjection {
         if get_item(hwnd, TVGN_CARET) != caret {
             // SAFETY: Zero clears selection, otherwise caret is a visible live item.
             unsafe { SendMessageW(hwnd, TVM_SELECTITEM, TVGN_CARET as usize, caret) };
+        }
+        for key in self.model.order.iter().rev() {
+            if self.model.is_branch(key) && !self.model.nodes[key].item.expanded {
+                let item = self.handles[key];
+                if is_expanded(hwnd, item) {
+                    expand(hwnd, item, false);
+                }
+            }
         }
     }
 
@@ -225,7 +232,6 @@ impl TreeProjection {
         if self.expanded(hwnd, key)? == expanded {
             return Ok(None);
         }
-        expand(hwnd, self.handles[key], expanded);
         Ok(Some(TreeIntent::Expand {
             key: key.into(),
             expanded,
