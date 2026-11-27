@@ -15,6 +15,7 @@ pub(crate) struct Column {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Row {
     pub(crate) key: String,
+    pub(crate) mount: Key,
     pub(crate) cells: Vec<String>,
     pub(crate) mounted: Vec<Key>,
 }
@@ -106,6 +107,7 @@ impl Report {
                     let (cells, mounted) = cells.into_iter().unzip();
                     rows.push(Row {
                         key: key_value,
+                        mount: key,
                         cells,
                         mounted,
                     });
@@ -572,6 +574,7 @@ mod tests {
     fn row(key: &str, cells: &[&str]) -> Row {
         Row {
             key: key.into(),
+            mount: 0,
             cells: cells.iter().map(|cell| (*cell).into()).collect(),
             mounted: Vec::new(),
         }

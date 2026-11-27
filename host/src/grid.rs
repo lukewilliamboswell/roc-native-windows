@@ -572,9 +572,13 @@ impl MountedGrid for Grid {
                 (info.heading.clone(), rect_to_uia(rect))
             })
             .collect();
-        let mut order = Vec::new();
+        let mut rows = Vec::with_capacity(report.rows.len());
         let mut cells = BTreeMap::new();
         for (row, rendered) in report.rows.iter().enumerate() {
+            rows.push(automation::Row {
+                key: rendered.mount,
+                cells: rendered.mounted.clone(),
+            });
             for (column, &key) in rendered.mounted.iter().enumerate() {
                 let meta = &self.cells[&key];
                 let mut bounds = windows::Win32::UI::Accessibility::UiaRect::default();
@@ -587,7 +591,6 @@ impl MountedGrid for Grid {
                     };
                     bounds = rect_to_uia(rect);
                 }
-                order.push(key);
                 cells.insert(
                     key,
                     automation::Cell {
@@ -604,7 +607,7 @@ impl MountedGrid for Grid {
         automation.update(Snapshot {
             name: self.automation_name.clone(),
             headers,
-            order,
+            rows,
             cells,
             bounds: rect_to_uia(win_rect(hwnd)),
             active: self.active,

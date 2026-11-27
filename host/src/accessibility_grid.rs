@@ -29,11 +29,17 @@ pub(crate) struct Cell {
     pub(crate) bounds: UiaRect,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Row {
+    pub(crate) key: Key,
+    pub(crate) cells: Vec<Key>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct Snapshot {
     pub(crate) name: String,
     pub(crate) headers: Vec<(String, UiaRect)>,
-    pub(crate) order: Vec<Key>,
+    pub(crate) rows: Vec<Row>,
     pub(crate) cells: BTreeMap<Key, Cell>,
     pub(crate) bounds: UiaRect,
     pub(crate) active: Option<Key>,
@@ -95,6 +101,7 @@ impl Snapshot {
         match node {
             Item::Grid => true,
             Item::Header(index) => self.headers.get(index).is_some(),
+            Item::Row(key) => self.rows.iter().any(|row| row.key == key),
             Item::Cell(key) => self.cells.contains_key(&key),
             Item::Editor { .. } => self.editor.is_some_and(|editor| editor.item() == node),
             Item::Feedback(key) => self
@@ -120,32 +127,53 @@ impl Snapshot {
             .is_some_and(|range| contains_cell(range, cell.row, cell.column))
     }
 
-    fn node_at(&self, index: usize) -> Option<Item> {
+    fn grid_child(&self, index: usize) -> Option<Item> {
         if index < self.headers.len() {
             Some(Item::Header(index))
         } else {
-            self.order
+            self.rows
                 .get(index - self.headers.len())
-                .copied()
-                .map(Item::Cell)
+                .map(|row| Item::Row(row.key))
         }
     }
 
-    fn index(&self, node: Item) -> Option<usize> {
+    fn grid_child_index(&self, node: Item) -> Option<usize> {
         match node {
             Item::Header(index) => Some(index),
-            Item::Cell(key) => {
-                let cell = self.cells.get(&key)?;
-                Some(self.headers.len() * (cell.row + 1) + cell.column)
-            }
+            Item::Row(key) => self
+                .rows
+                .iter()
+                .position(|row| row.key == key)
+                .map(|index| self.headers.len() + index),
             _ => None,
         }
+    }
+
+    fn row(&self, key: Key) -> &Row {
+        self.rows.iter().find(|row| row.key == key).unwrap()
     }
 
     fn rectangle(&self, node: Item) -> UiaRect {
         match node {
             Item::Grid => self.bounds,
             Item::Header(index) => self.headers[index].1,
+            Item::Row(key) => self
+                .row(key)
+                .cells
+                .iter()
+                .map(|key| self.cells[key].bounds)
+                .filter(|bounds| bounds.width > 0.0 && bounds.height > 0.0)
+                .reduce(|left, right| {
+                    let x = left.left.min(right.left);
+                    let y = left.top.min(right.top);
+                    UiaRect {
+                        left: x,
+                        top: y,
+                        width: (left.left + left.width).max(right.left + right.width) - x,
+                        height: (left.top + left.height).max(right.top + right.height) - y,
+                    }
+                })
+                .unwrap_or_default(),
             Item::Cell(key) => self.cells[&key].bounds,
             Item::Feedback(_) => UiaRect::default(),
             Item::Editor { cell, .. } => self.cells[&cell].bounds,
@@ -154,9 +182,9 @@ impl Snapshot {
 
     fn navigation(&self, from: Item, direction: NavigateDirection) -> Option<Item> {
         match (from, direction) {
-            (Item::Grid, NavigateDirection_FirstChild) => self.node_at(0),
+            (Item::Grid, NavigateDirection_FirstChild) => self.grid_child(0),
             (Item::Grid, NavigateDirection_LastChild) => {
-                self.node_at((self.headers.len() + self.order.len()).checked_sub(1)?)
+                self.grid_child((self.headers.len() + self.rows.len()).checked_sub(1)?)
             }
             (Item::Grid, _) => None,
             (Item::Editor { cell, .. }, NavigateDirection_Parent)
@@ -164,16 +192,41 @@ impl Snapshot {
             (Item::Editor { cell, .. }, NavigateDirection_NextSibling) => self.feedback(cell),
             (Item::Feedback(cell), NavigateDirection_PreviousSibling) => self.editor_item(cell),
             (Item::Editor { .. } | Item::Feedback(_), _) => None,
+            (Item::Cell(key), NavigateDirection_Parent) => {
+                Some(Item::Row(self.rows[self.cells[&key].row].key))
+            }
             (_, NavigateDirection_Parent) => Some(Item::Grid),
+            (Item::Row(key), NavigateDirection_FirstChild) => {
+                self.row(key).cells.first().copied().map(Item::Cell)
+            }
+            (Item::Row(key), NavigateDirection_LastChild) => {
+                self.row(key).cells.last().copied().map(Item::Cell)
+            }
             (Item::Cell(key), NavigateDirection_FirstChild) => {
                 self.editor_item(key).or_else(|| self.feedback(key))
             }
             (Item::Cell(key), NavigateDirection_LastChild) => {
                 self.feedback(key).or_else(|| self.editor_item(key))
             }
-            (_, NavigateDirection_NextSibling) => self.node_at(self.index(from)? + 1),
+            (Item::Cell(key), NavigateDirection_NextSibling) => {
+                let cell = &self.cells[&key];
+                self.rows[cell.row]
+                    .cells
+                    .get(cell.column + 1)
+                    .copied()
+                    .map(Item::Cell)
+            }
+            (Item::Cell(key), NavigateDirection_PreviousSibling) => {
+                let cell = &self.cells[&key];
+                self.rows[cell.row]
+                    .cells
+                    .get(cell.column.checked_sub(1)?)
+                    .copied()
+                    .map(Item::Cell)
+            }
+            (_, NavigateDirection_NextSibling) => self.grid_child(self.grid_child_index(from)? + 1),
             (_, NavigateDirection_PreviousSibling) => {
-                self.node_at(self.index(from)?.checked_sub(1)?)
+                self.grid_child(self.grid_child_index(from)?.checked_sub(1)?)
             }
             _ => None,
         }
@@ -195,6 +248,7 @@ impl Snapshot {
 enum Item {
     Grid,
     Header(usize),
+    Row(Key),
     Cell(Key),
     Editor { cell: Key, generation: u64 },
     Feedback(Key),
@@ -400,7 +454,7 @@ impl Projection {
         }
         let Some(prior) = prior else { return };
         let current = self.reported.as_ref().unwrap();
-        if prior.order != current.order
+        if prior.rows != current.rows
             || prior.headers.len() != current.headers.len()
             || prior.editor.map(Editor::item) != current.editor.map(Editor::item)
         {
@@ -440,6 +494,11 @@ impl Projection {
                 if old.value != cell.value {
                     let item = Provider::element(self.hwnd, self.state.clone(), Item::Cell(key));
                     text_changed(&item, UIA_ValueValuePropertyId, &old.value, &cell.value);
+                    if cell.column == 0 {
+                        let row = current.rows[cell.row].key;
+                        let item = Provider::element(self.hwnd, self.state.clone(), Item::Row(row));
+                        text_changed(&item, UIA_NamePropertyId, &old.value, &cell.value);
+                    }
                 }
                 if old.feedback != cell.feedback {
                     let item = Provider::element(self.hwnd, self.state.clone(), Item::Cell(key));
@@ -565,7 +624,7 @@ impl IRawElementProviderSimple_Impl for Provider_Impl {
                     match self.item {
                         Item::Grid => UIA_DataGridControlTypeId,
                         Item::Header(_) => UIA_HeaderItemControlTypeId,
-                        Item::Cell(_) => UIA_DataItemControlTypeId,
+                        Item::Row(_) | Item::Cell(_) => UIA_DataItemControlTypeId,
                         Item::Feedback(_) => UIA_TextControlTypeId,
                         Item::Editor { .. } => unreachable!("editor has its own provider"),
                     }
@@ -574,6 +633,7 @@ impl IRawElementProviderSimple_Impl for Provider_Impl {
                 UIA_NamePropertyId => string(match self.item {
                     Item::Grid => &s.name,
                     Item::Header(index) => &s.headers[index].0,
+                    Item::Row(key) => &s.cells[&s.row(key).cells[0]].value,
                     Item::Cell(key) => &s.headers[s.cells[&key].column].0,
                     Item::Feedback(key) => &s.cells[&key].feedback,
                     Item::Editor { .. } => unreachable!("editor has its own provider"),
@@ -623,6 +683,7 @@ impl IRawElementProviderFragment_Impl for Provider_Impl {
                 Item::Header(index) => (1, index),
                 Item::Cell(key) => (2, key),
                 Item::Feedback(key) => (3, key),
+                Item::Row(key) => (4, key),
             };
             let key = key as u64;
             let parts = [
@@ -810,20 +871,16 @@ impl IGridProvider_Impl for Provider_Impl {
                 .ok()
                 .filter(|&i| i < s.headers.len())
                 .ok_or_else(|| Error::from_hresult(E_INVALIDARG))?;
-            let index = usize::try_from(row)
+            let key = usize::try_from(row)
                 .ok()
-                .and_then(|r| r.checked_mul(s.headers.len()))
-                .and_then(|r| r.checked_add(col))
+                .and_then(|index| s.rows.get(index))
+                .and_then(|row| row.cells.get(col))
                 .ok_or_else(|| Error::from_hresult(E_INVALIDARG))?;
-            Ok(self.other(Item::Cell(
-                *s.order
-                    .get(index)
-                    .ok_or_else(|| Error::from_hresult(E_INVALIDARG))?,
-            )))
+            Ok(self.other(Item::Cell(*key)))
         })
     }
     fn RowCount(&self) -> windows::core::Result<i32> {
-        self.with(|s| Ok(s.order.len().checked_div(s.headers.len()).unwrap_or(0) as i32))
+        self.with(|s| Ok(s.rows.len() as i32))
     }
     fn ColumnCount(&self) -> windows::core::Result<i32> {
         self.with(|s| Ok(s.headers.len() as i32))
@@ -877,8 +934,9 @@ impl ISelectionProvider_Impl for Provider_Impl {
     fn GetSelection(&self) -> windows::core::Result<*mut SAFEARRAY> {
         self.with(|s| {
             array_for(
-                s.order
+                s.rows
                     .iter()
+                    .flat_map(|row| &row.cells)
                     .filter(|key| s.selected(&s.cells[key]))
                     .map(|&key| self.other(Item::Cell(key)).into()),
             )
@@ -888,7 +946,7 @@ impl ISelectionProvider_Impl for Provider_Impl {
         self.with(|_| Ok(true.into()))
     }
     fn IsSelectionRequired(&self) -> windows::core::Result<BOOL> {
-        self.with(|s| Ok((!s.order.is_empty()).into()))
+        self.with(|s| Ok((!s.rows.is_empty()).into()))
     }
 }
 
@@ -1050,6 +1108,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn row_fragment_identity_follows_the_mount_when_rows_move() {
+        let cell = |row| Cell {
+            row,
+            column: 0,
+            value: String::new(),
+            feedback: String::new(),
+            read_only: true,
+            bounds: UiaRect::default(),
+        };
+        let mut snapshot = Snapshot {
+            headers: vec![("Name".into(), UiaRect::default())],
+            rows: vec![
+                Row {
+                    key: 10,
+                    cells: vec![11],
+                },
+                Row {
+                    key: 20,
+                    cells: vec![21],
+                },
+            ],
+            cells: BTreeMap::from([(11, cell(0)), (21, cell(1))]),
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            snapshot.navigation(Item::Header(0), NavigateDirection_NextSibling),
+            Some(Item::Row(10))
+        );
+        assert_eq!(
+            snapshot.navigation(Item::Row(10), NavigateDirection_FirstChild),
+            Some(Item::Cell(11))
+        );
+        assert_eq!(
+            snapshot.navigation(Item::Cell(11), NavigateDirection_NextSibling),
+            None
+        );
+        snapshot.rows.swap(0, 1);
+        snapshot.cells.get_mut(&11).unwrap().row = 1;
+        snapshot.cells.get_mut(&21).unwrap().row = 0;
+        assert_eq!(
+            snapshot.navigation(Item::Header(0), NavigateDirection_NextSibling),
+            Some(Item::Row(20))
+        );
+        assert_eq!(
+            snapshot.navigation(Item::Cell(11), NavigateDirection_Parent),
+            Some(Item::Row(10))
+        );
+        snapshot.rows.pop();
+        snapshot.cells.remove(&11);
+        assert!(!snapshot.contains(Item::Row(10)));
+        assert!(!snapshot.contains(Item::Cell(11)));
+    }
+
+    #[test]
     fn selection_item_changes_preserve_unrelated_cells() {
         use SelectionChange::{Add, Remove};
 
@@ -1077,7 +1189,10 @@ mod tests {
     fn automation_targets_are_scoped_to_enabled_live_cells() {
         let mut snapshot = Snapshot {
             enabled: true,
-            order: vec![10, 11],
+            rows: vec![Row {
+                key: 21,
+                cells: vec![10, 11],
+            }],
             headers: vec![
                 ("Name".into(), UiaRect::default()),
                 ("Count".into(), UiaRect::default()),
