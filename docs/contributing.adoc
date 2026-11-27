@@ -76,6 +76,10 @@ and then after a syntax error. Verify that a valid edit starts a fresh
 app instance and a failed build reopens the last successful executable.
 Record cross-build, Wine, and native Windows results separately.
 
+Track the remaining accessibility work in
+https://github.com/lukewilliamboswell/roc-native-windows/issues/1[Native control accessibility]
+and https://github.com/lukewilliamboswell/roc-native-windows/issues/2[Windows desktop accessibility baseline].
+
 [cols="1,2,3",options="header"]
 |===
 |Development tasks |Implemented in the examples or host |Windows verification remaining
