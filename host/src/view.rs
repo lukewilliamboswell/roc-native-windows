@@ -39,7 +39,7 @@ use windows_sys::Win32::UI::Controls::{
 };
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetFocus, IsWindowEnabled, SetFocus,
+    EnableWindow, GetActiveWindow, GetFocus, IsWindowEnabled, SetFocus,
 };
 use windows_sys::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, RemoveWindowSubclass, SetWindowSubclass,
@@ -502,6 +502,7 @@ pub(crate) struct Surface {
     raster_inputs: BTreeMap<Key, Arc<Pixels>>,
     handles: BTreeMap<usize, Key>,
     scroll_position: i32,
+    last_focus: HWND,
     wheel_delta: i32,
 }
 
@@ -529,6 +530,7 @@ impl Surface {
             raster_inputs: BTreeMap::new(),
             handles: BTreeMap::new(),
             scroll_position: 0,
+            last_focus: null_mut(),
             wheel_delta: 0,
         })
     }
@@ -1093,31 +1095,43 @@ impl Surface {
         }
     }
 
-    pub(crate) fn reference(&mut self, op: u8, key: Key) {
+    pub(crate) fn reference(&mut self, tree: &Tree, op: u8, key: Key) -> Result<()> {
+        let active = self.active();
         let Some(view) = self.views.get_mut(&key) else {
-            return;
+            return Ok(());
         };
-        // SAFETY: Both root and child live on the app's UI thread.
-        unsafe {
-            match op {
-                1 | 3 | 5 => {
-                    SetFocus(view.handle);
-                    if op == 3 && view.kind.is_edit() {
-                        SendMessageW(view.handle, EM_SETSEL, 0, -1);
+        let handle = view.handle;
+        let is_edit = view.kind.is_edit();
+        match op {
+            1 | 3 | 5 if active => {
+                if let Some(target) = self
+                    .tab_order()
+                    .into_iter()
+                    .find(|&item| item == handle || self.focus_key(item) == Some(key))
+                {
+                    // SAFETY: The target has a live Tab stop on this active surface.
+                    unsafe {
+                        SetFocus(target);
+                        if op == 3 && is_edit {
+                            SendMessageW(target, EM_SETSEL, 0, -1);
+                        }
                     }
+                    self.reveal_focus(tree, true)?;
                 }
-                2 => {
-                    SetFocus(self.window);
-                }
-                4 if view.kind.is_edit() => {
-                    view.force_pending = composing(view.handle);
-                    if !view.force_pending {
-                        view.write_edit(&view.props.caption);
-                    }
-                }
-                _ => {}
             }
+            2 if active => {
+                // SAFETY: The parent is on the current UI thread.
+                unsafe { SetFocus(self.window) };
+            }
+            4 if is_edit => {
+                view.force_pending = composing(handle);
+                if !view.force_pending {
+                    view.write_edit(&view.props.caption);
+                }
+            }
+            _ => {}
         }
+        Ok(())
     }
 
     pub(crate) fn dpi_changed(&mut self, tree: &Tree) -> Result<()> {
@@ -1221,7 +1235,7 @@ impl Surface {
         accent: Accent,
     ) -> Result<()> {
         let owns = |key: &Key| scopes.get(key) == Some(&owner);
-        self.focus_surviving_tab(&owns);
+        let focus = self.snapshot_focus();
         self.content = wrapper.content;
         if self.accent != accent {
             self.accent = accent;
@@ -1256,24 +1270,177 @@ impl Surface {
         {
             return Err("a window can have only one default button".into());
         }
-        self.arrange(tree)
+        self.arrange(tree)?;
+        if let Some(focus) = focus {
+            let reveal = focus.was_in_view;
+            self.restore_focus(focus);
+            self.reveal_focus(tree, reveal)?;
+        }
+        Ok(())
     }
 
-    fn focus_surviving_tab(&self, owns: &impl Fn(&Key) -> bool) {
-        // SAFETY: The HWNDs come from our UI thread and surface.
-        let focus = unsafe { GetFocus() };
-        let Some(dead) = self.key(focus).filter(|&key| !owns(&key)) else {
-            return;
-        };
-        let mut owner = self.views[&dead].tab_owner;
-        while let Some(key) = owner {
-            let view = &self.views[&key];
-            if owns(&key) {
-                unsafe { SetFocus(view.handle) };
-                return;
+    fn active(&self) -> bool {
+        // SAFETY: Activation and input focus are local to this UI thread.
+        unsafe { GetActiveWindow() == self.window && IsWindowEnabled(self.window) != 0 }
+    }
+
+    fn tab_order(&self) -> Vec<HWND> {
+        // SAFETY: The native dialog order descends into WS_EX_CONTROLPARENT composites.
+        unsafe {
+            let first = GetNextDlgTabItem(self.window, null_mut(), 0);
+            let mut order = Vec::new();
+            let mut next = first;
+            while !next.is_null() && !order.contains(&next) {
+                order.push(next);
+                next = GetNextDlgTabItem(self.window, next, 0);
             }
-            owner = view.tab_owner;
+            order
         }
+    }
+
+    fn focus_key(&self, mut handle: HWND) -> Option<Key> {
+        while !handle.is_null() && handle != self.window {
+            if let Some(&key) = self.handles.get(&(handle as usize)) {
+                return Some(key);
+            }
+            // SAFETY: Walk live child ownership on the UI thread.
+            handle = unsafe { GetAncestor(handle, GA_PARENT) };
+        }
+        None
+    }
+
+    fn focus_eligible(&self, mut handle: HWND) -> bool {
+        // SAFETY: Descendants, including internal editor HWNDs, must be visible
+        // and enabled through their entire native parent chain.
+        unsafe {
+            while !handle.is_null() && handle != self.window {
+                if IsWindowEnabled(handle) == 0
+                    || GetWindowLongPtrW(handle, GWL_STYLE) & WS_VISIBLE as isize == 0
+                {
+                    return false;
+                }
+                handle = GetAncestor(handle, GA_PARENT);
+            }
+        }
+        handle == self.window
+    }
+
+    fn snapshot_focus(&self) -> Option<FocusSnapshot> {
+        if !self.active() {
+            return None;
+        }
+        // SAFETY: Read this thread's active child, including composite descendants.
+        let handle = unsafe { GetFocus() };
+        let key = self.focus_key(handle)?;
+        let mut owners = Vec::new();
+        let mut owner = self.views[&key].tab_owner;
+        while let Some(key) = owner {
+            owners.push(key);
+            owner = self.views[&key].tab_owner;
+        }
+        let order: Vec<_> = self
+            .tab_order()
+            .into_iter()
+            .filter_map(|handle| self.focus_key(handle))
+            .collect();
+        let mut nearby = Vec::new();
+        if let Some(index) = order.iter().position(|&item| item == key) {
+            for distance in 1..order.len() {
+                nearby.extend(order.get(index + distance));
+                nearby.extend(
+                    index
+                        .checked_sub(distance)
+                        .and_then(|before| order.get(before)),
+                );
+            }
+        }
+        let was_in_view = self.focus_bounds(handle).is_some_and(|bounds| {
+            bounds.top >= 0 && bounds.top < self.scroll_info(SIF_PAGE).nPage as i32
+        });
+        Some(FocusSnapshot {
+            handle,
+            was_in_view,
+            key,
+            owners,
+            nearby,
+        })
+    }
+
+    fn restore_focus(&self, focus: FocusSnapshot) {
+        if !self.active() {
+            return;
+        }
+        let handle = if self.focus_key(focus.handle) == Some(focus.key)
+            && self.focus_eligible(focus.handle)
+        {
+            focus.handle
+        } else {
+            let order = self.tab_order();
+            focus
+                .owners
+                .into_iter()
+                .chain(focus.nearby)
+                .find_map(|key| {
+                    order
+                        .iter()
+                        .copied()
+                        .find(|&item| self.focus_key(item) == Some(key))
+                })
+                .or_else(|| order.first().copied())
+                .unwrap_or(self.window)
+        };
+        // SAFETY: The chosen replacement is live in the settled layout.
+        unsafe {
+            if GetFocus() != handle {
+                SetFocus(handle);
+            }
+        }
+    }
+
+    pub(crate) fn reveal_focus(&mut self, tree: &Tree, force: bool) -> Result<()> {
+        if !self.active() {
+            self.last_focus = null_mut();
+            return Ok(());
+        }
+        // SAFETY: Only query focus and geometry on the active surface's UI thread.
+        let handle = unsafe { GetFocus() };
+        if !force && handle == self.last_focus {
+            return Ok(());
+        }
+        self.last_focus = handle;
+        let Some(bounds) = self.focus_bounds(handle) else {
+            return Ok(());
+        };
+        let available = self.scroll_info(SIF_PAGE).nPage as i32;
+        let shift = if bounds.top < 0 || bounds.bottom - bounds.top > available {
+            bounds.top
+        } else {
+            (bounds.bottom - available).max(0)
+        };
+        if shift != 0 {
+            self.scroll_position += shift;
+            self.arrange(tree)?;
+        }
+        Ok(())
+    }
+
+    fn focus_bounds(&self, handle: HWND) -> Option<RECT> {
+        self.focus_key(handle)
+            .filter(|_| self.focus_eligible(handle))?;
+        let mut bounds = RECT::default();
+        // SAFETY: The focus is a live descendant of this surface.
+        unsafe {
+            if GetWindowRect(handle, &mut bounds) == 0 {
+                return None;
+            }
+            MapWindowPoints(
+                null_mut(),
+                self.window,
+                (&mut bounds as *mut RECT).cast(),
+                2,
+            );
+        }
+        Some(bounds)
     }
 
     fn sync_node(&mut self, tree: &Tree, key: Key, tab_owner: Option<Key>) -> Result<()> {
@@ -1779,6 +1946,11 @@ impl Surface {
                 .filter(|&(&child, _)| !is_flex(child))
                 .map(|(_, &width)| width)
                 .fold(0, i32::saturating_add);
+            if fixed.saturating_add(flex_count.saturating_mul(scale(self.dpi, 44))) > room {
+                return self.layout_column(
+                    tree, dc, &children, placements, inner, padding, spacing, x, y,
+                );
+            }
             let flex_width = if flex_count > 0 {
                 ((room - fixed) / flex_count).max(scale(self.dpi, 44))
             } else {
@@ -1807,22 +1979,45 @@ impl Surface {
             }
             width = (width - spacing).max(0);
         } else {
-            for child in children {
-                let (child_width, child_height) = self.layout(
-                    tree,
-                    child,
-                    dc,
-                    inner,
-                    x + padding,
-                    y + padding + height,
-                    placements,
-                );
-                height = height.saturating_add(child_height + spacing);
-                width = width.max(child_width);
-            }
-            height = (height - spacing).max(0);
+            return self.layout_column(
+                tree, dc, &children, placements, inner, padding, spacing, x, y,
+            );
         }
         (width + padding * 2, height.saturating_add(padding * 2))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_column(
+        &self,
+        tree: &Tree,
+        dc: HDC,
+        children: &[Key],
+        placements: &mut Vec<Placement>,
+        inner: i32,
+        padding: i32,
+        spacing: i32,
+        x: i32,
+        y: i32,
+    ) -> (i32, i32) {
+        let mut width = 0;
+        let mut height: i32 = 0;
+        for &child in children {
+            let (child_width, child_height) = self.layout(
+                tree,
+                child,
+                dc,
+                inner,
+                x + padding,
+                y + padding + height,
+                placements,
+            );
+            height = height.saturating_add(child_height + spacing);
+            width = width.max(child_width);
+        }
+        (
+            width + padding * 2,
+            (height - spacing).max(0).saturating_add(padding * 2),
+        )
     }
 }
 
@@ -1831,6 +2026,14 @@ impl Drop for Surface {
         self.views.clear();
         self.status = None;
     }
+}
+
+struct FocusSnapshot {
+    handle: HWND,
+    was_in_view: bool,
+    key: Key,
+    owners: Vec<Key>,
+    nearby: Vec<Key>,
 }
 
 struct Placement {

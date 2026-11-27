@@ -170,6 +170,7 @@ impl App {
             }
         }
         for surface in self.surface.surfaces_mut() {
+            surface.reveal_focus(&self.tree, false)?;
             for (key, resize) in surface.image_resizes() {
                 self.rasters.resize(key, resize)?;
             }
@@ -290,7 +291,7 @@ impl App {
                 && !self.surface.blocked(owner)
                 && let Some(surface) = self.surface.at_mut(owner)
             {
-                surface.reference(op, key);
+                surface.reference(&self.tree, op, key)?;
             }
         }
         self.finish_exit();
@@ -1369,7 +1370,10 @@ pub(crate) unsafe extern "system" fn window_proc(
                                 }
                             }
                         }
-                        WM_SIZE => app.surface.arrange(&app.tree)?,
+                        WM_SIZE => {
+                            app.surface.arrange(&app.tree)?;
+                            app.surface.reveal_focus(&app.tree, true)?;
+                        }
                         WM_DPICHANGED => {
                             let rect = &*(lparam as *const RECT);
                             SetWindowPos(
