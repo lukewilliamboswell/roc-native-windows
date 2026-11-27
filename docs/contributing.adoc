@@ -45,8 +45,10 @@ and bootstrap a fresh project with an empty Roc package cache. Use an
 interactive Windows desktop for capture. Check focus, DPI, Narrator,
 file dialogs, networking and workers. Install, start, upgrade and uninstall
 the MSI on a clean machine. Cross-builds and Wine compatibility checks
-provide separate evidence from native Windows runs. Hosted CI is currently
-disabled.
+provide separate evidence from native Windows runs. Hosted CI runs the
+source checks and docs build on macOS, cross-builds on Linux, and checks
+the Win32 behavior scenarios on Windows x64. Run the interactive desktop
+checks below for Narrator, input focus, and display settings.
 
 Run xref:accessibility.adoc#verify-uia[the accessibility probe and desktop
 walkthroughs] before recording accessibility verification for a release.

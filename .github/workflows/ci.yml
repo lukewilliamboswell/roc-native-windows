@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS source checks
+            runner: macos-15
+            task: check
+          - name: Linux cross-build
+            runner: ubuntu-24.04
+            task: build
+          - name: Windows x64 behavior
+            runner: windows-2025
+            task: build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: lukewilliamboswell/roc-automation/actions/setup-blueprint@ca31a848926b19ec2aed867c481ef691b55aaeb8
+        with:
+          cache: 'true'
+          cache-workload: windows-platform
+      - uses: roc-lang/setup-roc@dd81390553b0a1236aedb61cdd4c0ed7cf7eaec4
+        with:
+          version: nightly
+          nightly-tag: nightly-2026-11-26-890d6c8
+          cache: 'false'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.1
+      - name: Install the repository Rust toolchain
+        run: rustup show
+      - name: Run the Blueprint source or build checks
+        run: blueprint run ${{ matrix.task }}
+      - name: Run native Windows scenarios
+        if: runner.os == 'Windows'
+        run: blueprint run test-native -- --target x64mingw
+      - name: Build the documentation
+        if: runner.os == 'macOS'
+        run: blueprint run docs
