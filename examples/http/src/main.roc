@@ -16,12 +16,15 @@ StartMark : Try(System.Mark, System.Failure)
 
 Transfer : [Received({ status : U16, size : U64, preview : Str }), Failed(Str)]
 
+DiagnosticReference : [AwaitingReference, NoReference, Reference(Str)]
+
 store = Engine.store(
 	HttpDemo,
 	{
 		url: Engine.cell("https://example.com"),
 		request: Engine.cell(empty_request),
-		reference: Engine.cell(""),
+		reference_for: Engine.cell(0.U64),
+		reference: Engine.cell(NoReference),
 		completed: Engine.cell(""),
 		copies: Engine.cell(Engine.outbox({})),
 		status: Engine.cell("Enter a URL and press Fetch."),
@@ -54,13 +57,12 @@ view = || {
 	url = cells.url.signal()
 	start = { url, previous: request }.Signal.map(|{ url: typed, previous }| { url: typed.trim(), serial: previous.serial + 1, phase: Starting })
 	details = { completed: cells.completed.signal(), reference: cells.reference.signal() }.Signal.map(
-		|{ completed, reference }|
-			if completed.is_empty() {
-				""
-			} else {
-				id = if (reference.is_empty()) "unavailable" else reference
-				"${completed}\nReference: ${id}"
-			},
+		|{ completed, reference }| match reference {
+			_ if completed.is_empty() => ""
+			AwaitingReference => ""
+			NoReference => "${completed}\nReference: unavailable"
+			Reference(id) => "${completed}\nReference: ${id}"
+		},
 	)
 	content = Ui.vstack(
 		design.page,
@@ -76,8 +78,37 @@ view = || {
 				{},
 				[
 					Ui.text_field(url, { label: "URL", placeholder: "https://example.com", on_input: Engine.handle(|typed| [cells.url.set(typed)]) }),
-					Ui.button("Fetch", { enter_action: WindowDefault, enabled: start.map(|r| !r.url.is_empty()), on_press: Engine.handle_by(start, |r, _| [cells.request.set(r), cells.status.set("Fetching…"), cells.body.set(""), cells.reference.set(""), cells.completed.set("")]) }),
-					Ui.button("Cancel", { enabled: request.map(|r| r.phase != Idle), on_press: Engine.handle(|_| [cells.request.update(|r| { ..r, phase: Idle }), cells.status.set("Cancelled.")]) }),
+					Ui.button(
+						"Fetch",
+						{
+							enter_action: WindowDefault,
+							enabled: start.map(|r| !r.url.is_empty()),
+							on_press: Engine.handle_by(
+								start,
+								|r, _| [
+									cells.request.set(r),
+									cells.status.set("Fetching…"),
+									cells.body.set(""),
+									cells.reference_for.set(r.serial),
+									cells.reference.set(AwaitingReference),
+									cells.completed.set(""),
+								],
+							),
+						},
+					),
+					Ui.button(
+						"Cancel",
+						{
+							enabled: request.map(|r| r.phase != Idle),
+							on_press: Engine.handle(
+								|_| [
+									cells.request.update(|r| { ..r, phase: Idle }),
+									cells.reference_for.set(0),
+									cells.status.set("Cancelled."),
+								],
+							),
+						},
+					),
 				],
 			),
 			Ui.progress_bar(progress, { label: "Request progress" }),
@@ -105,14 +136,14 @@ view = || {
 				Engine.react(|r, mark| [cells.request.set({ ..r, phase: Fetching(mark) })]),
 			),
 			Engine.watch_latest(
-				request.map(|r| if (r.phase == Idle) 0 else r.serial),
+				cells.reference_for.signal(),
 				|serial| if (serial == 0) [] else [System.secure_random(16)],
 				Engine.react(
 					|_, result| [
 						cells.reference.set(
 							match result {
-								Ok(bytes) => hex(bytes)
-								Err(_) => ""
+								Ok(bytes) => Reference(hex(bytes))
+								Err(_) => NoReference
 							},
 						),
 					],
