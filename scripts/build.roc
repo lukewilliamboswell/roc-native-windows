@@ -172,7 +172,7 @@ stage! = |target| {
 	# The resource compiler resolves the manifest relative to the source's directory.
 	run!(resource, "compile the Windows manifest for ${target.roc}")?
 	probe_args = ["cc", "-target", target.zig, "-O2", "-fno-sanitize=all", "-s", "-v", "-mwindows", "host/windows/link_probe.c", "-o", "${scratch}/probe.exe"]
-	libraries = ["unwind", "comctl32", "comdlg32", "ole32", "oleaut32", "shell32", "user32", "gdi32", "winhttp", "bcrypt", "windowscodecs", "d3d11", "uiautomationcore", "oleacc", "dwmapi", "shlwapi", "ws2_32", "advapi32", "ntdll", "userenv", "psapi", "api-ms-win-core-winrt-l1-1-0", "api-ms-win-core-winrt-string-l1-1-0"]
+	libraries = ["unwind", "comctl32", "comdlg32", "ole32", "oleaut32", "shell32", "user32", "gdi32", "winhttp", "bcrypt", "windowscodecs", "d3d11", "uiautomationcore", "oleacc", "dwmapi", "usp10", "shlwapi", "ws2_32", "advapi32", "ntdll", "userenv", "psapi", "api-ms-win-core-winrt-l1-1-0", "api-ms-win-core-winrt-string-l1-1-0"]
 	probe = command("zig", probe_args.concat(libraries.map(|name| "-l${name}"))).stdout(Null).stderr(Capture).output_limit(MaxBytes(16_000_000)).run!() ? |error| "Could not run the Zig link probe: ${Str.inspect(error)}"
 	trace = Str.from_utf8(probe.stderr_bytes) ? |_| "The Zig link probe emitted invalid UTF-8"
 	if (probe.status != Exited(0)) return Err("Zig link probe failed: ${trace}")

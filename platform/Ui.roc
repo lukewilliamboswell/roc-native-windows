@@ -124,12 +124,23 @@ Ui := [].{
 	text : Signal(ctx, Str) -> Elem(ctx)
 	text = |value| Ui.text_with(value, {})
 
+	## A static TrueType face in the app's assets directory.
+	PackagedFontProps := {
+		asset : Str,
+		family : Str,
+		face : [Regular, Bold, Italic, BoldItalic] ?? Regular,
+	}
+
+	## Typography for a label. The role supplies size and the Windows fallback.
+	TextFont := [SystemFont, PackagedFont(PackagedFontProps)]
+
 	## Wrapped text or a single line with an ellipsis when it does not fit.
 	TextProps := {
 		overflow : [Wrap, EllipsizeEnd] ?? Wrap,
 		style : [Body, Caption, Heading, Title, Display, Monospace] ?? Body,
 		tone : [PrimaryText, SecondaryText, AccentText] ?? PrimaryText,
 		align : [Start, Center, End] ?? Start,
+		font : TextFont ?? SystemFont,
 	}
 
 	## The full caption remains available when the display truncates it.
@@ -1279,4 +1290,22 @@ text_attributes = |props| [
 			End => "end"
 		},
 	),
-]
+].concat(font_attrs(props.font))
+
+font_attrs : Ui.TextFont -> List(Engine.Attr(ctx))
+font_attrs = |font| match font {
+	SystemFont => []
+	PackagedFont(props) => [
+		Engine.attr("font-asset", props.asset),
+		Engine.attr("font-family", props.family),
+		Engine.attr(
+			"font-face",
+			match props.face {
+				Regular => "regular"
+				Bold => "bold"
+				Italic => "italic"
+				BoldItalic => "bold-italic"
+			},
+		),
+	]
+}

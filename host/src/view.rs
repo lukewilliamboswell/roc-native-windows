@@ -19,13 +19,14 @@ use crate::style::{
 use crate::surface_input::native as surface_input;
 use crate::toolbar::Toolbar;
 use crate::tree_view::{TreeIntent, TreeProjection};
+use crate::typeface::{FontRegistry, PackagedFont, Typeface};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
 use crate::window_chrome::{WindowDeclaration, native::StatusBar};
 use crate::wire::{Key, Kind, Node, ROOT, Tree};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
@@ -232,6 +233,9 @@ struct View {
     styled: Option<StyledWindow>,
     label_style: Option<StyledWindow>,
     font_role: FontRole,
+    typeface: Option<Typeface>,
+    packaged_font: Option<PackagedFont>,
+    label_font: HFONT,
     force_pending: bool,
     picture: Option<Picture>,
     shader: Option<ShaderView>,
@@ -324,6 +328,9 @@ impl View {
             styled: None,
             label_style: None,
             font_role: FontRole::Body,
+            typeface: None,
+            packaged_font: None,
+            label_font: font,
             props: Props {
                 enabled: true,
                 ..Props::default()
@@ -379,6 +386,47 @@ impl View {
             if !self.label.is_null() {
                 SendMessageW(self.label, WM_SETFONT, font as usize, 0);
             }
+        }
+    }
+
+    fn rebuild_text_font(
+        &mut self,
+        fonts: &Fonts,
+        registrations: &FontRegistry,
+        assets: &Path,
+        caption: &str,
+    ) {
+        let packaged = self.typeface.as_ref().and_then(|requested| {
+            registrations.borrow_mut().font(
+                self.handle,
+                assets,
+                requested,
+                fonts.packaged_metrics(self.font_role),
+            )
+        });
+        let next = self.resolve_text_font(fonts, packaged.as_ref(), caption);
+        self.set_text_font(next);
+        self.packaged_font = packaged;
+    }
+
+    fn resolve_text_font(
+        &self,
+        fonts: &Fonts,
+        packaged: Option<&PackagedFont>,
+        caption: &str,
+    ) -> HFONT {
+        let fallback = fonts.get(self.font_role);
+        packaged.map_or(fallback, |font| {
+            font.for_caption(self.handle, caption, fallback)
+        })
+    }
+
+    fn set_text_font(&mut self, next: HFONT) {
+        if next != self.label_font {
+            self.font(next);
+            self.label_font = next;
+            // SAFETY: The label remains mounted and owns the current font reference.
+            unsafe { InvalidateRect(self.handle, null(), 0) };
         }
     }
 
@@ -514,6 +562,7 @@ pub(crate) struct Surface {
     taskbar_progress: Progress,
     font: HFONT,
     fonts: Fonts,
+    font_registry: FontRegistry,
     accent: Accent,
     palette: Palette,
     dpi: u32,
@@ -528,7 +577,7 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
-    pub(crate) fn new(window: HWND, preferences: DisplayPreferences) -> Result<Self> {
+    pub(crate) fn new(window: HWND, preferences: DisplayPreferences, font_registry: FontRegistry) -> Result<Self> {
         // SAFETY: The HWND has been created and lives on this thread.
         let dpi = unsafe { GetDpiForWindow(window) }.max(96);
         let assets = std::env::current_exe()
@@ -543,6 +592,7 @@ impl Surface {
             taskbar_progress: Progress::Idle,
             font: fonts.get(FontRole::Body),
             fonts,
+            font_registry,
             accent,
             palette: Palette::new(accent, window),
             dpi,
@@ -1187,8 +1237,13 @@ impl Surface {
         let dpi = unsafe { GetDpiForWindow(self.window) }.max(96);
         let fonts = Fonts::new(dpi, self.preferences.text_scale)?;
         let font = fonts.get(FontRole::Body);
-        for view in self.views.values() {
-            view.font(fonts.get(view.font_role));
+        for view in self.views.values_mut() {
+            if view.kind == Control::Text {
+                let caption = window_text(view.handle);
+                view.rebuild_text_font(&fonts, &self.font_registry, &self.assets, &caption);
+            } else {
+                view.font(font);
+            }
             if let Some(grid) = &view.grid {
                 grid.font(font);
             }
@@ -1558,9 +1613,23 @@ impl Surface {
                 view.tab_owner = tab_owner;
                 if kind == Control::Text {
                     let role = FontRole::read(node.attr("text-style").unwrap_or(""));
-                    if role != view.font_role {
+                    let typeface = Typeface::read(node);
+                    if role != view.font_role || typeface != view.typeface {
                         view.font_role = role;
-                        view.font(self.fonts.get(role));
+                        view.typeface = typeface;
+                        view.rebuild_text_font(
+                            &self.fonts,
+                            &self.font_registry,
+                            &self.assets,
+                            &caption,
+                        );
+                    } else if caption != view.props.caption && view.packaged_font.is_some() {
+                        let font = view.resolve_text_font(
+                            &self.fonts,
+                            view.packaged_font.as_ref(),
+                            &caption,
+                        );
+                        view.set_text_font(font);
                     }
                 }
                 view.update(
@@ -1991,7 +2060,7 @@ impl Surface {
             }
             let previous = if view.kind == Control::Text {
                 // SAFETY: Layout holds a live DC and the font belongs to this surface.
-                unsafe { SelectObject(dc, self.fonts.get(view.font_role)) }
+                unsafe { SelectObject(dc, view.label_font) }
             } else {
                 null_mut()
             };

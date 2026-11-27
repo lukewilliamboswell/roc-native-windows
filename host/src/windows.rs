@@ -168,6 +168,7 @@ mod native {
     use crate::display_preferences::DisplayPreferences;
     use crate::modal::{self, Modal};
     use crate::taskbar::native::Taskbar;
+    use crate::typeface::FontRegistry;
     use crate::view::Surface;
     use crate::window::{create_window, window_proc};
     use crate::window_chrome::WindowDeclaration;
@@ -231,6 +232,7 @@ mod native {
         preferences: DisplayPreferences,
         legacy_title: Option<String>,
         exited: bool,
+        font_registry: FontRegistry,
     }
 
     impl SurfaceRegistry {
@@ -253,6 +255,7 @@ mod native {
                 preferences,
                 legacy_title: None,
                 exited: false,
+                font_registry: FontRegistry::default(),
             }
         }
 
@@ -333,7 +336,7 @@ mod native {
                         create_window(&title)?
                     };
                     let hwnd = window.0;
-                    let surface = Surface::new(hwnd, self.preferences)?;
+                    let surface = Surface::new(hwnd, self.preferences, self.font_registry.clone())?;
                     let icons = wanted.owner.is_none().then(|| WindowIcons::new(hwnd));
                     let taskbar =
                         (!self.driven && wanted.owner.is_none()).then(|| Taskbar::new(hwnd));

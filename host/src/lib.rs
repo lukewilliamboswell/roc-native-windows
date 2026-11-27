@@ -66,6 +66,8 @@ mod tree_model;
 #[cfg(windows)]
 mod tree_view;
 #[cfg(windows)]
+mod typeface;
+#[cfg(windows)]
 mod view;
 #[cfg(windows)]
 mod window;

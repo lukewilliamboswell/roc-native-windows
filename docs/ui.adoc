@@ -53,7 +53,7 @@ for state, stores, and worker tasks.
 | `Ui.vstack` | Vertical layout | Children, `spacing` and `padding`
 | `Ui.hstack` | Horizontal layout | Children, `spacing` and `padding`
 | `Ui.panel` | Padded grouping surface | Content and optional `surface`, `border`, `padding` and `width`
-| `Ui.text`, `Ui.text_with` | Label | Text signal and optional `style`, `tone`, `align` and `overflow` with `text_with`
+| `Ui.text`, `Ui.text_with` | Label | Text signal and optional `style`, `tone`, `align`, `overflow` and `font` with `text_with`
 | `Ui.button` | Push button | Title, `on_press`, optional `enabled`
 | `Ui.toolbar` | Command toolbar | Group label, ordered commands and separators
 | `Ui.text_field` | Single-line edit control | Value, `on_input`, optional `label`, `placeholder` and `enabled`
@@ -308,6 +308,47 @@ content. Use a stack inside it to group several controls.
 
 See Counter for a centered display value and Reading List for a title and
 an accent that carries across the app.
+
+[#packaged-fonts]
+=== Packaged fonts
+
+`Ui.text_with` uses `SystemFont` by default. To opt a label into an app
+font, place a single static TrueType face under `assets/` and set its
+relative path and Windows family name.
+
+[source,roc]
+----
+Ui.text_with(
+	count,
+	{
+		style: Display,
+		align: Center,
+		font: PackagedFont({
+			asset: "fonts/IBMPlexSans-Bold.ttf",
+			family: "IBM Plex Sans",
+			face: Bold,
+		}),
+	},
+)
+----
+
+`Ui.PackagedFontProps` defaults to `Regular` and also accepts `Bold`,
+`Italic`, or `BoldItalic`. Use a separate asset for each face. The GDI
+family name can differ from the filename and has a maximum of 31 UTF-16
+code units. The text style supplies the size and fallback role. Windows
+registers the font privately for the app process. The host verifies the
+selected face against the file and uses the system role when the face
+cannot be loaded or selected, or when the text needs complex shaping or
+glyphs the packaged face lacks. Use a Windows system role for text
+that regularly mixes scripts. The native label retains its full text as
+its accessible name. Editors, commands, and other native controls keep
+their system fonts.
+
+The ordinary build, ZIP, and MSI asset flow carries the font. Check that
+its license permits redistribution and keep the license text alongside
+the file. Counter bundles IBM Plex Sans Bold and HTTP bundles IBM Plex
+Mono Regular. Reading List and Workers show how to collect typography
+and layout choices in app-owned theme records with system fonts.
 
 [#raster-images]
 == Raster images

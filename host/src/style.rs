@@ -89,7 +89,10 @@ pub(crate) mod native {
         }
     }
 
-    pub(crate) struct Fonts(Vec<HFONT>);
+    pub(crate) struct Fonts {
+        handles: Vec<HFONT>,
+        message_font: LOGFONTW,
+    }
 
     impl Fonts {
         pub(crate) fn new(dpi: u32, text_scale: f64) -> Result<Self> {
@@ -97,7 +100,7 @@ pub(crate) mod native {
                 cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
                 ..NONCLIENTMETRICSW::default()
             };
-            let mut fonts = Self(Vec::with_capacity(FontRole::ALL.len()));
+
             // SAFETY: The struct size matches the Win32 API and each font is owned by Fonts.
             unsafe {
                 if SystemParametersInfoForDpi(
@@ -115,7 +118,14 @@ pub(crate) mod native {
                 }
                 metrics.lfMessageFont.lfHeight =
                     (f64::from(metrics.lfMessageFont.lfHeight) * text_scale).round() as i32;
-                for role in FontRole::ALL {
+            }
+            let mut fonts = Self {
+                handles: Vec::with_capacity(FontRole::ALL.len()),
+                message_font: metrics.lfMessageFont,
+            };
+            for role in FontRole::ALL {
+                // SAFETY: GDI reads the role-specific logical metrics synchronously.
+                unsafe {
                     let font = CreateFontIndirectW(&role.metrics(metrics.lfMessageFont));
                     if font.is_null() {
                         return Err(format!(
@@ -123,20 +133,24 @@ pub(crate) mod native {
                             std::io::Error::last_os_error()
                         ));
                     }
-                    fonts.0.push(font);
+                    fonts.handles.push(font);
                 }
             }
             Ok(fonts)
         }
 
         pub(crate) fn get(&self, role: FontRole) -> HFONT {
-            self.0[role as usize]
+            self.handles[role as usize]
+        }
+
+        pub(crate) fn packaged_metrics(&self, role: FontRole) -> LOGFONTW {
+            role.metrics(self.message_font)
         }
     }
 
     impl Drop for Fonts {
         fn drop(&mut self) {
-            for &font in &self.0 {
+            for &font in &self.handles {
                 // SAFETY: The callers have discarded all views, or selected the new fonts.
                 unsafe { DeleteObject(font) };
             }
