@@ -44,6 +44,98 @@ disabled.
 Run xref:accessibility.adoc#verify-uia[the accessibility probe and desktop
 walkthroughs] before recording accessibility verification for a release.
 
+[#windows-handoff]
+== Windows handoff checks
+
+Use an interactive Windows desktop and record the OS build and the app
+architecture with each result. Run the following with the bundled
+targets from this checkout. Use `arm64mingw` for the native app tests on
+Windows on Arm.
+
+[source,powershell]
+----
+blueprint run test-native -- --target x64mingw
+blueprint run test-accessibility
+----
+
+Run the keyboard probes in `tests/native-keyboard/` and repeat the
+Reading List accessibility check on a project created by the standalone
+release launcher. Then run the desktop checks below. Cross-build,
+Wine, and native Windows results each need their own record.
+
+[cols="1,2,3",options="header"]
+|===
+|WIP notes |Implemented in the examples or host |Windows verification or implementation remaining
+
+|01–09, 11–15
+|List and grid, native choices, edit, button, static labels, tabs, tree,
+toolbar, and progress and status bars.
+|Verify keyboard and IME interaction, native names, long labels and
+read-only text, overflow, and focus at high DPI. Check task-specific
+behavior against the existing specs and UI Automation probe.
+
+|10, 21–22
+|Localized date and time edits, date chooser, independent windows, and
+owned Notes dialog.
+|Verify two locales, a 24-hour time format, Narrator, Escape during IME,
+opener focus, and window activation across monitors.
+
+|16–18
+|App and command icons, HTTP taskbar progress, Start shortcut,
+and Explorer drop handling.
+|Install two apps with the same display name. Check Explorer and Start
+icons, ordinary upgrade and rollback after a failed upgrade, and
+uninstall. Check taskbar progress across an Explorer restart and drag
+a real file from Explorer into Files.
+
+|19–20
+|Clipboard text, file and folder pickers, and scoped file results.
+|Check copy into a second app, native picker cancellation, Unicode
+names, and Save As on Windows. The stricter authority contract remains
+part of WIP 36.
+
+|23–27
+|Packaged and rendered rasters, Direct3D shader views, custom input,
+and native styling.
+|Compare hardware and WARP output and test device loss. Check real mouse
+capture, zoom and mixed DPI, contrast themes, and recording on desktop.
+
+|28–32
+|Control and grid semantics, keyboard focus, an external UI Automation
+probe, accessible graphics and slider, and polite status feedback.
+|Establish the desktop baseline for all six examples. Inspect civil
+field label and validation relationships, the focused grid EDIT and
+its native text interface, decorative graphic visibility, and
+announcements during completion and cancellation. Check Narrator,
+Text size, contrast themes, and mixed-DPI focus.
+
+|33–34
+|Private packaged fonts and app-owned themes. Standalone init carries
+the Reading List design and assets.
+|Verify the selected faces, glyph fallback, Text size and DPI across
+multiple windows. Check a generated app and an installed app with
+clean OS font settings.
+
+|35
+|Wall and monotonic clocks, time-zone and regional facts, and secure
+randomness with deterministic spec fixtures.
+|Check OS time-zone transitions, locale overrides, and CNG on both
+Windows architectures.
+
+|36
+|Retained files, rooted packaged assets and local settings, user-triggered
+Copy, and dedicated scenario executables.
+|Finish confirmation-time picker handles, exclusive Save As creation, and
+the optional capability manifest. Strict network admission requires
+matching typed refusal results in the Signals protocol. Strict raw
+clipboard denial remains open. Verify denial, replacement, and
+cancellation through the native entry points.
+|===
+
+Before publication, validate one exact set of versioned release assets.
+Collect the native Windows run results, dependency license texts, SBOMs,
+and provenance alongside the installer and bootstrap checks.
+
 [#review-host-authority]
 == Review each feature's security model
 

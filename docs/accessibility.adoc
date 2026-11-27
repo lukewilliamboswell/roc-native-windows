@@ -51,8 +51,9 @@ governs which desktop processes can use accessibility APIs.
 [#verify-uia]
 == Verify UI Automation on Windows
 
-Run `blueprint run build` once from the checkout to stage the host, then
-run the following command from an interactive Windows desktop.
+Stage the host as described in
+xref:contributing.adoc#verify-native-windows[Run the examples on Windows],
+then run the following command from an interactive Windows desktop.
 
 [source,powershell]
 ----
