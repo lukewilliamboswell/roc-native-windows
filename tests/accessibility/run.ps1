@@ -3,6 +3,7 @@ param(
     [ValidateSet("x64mingw", "arm64mingw")] [string] $Target,
     [ValidateSet("counter", "starter", "todos", "files", "http", "workers")] [string[]] $Example,
     [string] $Starter,
+    [switch] $FreshStarter,
     [int] $AppPid,
     [string] $Check
 )
@@ -21,7 +22,8 @@ if ($AppPid -gt 0) {
         [RocWindowsAccessibility]::Check([Diagnostics.Process]::GetProcessById($AppPid), $Check)
         exit 0
     } catch {
-        [Console]::Error.WriteLine("$Check accessibility check failed: $_")
+        [Console]::Error.WriteLine("$Check accessibility check failed.")
+        [Console]::Error.WriteLine($_.Exception.ToString())
         exit 1
     }
 }
@@ -37,21 +39,17 @@ if (-not $Example) {
 }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $env:ROC_WINDOWS_ROC = $Roc
-$failures = @()
+$windows = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+$architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+Write-Output "Windows build $($windows.CurrentBuild).$($windows.UBR), OS $architecture, PowerShell $env:PROCESSOR_ARCHITECTURE, app target $Target"
 
-foreach ($name in $Example) {
-    $directory = Join-Path $repo "examples/$name"
-    $tool = Join-Path $repo "cli/windows.roc"
-    if ($Starter -and $name -eq "starter") {
-        $directory = (Resolve-Path $Starter).Path
-        $tool = Join-Path $directory "windows.roc"
-    }
+function Invoke-ExampleProbe($name, $directory, $tool, $label) {
     Push-Location $directory
     try {
         & $Roc $tool -- build --target $Target
-        if ($LASTEXITCODE -ne 0) { throw "Could not build $name for $Target." }
+        if ($LASTEXITCODE -ne 0) { throw "Could not build $label for $Target." }
         $exe = @(Get-ChildItem -File "build/$Target" -Filter "*.exe")
-        if ($exe.Count -ne 1) { throw "Expected exactly one built executable for $name in build/$Target." }
+        if ($exe.Count -ne 1) { throw "Expected exactly one built executable for $label in build/$Target." }
         $app = Start-Process -FilePath $exe[0].FullName -WorkingDirectory $directory -PassThru
         $probe = $null
         try {
@@ -60,20 +58,58 @@ foreach ($name in $Example) {
                 "-AppPid", $app.Id, "-Check", $name
             ) -NoNewWindow -PassThru
             [void] $probe.Handle
-            if (-not $probe.WaitForExit(45000)) { throw "$name's UI Automation client exceeded 45 seconds." }
-            if ($probe.ExitCode -ne 0) { throw "$name's UI Automation client exited with code $($probe.ExitCode)." }
-            Write-Output "PASS $name accessibility ($Target)"
+            if (-not $probe.WaitForExit(45000)) { throw "$label UI Automation client exceeded 45 seconds." }
+            if ($probe.ExitCode -ne 0) { throw "$label UI Automation client exited with code $($probe.ExitCode)." }
+            Write-Output "PASS $label accessibility ($Target)"
         } finally {
-            if ($probe -and -not $probe.HasExited) { $probe.Kill() }
+            if ($probe -and -not $probe.HasExited) {
+                $probe.Kill()
+                [void] $probe.WaitForExit(2000)
+            }
             if (-not $app.HasExited) {
                 [void] $app.CloseMainWindow()
-                if (-not $app.WaitForExit(2000)) { $app.Kill() }
+                if (-not $app.WaitForExit(2000)) {
+                    $app.Kill()
+                    [void] $app.WaitForExit(2000)
+                }
             }
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+$launcher = Join-Path $repo "cli/windows.roc"
+$failures = @()
+foreach ($name in $Example) {
+    try {
+        if ($Starter -and $name -eq "starter") {
+            $directory = (Resolve-Path $Starter).Path
+            Invoke-ExampleProbe $name $directory (Join-Path $directory "windows.roc") "supplied starter"
+        } else {
+            Invoke-ExampleProbe $name (Join-Path $repo "examples/$name") $launcher $name
         }
     } catch {
         $failures += "$name ($Target): $_"
+    }
+}
+
+if ($FreshStarter) {
+    $scratch = Join-Path $repo "build/accessibility-$([Guid]::NewGuid().ToString('N'))"
+    $directory = Join-Path $scratch "reading-list"
+    try {
+        Push-Location $repo
+        try {
+            & $Roc $launcher -- init --platform platform/main.roc $directory
+            if ($LASTEXITCODE -ne 0) { throw "Could not initialize the fresh Reading List project." }
+        } finally {
+            Pop-Location
+        }
+        Invoke-ExampleProbe "starter" $directory (Join-Path $directory "windows.roc") "fresh starter"
+    } catch {
+        $failures += "fresh starter ($Target): $_"
     } finally {
-        Pop-Location
+        if (Test-Path -LiteralPath $scratch) { Remove-Item -LiteralPath $scratch -Recurse -Force }
     }
 }
 

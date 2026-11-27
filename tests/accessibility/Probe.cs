@@ -75,11 +75,22 @@ public static class RocWindowsAccessibility
         var report = Find(root, "Titles", ControlType.List, ControlType.DataGrid, ControlType.Table);
         Find(report, "Status", ControlType.HeaderItem);
         var row = Find(report, "Accessibility proof", ControlType.DataItem, ControlType.ListItem);
-        Pattern<SelectionItemPattern>(row, SelectionItemPattern.Pattern).Select();
-        var mark = Find(root, "Mark read", ControlType.Button);
+        var selection = Pattern<SelectionItemPattern>(row, SelectionItemPattern.Pattern);
+        selection.Select();
+        WaitFor("Reading List row selected", () => selection.Current.IsSelected ? row : null);
+        // The Win32 toolbar proxy can expose the same command as MenuItem
+        // while it is text-only and as Button while it has an icon.
+        var commands = new[] { ControlType.Button, ControlType.MenuItem };
+        var mark = Find(root, "Mark read", commands);
         WaitFor("Mark read enabled after selection", () => mark.Current.IsEnabled ? mark : null);
         Invoke(mark);
-        Find(root, "Mark unread", ControlType.Button);
+        Func<string> describe = () => "Buttons: " + Describe(root, ControlType.Button) +
+            ". Menu items: " + Describe(root, ControlType.MenuItem) +
+            ". Status: " + Describe(root, ControlType.StatusBar);
+        var unmark = Find(root, "Mark unread", commands, describe);
+        Require(unmark.Current.IsEnabled, "Mark unread is disabled for the selected title.");
+        Invoke(unmark);
+        Find(root, "Mark read", commands, describe);
     }
 
     private static void Todos(AutomationElement root, int pid)
@@ -176,21 +187,21 @@ public static class RocWindowsAccessibility
         var grid = Find(root, "Stock counts", ControlType.DataGrid);
         var data = Pattern<GridPattern>(grid, GridPattern.Pattern);
         Require(data.Current.RowCount > 0 && data.Current.ColumnCount == 3, "Stock counts has incorrect grid dimensions.");
-        var cell = data.GetItem(0, 2);
+        var cell = GridItem(data, 0, 2);
         Require(Value(cell) == "4", "Counted cell did not expose the committed value.");
         Require(!Pattern<ValuePattern>(cell, ValuePattern.Pattern).Current.IsReadOnly, "Counted is read-only.");
-        Require(Pattern<ValuePattern>(data.GetItem(0, 1), ValuePattern.Pattern).Current.IsReadOnly,
+        Require(Pattern<ValuePattern>(GridItem(data, 0, 1), ValuePattern.Pattern).Current.IsReadOnly,
                 "Expected should be read-only.");
         var table = Pattern<TableItemPattern>(cell, TableItemPattern.Pattern);
-        Require(table.Current.GetColumnHeaderItems().Any(item => item.Current.Name == "Counted"),
+        Require(ColumnHeaders(table).Any(item => item.Current.Name == "Counted"),
                 "Counted cell has no Counted header.");
         int[] identity = cell.GetRuntimeId();
         SetValue(cell, "7");
-        WaitFor("Counted committed from UI Automation", () => Value(data.GetItem(0, 2)) == "7" ? grid : null);
+        WaitFor("Counted committed from UI Automation", () => Value(GridItem(data, 0, 2)) == "7" ? grid : null);
         SetValue(cell, "-2");
         WaitFor("Counted validation exposed", () =>
-            data.GetItem(0, 2).Current.HelpText.Contains("whole number") ? grid : null);
-        var sameCell = data.GetItem(0, 2);
+            GridItem(data, 0, 2).Current.HelpText.Contains("whole number") ? grid : null);
+        var sameCell = GridItem(data, 0, 2);
         Require(Value(sameCell) == "7" && identity.SequenceEqual(sameCell.GetRuntimeId()),
                 "Rejected edit changed the committed value or live cell identity.");
         sameCell.SetFocus();
@@ -223,6 +234,25 @@ public static class RocWindowsAccessibility
         });
     }
 
+    private static AutomationElement GridItem(GridPattern grid, int row, int column)
+    {
+        try { return grid.GetItem(row, column); }
+        catch (ElementNotAvailableException) { throw; }
+        catch (Exception error)
+        {
+            throw new InvalidOperationException(String.Format("Stock counts Grid.GetItem({0}, {1}) failed.", row, column), error);
+        }
+    }
+
+    private static AutomationElement[] ColumnHeaders(TableItemPattern cell)
+    {
+        try { return cell.Current.GetColumnHeaderItems(); }
+        catch (Exception error)
+        {
+            throw new InvalidOperationException("Counted TableItem.GetColumnHeaderItems failed.", error);
+        }
+    }
+
     private static AutomationElement CurrentFocus(AutomationElement expected)
     {
         var focused = AutomationElement.FocusedElement;
@@ -250,6 +280,11 @@ public static class RocWindowsAccessibility
 
     private static AutomationElement Find(AutomationElement parent, string name, params ControlType[] types)
     {
+        return Find(parent, name, types, null);
+    }
+
+    private static AutomationElement Find(AutomationElement parent, string name, ControlType[] types, Func<string> describe)
+    {
         return WaitFor(name + " [" + String.Join(", ", types.Select(type => type.ProgrammaticName)) + "]", () =>
         {
             foreach (var type in types)
@@ -261,10 +296,26 @@ public static class RocWindowsAccessibility
                 if (result != null) return result;
             }
             return null;
-        });
+        }, describe);
     }
 
-    private static AutomationElement WaitFor(string checkpoint, Func<AutomationElement> attempt)
+    private static string Describe(AutomationElement parent, ControlType type)
+    {
+        try
+        {
+            var condition = new PropertyCondition(AutomationElement.ControlTypeProperty, type);
+            return String.Join(", ", parent.FindAll(TreeScope.Descendants, condition)
+                .Cast<AutomationElement>().Take(12).Select(item =>
+                {
+                    var label = String.Format("'{0}' ({1})", item.Current.Name,
+                                              item.Current.IsEnabled ? "enabled" : "disabled");
+                    return type == ControlType.StatusBar ? label + " " + Describe(item, ControlType.Text) : label;
+                }));
+        }
+        catch (Exception error) { return error.Message; }
+    }
+
+    private static AutomationElement WaitFor(string checkpoint, Func<AutomationElement> attempt, Func<string> describe = null)
     {
         var watch = Stopwatch.StartNew();
         while (watch.ElapsedMilliseconds < 5000)
@@ -277,7 +328,8 @@ public static class RocWindowsAccessibility
             catch (ElementNotAvailableException) {}
             Thread.Sleep(50);
         }
-        throw new InvalidOperationException("UI Automation checkpoint timed out: " + checkpoint);
+        var details = describe == null ? "" : "\n" + describe();
+        throw new InvalidOperationException("UI Automation checkpoint timed out: " + checkpoint + details);
     }
 
     private static T Pattern<T>(AutomationElement element, AutomationPattern pattern) where T : class

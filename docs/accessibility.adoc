@@ -62,8 +62,11 @@ blueprint run test-accessibility
 
 The contributor probe launches the real examples, queries UI Automation
 from a separate MTA process, and checks names, patterns, state changes,
-and focus. Each app and client are terminated after the check. For a
-focused run or a generated Starter, invoke the same script directly.
+and focus. Each app and client are terminated after the check. Add
+`-- -FreshStarter` to also scaffold and test a Reading List project with
+`windows.roc init`. The hosted accessibility workflow uses this option.
+For a focused run or a project created by the release launcher, invoke
+the same script directly.
 
 [source,powershell]
 ----
