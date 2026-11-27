@@ -1,5 +1,7 @@
 //! Build an MSI from a staged app. This tool runs on the packaging machine.
 
+mod pe;
+
 use embala_msi::{FileSpec, MsiArch, MsiSpec};
 use msi::{Column, Delete, Expr, Insert, Select, Update, Value};
 use sha2::{Digest, Sha256};
@@ -171,6 +173,9 @@ fn spec(
     let mut files = Vec::new();
     let main_executable = format!("{name}.exe");
     add_file(stage, &main_executable, &mut files)?;
+    if pe::has_scenario_marker(File::open(stage.join(&main_executable))?)? {
+        return Err("scenario executables cannot be packaged for distribution".into());
+    }
     for notice in ["LICENSE", "THIRD_PARTY_LICENSES.md"] {
         if stage.join(notice).symlink_metadata().is_ok() {
             add_file(stage, notice, &mut files)?;

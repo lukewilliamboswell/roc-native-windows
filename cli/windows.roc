@@ -24,6 +24,8 @@ import zip.Zip
 
 PackageFormat : [Msi, Zip]
 
+BuildProfile : [Shipping, ScenarioRunner]
+
 PackageOptions : { target : Str, format : PackageFormat, id : Str, version : Str, publisher : Str }
 
 MsiMetadata : { id : Str, version : Str, publisher : Str }
@@ -377,7 +379,8 @@ record! = |path, format, requested| {
 
 spec_executable! : Str => Try(Path.Path, _)
 spec_executable! = |target| {
-	built = build!(target)?
+	settings = app_metadata!()?
+	built = build_with_metadata!(target, settings, ScenarioRunner)?
 	Path.absolute!(Path.utf8("${built.dir}/${built.name}.exe"))
 }
 
@@ -1078,18 +1081,19 @@ fuzz! = |check| {
 build! : Str => Try({ dir : Str, name : Str, target : Str }, _)
 build! = |requested| {
 	settings = app_metadata!()?
-	build_with_metadata!(requested, settings)
+	build_with_metadata!(requested, settings, Shipping)
 }
 
-build_with_metadata! = |requested, settings| {
+build_with_metadata! = |requested, settings, profile| {
 	entry = entry!()?
 	own = windows_target!()
 	target = if (!requested.is_empty()) requested else if (own.is_empty()) "x64mingw" else own
-	dir = "build/${target}"
+	parent = if (profile == ScenarioRunner) "build/spec-executables" else "build"
+	dir = "${parent}/${target}"
 	name = app_name(Env.cwd!()?.display())
-	ensure_dir!("build")?
-	stage = Env.create_temp_dir_in!(Path.utf8("build"), ".windows-")?.display()
-	outcome = stage_build!(entry, name, target, stage, dir, settings)
+	ensure_dir!(parent)?
+	stage = Env.create_temp_dir_in!(Path.utf8(parent), ".windows-")?.display()
+	outcome = stage_build!(entry, name, target, stage, dir, settings, profile)
 	match outcome {
 		Err(BuildRecovery(_)) => {}
 		_ => Path.delete_all!(Path.utf8(stage)) ?? {}
@@ -1099,8 +1103,8 @@ build_with_metadata! = |requested, settings| {
 	Ok({ dir, name, target })
 }
 
-stage_build! : Str, Str, Str, Str, Str, AppMetadata => Try({}, _)
-stage_build! = |entry, name, target, stage, dir, settings| {
+stage_build! : Str, Str, Str, Str, Str, AppMetadata, BuildProfile => Try({}, _)
+stage_build! = |entry, name, target, stage, dir, settings, profile| {
 	fresh = "${stage}/candidate"
 	backup = "${stage}/previous"
 	ensure_dir!(fresh)?
@@ -1122,7 +1126,8 @@ stage_build! = |entry, name, target, stage, dir, settings| {
 		Err(Missing) => icon_resources
 		Ok(title) => icon_resources.append(display_name_resource(title))
 	}
-	resources = if (catalog.keys().is_empty()) app_resources else app_resources.append(asset_catalog_resource(catalog))
+	asset_resources = if (catalog.keys().is_empty()) app_resources else app_resources.append(asset_catalog_resource(catalog))
+	resources = if (profile == ScenarioRunner) asset_resources.append(scenario_runner_resource) else asset_resources
 	updated = if resources.is_empty() {
 		binary
 	} else {
@@ -1356,7 +1361,7 @@ package! : PackageOptions => Try({}, _)
 package! = |options| {
 	settings = app_metadata!()?
 	metadata = merge_metadata({ id: options.id, version: options.version, publisher: options.publisher }, settings.installer)
-	built = build_with_metadata!(options.target, settings)?
+	built = build_with_metadata!(options.target, settings, Shipping)?
 	extension = if (options.format == Msi) "msi" else "zip"
 	ensure_dir!("dist")?
 	output = "dist/${built.name}-${built.target}.${extension}"
@@ -2054,6 +2059,11 @@ asset_catalog_resource = |catalog| {
 	bytes = Str.join_with(["roc-windows-assets 1"].concat(lines), "\n").to_utf8()
 	{ id: 10, names: [{ id: 502, languages: [{ id: 0, code_page: 65001, bytes }] }] }
 }
+
+# Keep this neutral RT_RCDATA marker in sync with host startup and the MSI packager.
+scenario_runner_resource : ResourceType
+scenario_runner_resource =
+	{ id: 10, names: [{ id: 504, languages: [{ id: 0, code_page: 0, bytes: "roc-windows-scenario-1".to_utf8() }] }] }
 
 merge_resources : List(ResourceType), List(ResourceType) -> Try(List(ResourceType), Str)
 merge_resources = |original, added| {

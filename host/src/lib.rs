@@ -15,6 +15,8 @@ mod accessibility_grid;
 #[cfg(windows)]
 mod abi;
 #[cfg(windows)]
+mod app_resource;
+#[cfg(windows)]
 mod asset_catalog;
 #[cfg(any(test, windows))]
 mod capture;

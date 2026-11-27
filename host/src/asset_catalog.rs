@@ -1,12 +1,9 @@
 //! Asset declarations embedded by the app builder.
 
 use crate::Result;
+use crate::app_resource::embedded_app_data;
 use std::collections::BTreeMap;
-use std::ptr::null;
 use std::sync::OnceLock;
-use windows_sys::Win32::System::LibraryLoader::{
-    FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
-};
 
 const MAX_CATALOG_BYTES: usize = 32 * 1024;
 const ASSET_CATALOG_ID: u16 = 502;
@@ -18,7 +15,9 @@ pub(crate) fn resolve(name: &str) -> Result<&str> {
     };
     CATALOG
         .get_or_init(|| {
-            resource(ASSET_CATALOG_ID, MAX_CATALOG_BYTES)
+            embedded_app_data(ASSET_CATALOG_ID, MAX_CATALOG_BYTES)
+                .ok()
+                .flatten()
                 .and_then(parse)
                 .unwrap_or_default()
         })
@@ -40,38 +39,6 @@ fn parse(bytes: &[u8]) -> Option<BTreeMap<&str, &str>> {
         }
     }
     Some(entries)
-}
-
-fn resource(id: u16, max_bytes: usize) -> Option<&'static [u8]> {
-    // SAFETY: The current executable stays mapped for the process lifetime.
-    // Win32 encodes integer resource identifiers in the pointer's low word.
-    unsafe {
-        let module = GetModuleHandleW(null());
-        if module.is_null() {
-            return None;
-        }
-        let resource = FindResourceW(
-            module,
-            std::ptr::without_provenance(usize::from(id)),
-            std::ptr::without_provenance(10),
-        );
-        if resource.is_null() {
-            return None;
-        }
-        let size = SizeofResource(module, resource) as usize;
-        if !(1..=max_bytes).contains(&size) {
-            return None;
-        }
-        let loaded = LoadResource(module, resource);
-        if loaded.is_null() {
-            return None;
-        }
-        let data = LockResource(loaded);
-        if data.is_null() {
-            return None;
-        }
-        Some(std::slice::from_raw_parts(data.cast::<u8>(), size))
-    }
 }
 
 #[cfg(test)]

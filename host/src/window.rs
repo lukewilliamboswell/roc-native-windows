@@ -1,4 +1,5 @@
 use crate::abi::Engine;
+use crate::app_resource::embedded_app_data;
 use crate::civil_calendar::native::{Action as CalendarAction, Calendar};
 use crate::civil_edit::Commit as CivilCommit;
 use crate::display_preferences::DisplaySettings;
@@ -19,11 +20,9 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::mpsc::{Receiver, channel};
-use windows_sys::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::COLOR_WINDOW;
-use windows_sys::Win32::System::LibraryLoader::{
-    FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
-};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
     ICC_BAR_CLASSES, ICC_LISTVIEW_CLASSES, ICC_PROGRESS_CLASS, ICC_STANDARD_CLASSES,
     ICC_TAB_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVIF_STATE,
@@ -88,7 +87,7 @@ impl App {
         let driven = options.is_some();
         crate::shader::configure(driven);
         let pump = create_pump()?;
-        let title = app_name(unsafe { GetModuleHandleW(null()) });
+        let title = app_name();
         let display_settings = DisplaySettings::new();
         let declarations = Declarations::decode(&Engine::declarations()?)?;
         let effects = Effects::new(pump.0, send, declarations.clone());
@@ -1008,41 +1007,21 @@ fn paths_from_drop(drop: HDROP) -> (Option<POINT>, Vec<PathBuf>) {
     (client.then_some(point), paths)
 }
 
-fn embedded_display_name(instance: HMODULE) -> Option<String> {
-    // Keep the RT_RCDATA identifier in sync with display_name_resource in the CLI.
-    const RT_RCDATA: *const u16 = 10usize as *const u16;
-    const DISPLAY_NAME: *const u16 = 501usize as *const u16;
-    // SAFETY: The module is the current executable and remains loaded.
-    // Integer resource identifiers are passed as low-word pointer values.
-    unsafe {
-        let resource = FindResourceW(instance, DISPLAY_NAME, RT_RCDATA);
-        if resource.is_null() {
-            return None;
-        }
-        let len = SizeofResource(instance, resource) as usize;
-        if !(1..=64).contains(&len) {
-            return None;
-        }
-        let loaded = LoadResource(instance, resource);
-        if loaded.is_null() {
-            return None;
-        }
-        let data = LockResource(loaded);
-        if data.is_null() {
-            return None;
-        }
-        let bytes = std::slice::from_raw_parts(data.cast::<u8>(), len);
-        if bytes.iter().all(|&byte| (b' '..=b'~').contains(&byte)) {
-            std::str::from_utf8(bytes).ok().map(str::to_owned)
-        } else {
-            None
-        }
+fn scenario_runner() -> Result<bool> {
+    const MARKER: &[u8] = b"roc-windows-scenario-1";
+    match embedded_app_data(504, MARKER.len())? {
+        None => Ok(false),
+        Some(bytes) if bytes == MARKER => Ok(true),
+        Some(_) => Err("invalid embedded scenario marker".into()),
     }
 }
 
-fn app_name(instance: HMODULE) -> String {
-    if let Some(title) = embedded_display_name(instance) {
-        return title;
+fn app_name() -> String {
+    if let Ok(Some(bytes)) = embedded_app_data(501, 64)
+        && bytes.iter().all(|&byte| (b' '..=b'~').contains(&byte))
+        && let Ok(title) = std::str::from_utf8(bytes)
+    {
+        return title.to_owned();
     }
     std::env::current_exe()
         .ok()
@@ -1055,7 +1034,7 @@ fn app_name(instance: HMODULE) -> String {
 
 pub(crate) fn report_error(error: &str) {
     eprintln!("roc-native-windows: {error}");
-    if std::env::var_os("ROC_WINDOWS_SPEC").is_some() {
+    if scenario_runner().unwrap_or(false) {
         return;
     }
     let text = wide(error);
@@ -1129,6 +1108,7 @@ fn create_pump() -> Result<OwnedWindow> {
 }
 
 fn run() -> Result<()> {
+    let driven = scenario_runner()?;
     let _accessibility = crate::accessibility::Apartment::new()?;
     // SAFETY: Register the class once on the UI thread, before mounting.
     let title = unsafe {
@@ -1157,10 +1137,12 @@ fn run() -> Result<()> {
         if RegisterClassExW(&window_class) == 0 {
             return Err(last_error("register Roc window class"));
         }
-        app_name(instance)
+        app_name()
     };
     let window = create_window(&title)?;
-    let result = if let Some(path) = std::env::var_os("ROC_WINDOWS_SPEC") {
+    let result = if driven {
+        let path = std::env::var_os("ROC_WINDOWS_SPEC")
+            .ok_or("launch scenario executables through windows.roc test or record")?;
         spec_run::run(window, &PathBuf::from(path))
     } else {
         mount(window, None).and_then(|()| run_message_loop())

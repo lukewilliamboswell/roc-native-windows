@@ -255,6 +255,13 @@ verification.
 [#runner-boundary]
 == Runner boundary
 
+Native `test` and `record` build a separate executable under
+`build/spec-executables/<target>`. Only an executable with the embedded
+scenario marker accepts the runner's plan and fixture environment.
+Ordinary `build`, `run`, and distribution use the shipping executable
+under `build/<target>`. Shipping executables ignore runner settings,
+and the MSI packager refuses a marked scenario executable.
+
 The CLI lowers a parsed scenario to a versioned plan file with source
 locations. The built Win32 host executes that plan through its native
 window, control and effect paths. Success requires an explicit completion
