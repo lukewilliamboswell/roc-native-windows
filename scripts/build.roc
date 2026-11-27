@@ -17,6 +17,8 @@ import cli.System
 # runtime inputs for the independently built Roc executable.
 zig_version = "0.17.1"
 
+zig_probe_cache = "build/link-inputs/zig-cache"
+
 examples = ["starter", "counter", "todos", "workers", "files", "http"]
 
 windows_targets = [
@@ -173,23 +175,27 @@ stage! = |target| {
 	run!(resource, "compile the Windows manifest for ${target.roc}")?
 	probe_args = ["cc", "-target", target.zig, "-O2", "-fno-sanitize=all", "-s", "-v", "-mwindows", "host/windows/link_probe.c", "-o", "${scratch}/probe.exe"]
 	libraries = ["unwind", "comctl32", "comdlg32", "ole32", "oleaut32", "shell32", "user32", "gdi32", "winhttp", "bcrypt", "windowscodecs", "d3d11", "uiautomationcore", "oleacc", "dwmapi", "usp10", "shlwapi", "ws2_32", "advapi32", "ntdll", "userenv", "psapi", "api-ms-win-core-winrt-l1-1-0", "api-ms-win-core-winrt-string-l1-1-0"]
-	probe = command("zig", probe_args.concat(libraries.map(|name| "-l${name}"))).stdout(Null).stderr(Capture).output_limit(MaxBytes(16_000_000)).run!() ? |error| "Could not run the Zig link probe: ${Str.inspect(error)}"
+	probe = command("zig", probe_args.concat(libraries.map(|name| "-l${name}")))
+		.env("ZIG_GLOBAL_CACHE_DIR", OsStr.from_str(zig_probe_cache))
+		.stdout(Null)
+		.stderr(Capture)
+		.output_limit(MaxBytes(16_000_000))
+		.run!() ? |error| "Could not run the Zig link probe: ${Str.inspect(error)}"
 	trace = Str.from_utf8(probe.stderr_bytes) ? |_| "The Zig link probe emitted invalid UTF-8"
 	if (probe.status != Exited(0)) return Err("Zig link probe failed: ${trace}")
 	link = trace.split_on("\n").find_first(|line| line.starts_with("lld-link ")) ? |_| "No lld-link invocation in Zig output"
-	paths = link_words(link)
-	crt = paths.find_first(|path| path.ends_with("/crt2.obj")) ? |_| "Zig's startup object is missing from the link probe"
-	copy!(crt, "${dir}/crt2.obj")?
-	archives = paths.keep_if(|path| path.ends_with(".lib") and !path.starts_with("-"))
+	files = link_files(link)
+	crt = files.find_first(|file| file.name == "crt2.obj") ? |_| "Zig's startup object is missing from the link probe"
+	copy!(crt.path, "${dir}/crt2.obj")?
+	archives = files.keep_if(|file| file.name.ends_with(".lib"))
 	for required in ["libmingw32.lib", "unwind.lib"] {
-		if (!archives.any(|path| path.ends_with("/${required}"))) return Err("Zig's ${required} is missing from the link probe")
+		if (!archives.any(|file| file.name == required)) return Err("Zig's ${required} is missing from the link probe")
 	}
 	for library in archives {
-		name = library.split_on("/").last() ? |_| "Invalid runtime library path"
-		copy!(library, "${scratch}/${name}")?
+		copy!(library.path, "${scratch}/${library.name}")?
 	}
 	# Add archives in reverse here because MRI's ADDLIB prepends members.
-	commands = archives.fold([], |all, path| ["ADDLIB ${path.split_on("/").last() ?? ""}"].concat(all))
+	commands = archives.fold([], |all, file| ["ADDLIB ${file.name}"].concat(all))
 	mri = Str.join_with(["CREATE runtime.lib"].concat(commands).concat(["SAVE", "END", ""]), "\n")
 	archive = command("zig", ["ar", "-M"]).cwd(Path.utf8(scratch)).stdin(Bytes(Str.to_utf8(mri)))
 	outcome = archive.stdout(Inherit).stderr(Inherit).run!() ? |error| "Could not create runtime.lib: ${Str.inspect(error)}"
@@ -197,13 +203,23 @@ stage! = |target| {
 	copy!("${scratch}/runtime.lib", "${dir}/runtime.lib")
 }
 
-# Translate Zig's link trace. Only double quotes are used for path arguments.
-link_words = |line| {
-	parts = Str.split_on(line, "\"")
-	parts.map_with_index(|part, index| if (index % 2 == 0) Str.split_on(part, " ").keep_if(|word| !word.is_empty()) else [part]).fold([], |all, words| all.concat(words))
+# Zig 0.17.1 prints unquoted arguments. Its MinGW linker inputs are generated
+# under our relative cache path, so we can recover them even when the absolute
+# checkout path contains spaces.
+link_files = |line| {
+	prefix = "${zig_probe_cache}/"
+	line.replace_each("\\", "/").split_on(prefix).drop_first(1).keep_if(|part| part.starts_with("o/")).map(
+		|part| {
+			relative = part.trim().split_on(" ").first() ?? ""
+			{ path: "${prefix}${relative}", name: relative.split_on("/").last() ?? "" }
+		},
+	)
 }
 
-expect link_words("lld-link -out:probe.exe \"/space here/x.lib\" /tmp/crt2.obj") == ["lld-link", "-out:probe.exe", "/space here/x.lib", "/tmp/crt2.obj"]
+expect link_files("lld-link -IMPLIB:C:\\Dev Folder\\probe.lib C:\\Dev Folder\\build\\link-inputs\\zig-cache\\o\\one\\crt2.obj C:\\Dev Folder\\build\\link-inputs\\zig-cache\\o\\two\\unwind.lib\r") == [
+	{ path: "build/link-inputs/zig-cache/o/one/crt2.obj", name: "crt2.obj" },
+	{ path: "build/link-inputs/zig-cache/o/two/unwind.lib", name: "unwind.lib" },
+]
 
 command = |program, args| Cmd.new(OsStr.from_str(program)).args(args.map(OsStr.from_str))
 
