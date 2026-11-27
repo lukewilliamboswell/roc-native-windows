@@ -390,26 +390,35 @@ Ui := [].{
 	list_cell : Signal(ctx, Str), ListCellProps -> Elem(ctx)
 	list_cell = |value, props| Engine.element("ui-list-cell", [Engine.attr("list-key", props.column)], [Engine.text_s(value)])
 
+	## A rectangular paste, in mounted view order with a one-based starting row.
+	GridPaste := { first_row : U64, columns : List(Str), rows : List(List(Str)) }
+
+	## Paste validation happens before an app can apply the batch.
+	GridPasteError := [Unavailable, Malformed, TooLarge, OutsideGrid, SelectionMismatch, ReadOnlyCell]
+
 	## A report grid whose cells can receive typed text edits.
 	DataGridProps(ctx) := {
 		label : Str,
 		columns : List(Column),
 		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
 		visible_rows : U32 ?? 8,
+		on_paste : [Ignore, Handle(HandlerOf(ctx, Try(GridPaste, GridPasteError)))] ?? Ignore,
 	}
 
 	## Display rows from an Engine.table_view using its mounted identities.
 	data_grid : DataGridProps(ctx), Elem(ctx) -> Elem(ctx)
-	data_grid = |props, rows|
-		Engine.element(
-			"ui-data-grid",
-			[
-				Engine.attr("label", props.label),
-				Engine.attr_s("enabled", props.enabled.map(bool_word)),
-				Engine.attr("visible-rows", props.visible_rows.to_str()),
-			],
-			props.columns.map(list_column).append(rows),
-		)
+	data_grid = |props, rows| {
+		attrs = [
+			Engine.attr("label", props.label),
+			Engine.attr_s("enabled", props.enabled.map(bool_word)),
+			Engine.attr("visible-rows", props.visible_rows.to_str()),
+		]
+		with_paste = match props.on_paste {
+			Ignore => attrs
+			Handle(handler) => attrs.append(Engine.on("grid-paste", handler.from_payload_by(Engine.const({}), |_, payload| grid_paste_from_payload(payload))))
+		}
+		Engine.element("ui-data-grid", with_paste, props.columns.map(list_column).append(rows))
+	}
 
 	## An edit intent carries the entire draft from the native text editor.
 	CellEdit := { draft : Str }
@@ -599,4 +608,40 @@ feedback_text : Ui.Feedback -> Str
 feedback_text = |feedback| match feedback {
 	Clear => ""
 	Invalid(message) => message
+}
+
+grid_paste_from_payload : Str -> Try(Ui.GridPaste, Ui.GridPasteError)
+grid_paste_from_payload = |payload| match payload.split_on("\u(0000)") {
+	["unavailable"] => Err(Unavailable)
+	["oversized"] => Err(TooLarge)
+	[first_row, selected_rows, selected_columns, available_rows, available_columns, .. as fields] => {
+		row = U64.from_str(first_row) ? |_| Malformed
+		selected_height = U64.from_str(selected_rows) ? |_| Malformed
+		selected_width = U64.from_str(selected_columns) ? |_| Malformed
+		height = U64.from_str(available_rows) ? |_| Malformed
+		width = U64.from_str(available_columns) ? |_| Malformed
+		if (row == 0 or height > 64 or width > 32 or fields.len() != width + 2) return Err(Malformed)
+		columns = fields.take_first(width)
+		mask_text = fields.get(width) ? |_| Malformed
+		raw = fields.get(width + 1) ? |_| Malformed
+		if (raw.to_utf8().len() > 98_304) return Err(TooLarge)
+		normalize = raw.replace_each("\r\n", "\n").replace_each("\r", "\n")
+		values = normalize.drop_suffix("\n").split_on("\n").map(|line| line.split_on("\t"))
+		actual_height = values.len()
+		actual_width = values.get(0).map_ok(List.len) ?? 0
+		if (actual_height == 0 or actual_width == 0 or values.any(|line| line.len() != actual_width)) return Err(Malformed)
+		if (actual_height > 64 or actual_width > 32) return Err(TooLarge)
+		if ((selected_height > 1 or selected_width > 1) and (actual_height != selected_height or actual_width != selected_width)) return Err(SelectionMismatch)
+		if (actual_height > height or actual_width > width) return Err(OutsideGrid)
+		mask = mask_text.to_utf8()
+		if (mask.len() != width * height) return Err(Malformed)
+		for r in (0.U64).until(actual_height) {
+			for c in (0.U64).until(actual_width) {
+				editable = mask.get(r * width + c) ? |_| Malformed
+				if (editable != 49) return Err(ReadOnlyCell)
+			}
+		}
+		Ok({ first_row: row, columns: columns.take_first(actual_width), rows: values })
+	}
+	_ => Err(Malformed)
 }

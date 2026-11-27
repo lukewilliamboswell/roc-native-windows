@@ -15,6 +15,8 @@ mod clipboard;
 mod effects;
 #[cfg(windows)]
 mod grid;
+#[cfg(windows)]
+mod grid_clipboard;
 #[cfg(any(test, windows))]
 mod list_view;
 #[cfg(windows)]

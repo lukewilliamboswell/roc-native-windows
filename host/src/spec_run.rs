@@ -395,7 +395,9 @@ impl App {
                 | "cancel-cell"
                 | "expect-cell-focused"
                 | "expect-cell-text"
-                | "expect-cell-feedback",
+                | "expect-cell-feedback"
+                | "select-cell-range"
+                | "paste-grid",
                 _,
             ) => self.control_step(step),
             _ => Err("unknown step or invalid arguments".into()),
@@ -546,7 +548,9 @@ impl App {
                 | "cancel-cell"
                 | "expect-cell-focused"
                 | "expect-cell-text"
-                | "expect-cell-feedback",
+                | "expect-cell-feedback"
+                | "select-cell-range"
+                | "paste-grid",
                 _,
             ) => self.grid_step(key, step.command, args),
             _ => Err("invalid control arguments".into()),
@@ -585,6 +589,19 @@ impl App {
                     grid.begin(hwnd, root, font)?;
                 }
                 grid.arrange(hwnd, root, font, dpi).map(|_| ())
+            }
+            ("select-cell-range", [first_row, first_column, last_row, last_column]) => {
+                let first = cell(grid, first_row, first_column)?;
+                let last = cell(grid, last_row, last_column)?;
+                grid.select_range(hwnd, first, last)?;
+                grid.arrange(hwnd, root, font, dpi).map(|_| ())
+            }
+            ("paste-grid", [text]) => {
+                let clipboard = crate::grid_clipboard::ClipboardText::from_text(text);
+                let intent = grid
+                    .paste(key, clipboard)
+                    .ok_or("the grid does not accept paste")?;
+                self.deliver_grid(intent)
             }
             ("fill-cell", [text]) => grid.fill(text),
             ("commit-cell", []) => {

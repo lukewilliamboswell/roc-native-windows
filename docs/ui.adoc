@@ -163,3 +163,17 @@ Enter commits an open edit. Escape or leaving the editor discards it.
 The edit stays with its mounted cell when rows move and is discarded when
 the cell leaves the window or its committed value changes.
 The Workers example edits stock counts and reconciles a snapshot on a worker.
+
+Hold Shift while moving with the arrow keys to extend a rectangular selection.
+To handle Ctrl+V while the grid has focus, supply \`on_paste: Handle(handler)\`.
+The handler receives \`Try(Ui.GridPaste, Ui.GridPasteError)\`. A successful batch
+contains a one-based \`first_row\`, ordered column keys, and rows of values.
+Resolve the batch against the same sort, filter and page used to display the
+grid. Apply domain validation and changes in one Roc decision.
+
+The clipboard accepts plain tab-separated text up to 64 KiB of UTF-16 data
+and at most 64 rows by 32 columns. A single active cell is the top-left
+corner for the pasted rectangle. A selected range must match the paste size.
+A paste that exceeds the mounted rows, includes read-only cells or has
+unequal line lengths returns a paste error before any cells change.
+Ctrl+V in the open cell editor uses the native EDIT clipboard behavior.

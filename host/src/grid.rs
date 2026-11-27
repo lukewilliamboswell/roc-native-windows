@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::grid_clipboard::ClipboardText;
 use crate::list_view::{ListView, Report};
 use crate::view::{child, position, scale, set_text, window_text};
 use crate::wire::{Key, Listener, Tree};
@@ -24,6 +25,7 @@ struct Cell {
     value: String,
 }
 
+#[derive(PartialEq, Eq)]
 struct Metadata {
     position: (usize, usize),
     commit: Option<(u32, Listener)>,
@@ -32,8 +34,16 @@ struct Metadata {
 
 pub(crate) struct Intent {
     pub(crate) grid: Key,
-    cell: Cell,
-    draft: String,
+    source: IntentSource,
+    text: String,
+}
+
+enum IntentSource {
+    Edit(Cell),
+    Paste {
+        listener: (u32, Listener),
+        revision: u64,
+    },
 }
 
 struct Editing {
@@ -53,6 +63,9 @@ pub(crate) struct Grid {
     pub(crate) report: ListView,
     cells: BTreeMap<Key, Metadata>,
     active: Option<Key>,
+    anchor: Option<Key>,
+    paste: Option<(u32, Listener)>,
+    revision: u64,
     editing: Option<Editing>,
     status: HWND,
     enabled: bool,
@@ -69,14 +82,15 @@ impl Grid {
         enabled: bool,
     ) -> Result<()> {
         let desired = Report::read_grid(tree, key)?;
-        self.cells.clear();
+        let mut cells = BTreeMap::new();
+        let paste = tree.mounted_event(key, "grid-paste");
         for (row, data) in desired.rows.iter().enumerate() {
             for (column, &cell) in data.mounted.iter().enumerate() {
                 let feedback = tree.node(cell).attr("feedback").unwrap_or("");
                 if feedback.contains('\0') {
                     return Err("grid feedback contains a NUL".into());
                 }
-                self.cells.insert(
+                cells.insert(
                     cell,
                     Metadata {
                         position: (row, column),
@@ -86,10 +100,20 @@ impl Grid {
                 );
             }
         }
-        self.active = self
-            .active
-            .filter(|key| self.cells.contains_key(key))
-            .or_else(|| desired.rows.first()?.mounted.first().copied());
+        if self.report.projection() != &desired
+            || self.cells != cells
+            || self.paste != paste
+            || self.enabled != enabled
+        {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        self.cells = cells;
+        self.paste = paste;
+        let surviving_active = self.active.filter(|key| self.cells.contains_key(key));
+        self.anchor = self
+            .anchor
+            .filter(|key| surviving_active.is_some() && self.cells.contains_key(key));
+        self.active = surviving_active.or_else(|| desired.rows.first()?.mounted.first().copied());
         let selected = self
             .active
             .and_then(|key| self.cells.get(&key))
@@ -118,11 +142,70 @@ impl Grid {
     }
 
     pub(crate) fn resolve(&self, intent: Intent) -> Option<(u32, Listener, String)> {
-        if self.editable(intent.cell.key).as_ref() != Some(&intent.cell) {
-            return None;
-        }
-        let (node, listener) = intent.cell.listener;
-        Some((node, listener, intent.draft))
+        let (node, listener) = match intent.source {
+            IntentSource::Edit(cell) if self.editable(cell.key).as_ref() == Some(&cell) => {
+                cell.listener
+            }
+            IntentSource::Paste { listener, revision }
+                if revision == self.revision && self.paste == Some(listener) =>
+            {
+                listener
+            }
+            _ => return None,
+        };
+        Some((node, listener, intent.text))
+    }
+
+    pub(crate) fn accepts_paste(&self) -> bool {
+        self.enabled && self.paste.is_some() && self.active.is_some() && self.editing.is_none()
+    }
+
+    pub(crate) fn paste(&self, key: Key, clipboard: ClipboardText) -> Option<Intent> {
+        let listener = self.paste.filter(|_| self.accepts_paste())?;
+        let (top, left, bottom, right) = self.range()?;
+        let report = self.report.projection();
+        let height = (report.rows.len() - top).min(64);
+        let width = (report.columns.len() - left).min(32);
+        let text = match clipboard {
+            ClipboardText::Oversized => "oversized".into(),
+            ClipboardText::Unavailable => "unavailable".into(),
+            ClipboardText::Text(raw) => {
+                let mut parts = vec![
+                    (top + 1).to_string(),
+                    (bottom - top + 1).to_string(),
+                    (right - left + 1).to_string(),
+                    height.to_string(),
+                    width.to_string(),
+                ];
+                parts.extend(
+                    report.columns[left..left + width]
+                        .iter()
+                        .map(|column| column.key.clone()),
+                );
+                let mask = report.rows[top..top + height]
+                    .iter()
+                    .flat_map(|row| row.mounted[left..left + width].iter())
+                    .map(|cell| {
+                        if self.cells[cell].commit.is_some() {
+                            '1'
+                        } else {
+                            '0'
+                        }
+                    })
+                    .collect();
+                parts.push(mask);
+                parts.push(raw);
+                parts.join("\0")
+            }
+        };
+        Some(Intent {
+            grid: key,
+            source: IntentSource::Paste {
+                listener,
+                revision: self.revision,
+            },
+            text,
+        })
     }
 
     pub(crate) fn editing(&self, hwnd: HWND) -> bool {
@@ -151,12 +234,40 @@ impl Grid {
     }
 
     pub(crate) fn activate(&mut self, hwnd: HWND, row: usize, column: usize) -> Result<()> {
+        self.anchor = None;
+        self.move_to(hwnd, row, column)
+    }
+
+    pub(crate) fn select_range(
+        &mut self,
+        hwnd: HWND,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) -> Result<()> {
+        self.anchor = Some(self.report.projection().rows[start.0].mounted[start.1]);
+        self.move_to(hwnd, end.0, end.1)
+    }
+
+    fn range(&self) -> Option<(usize, usize, usize, usize)> {
+        let active = self.active?;
+        let (row, column) = self.cells[&active].position;
+        let (anchor_row, anchor_column) = self.cells[&self.anchor.unwrap_or(active)].position;
+        Some((
+            row.min(anchor_row),
+            column.min(anchor_column),
+            row.max(anchor_row),
+            column.max(anchor_column),
+        ))
+    }
+
+    fn move_to(&mut self, hwnd: HWND, row: usize, column: usize) -> Result<()> {
         let record = self
             .report
             .projection()
             .rows
             .get(row)
             .ok_or("grid row is not mounted")?;
+        self.revision = self.revision.wrapping_add(1);
         self.active = Some(*record.mounted.get(column).ok_or("unknown grid column")?);
         self.report.select(hwnd, Some(&record.key))?;
         // SAFETY: The live report is owned by this grid on the UI thread.
@@ -179,7 +290,7 @@ impl Grid {
         Ok(())
     }
 
-    pub(crate) fn navigate(&mut self, hwnd: HWND, key: u16) -> Result<()> {
+    pub(crate) fn navigate(&mut self, hwnd: HWND, key: u16, extend: bool) -> Result<()> {
         let report = self.report.projection();
         let Some(meta) = self.active.and_then(|id| self.cells.get(&id)) else {
             return Ok(());
@@ -192,7 +303,12 @@ impl Grid {
             VK_DOWN => ((row + 1).min(report.rows.len() - 1), column),
             _ => return Ok(()),
         };
-        self.activate(hwnd, row, column)
+        self.anchor = if extend {
+            self.anchor.or(self.active)
+        } else {
+            None
+        };
+        self.move_to(hwnd, row, column)
     }
 
     pub(crate) fn click(&mut self, hwnd: HWND, point: POINT) -> Result<bool> {
@@ -258,8 +374,8 @@ impl Grid {
         let editing = self.editing.as_ref()?;
         let intent = Intent {
             grid: key,
-            cell: editing.cell.clone(),
-            draft: window_text(editing.handle),
+            source: IntentSource::Edit(editing.cell.clone()),
+            text: window_text(editing.handle),
         };
         self.cancel(hwnd, true);
         Some(intent)
@@ -332,7 +448,7 @@ impl Grid {
         let mut rect = win_rect(hwnd);
         // SAFETY: A RECT contains two adjacent POINT values.
         unsafe { MapWindowPoints(null_mut(), window, (&mut rect as *mut RECT).cast(), 2) };
-        let status = if let Some(meta) = self.active.and_then(|key| self.cells.get(&key)) {
+        let mut status = if let Some(meta) = self.active.and_then(|key| self.cells.get(&key)) {
             let (row, column) = meta.position;
             let heading = &self.report.projection().columns[column].heading;
             if meta.feedback.is_empty() {
@@ -343,6 +459,15 @@ impl Grid {
         } else {
             "No rows".into()
         };
+        if let Some((top, left, bottom, right)) = self.range()
+            && (top != bottom || left != right)
+        {
+            status.push_str(&format!(
+                " · {} × {} cells selected",
+                bottom - top + 1,
+                right - left + 1
+            ));
+        }
         if window_text(self.status) != status {
             set_text(self.status, &status);
         }
@@ -391,8 +516,8 @@ impl Grid {
         match details.dwDrawStage {
             CDDS_PREPAINT => CDRF_NOTIFYPOSTPAINT as isize,
             CDDS_POSTPAINT => {
-                if let Some(meta) = self.active.and_then(|key| self.cells.get(&key))
-                    && let Some(mut rect) = visible_rect(hwnd, meta.position.0, meta.position.1)
+                if let Some((top, left, bottom, right)) = self.range()
+                    && let Some(mut rect) = range_rect(hwnd, top, left, bottom, right)
                 {
                     rect.left += 1;
                     rect.right -= 1;
@@ -456,6 +581,25 @@ fn visible_rect(hwnd: HWND, row: usize, column: usize) -> Option<RECT> {
         && rect.bottom <= client.bottom
         && rect.right > rect.left)
         .then_some(rect)
+}
+
+fn range_rect(hwnd: HWND, top: usize, left: usize, bottom: usize, right: usize) -> Option<RECT> {
+    let first = subitem_rect(hwnd, top, left)?;
+    let last = subitem_rect(hwnd, bottom, right)?;
+    let mut client = RECT::default();
+    // SAFETY: The report HWND is live and provides a writable client RECT.
+    let header = unsafe {
+        GetClientRect(hwnd, &mut client);
+        SendMessageW(hwnd, LVM_GETHEADER, 0, 0) as HWND
+    };
+    let header = win_rect(header);
+    let rect = RECT {
+        left: first.left.max(client.left),
+        top: first.top.max(header.bottom - header.top),
+        right: last.right.min(client.right),
+        bottom: last.bottom.min(client.bottom),
+    };
+    (rect.right > rect.left && rect.bottom > rect.top).then_some(rect)
 }
 
 fn address<T>(value: &mut T) -> isize {

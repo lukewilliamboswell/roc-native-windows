@@ -628,6 +628,7 @@ spec_step = |expr| {
 			spec_locator(locator)
 		("fill", [locator, Quoted(value, _)])
 		| ("fill-cell", [locator, Quoted(value, _)])
+		| ("paste-grid", [locator, Quoted(value, _)])
 		| ("expect-text", [locator, Quoted(value, _)])
 		| ("select", [locator, Quoted(value, _)])
 		| ("expect-selection", [locator, Quoted(value, _)])
@@ -638,6 +639,12 @@ spec_step = |expr| {
 			("press-column", [locator, Quoted(value, _)])
 		| ("expect-row-selected", [locator, Quoted(value, _)]) =>
 			spec_locator(locator).map_ok(|parts| parts.append(value))
+		("select-cell-range", [locator, start, Quoted(first, _), finish, Quoted(last, _)]) => {
+			parts = spec_locator(locator)?
+			low = spec_number(start, "first mounted row number", 1, 1024)?
+			high = spec_number(finish, "last mounted row number", 1, 1024)?
+			Ok(parts.concat([low, first, high, last]))
+		}
 		("focus-cell", [locator, row, Quoted(column, _)])
 		|
 			("begin-cell", [locator, row, Quoted(column, _)])

@@ -470,9 +470,10 @@ impl App {
     }
 
     fn grid_keyboard(&mut self, handle: HWND, key: u16) -> Result<bool> {
+        const V_KEY: u16 = b'V' as u16;
         if !matches!(
             key,
-            VK_RETURN | VK_ESCAPE | VK_TAB | VK_F2 | VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN
+            VK_RETURN | VK_ESCAPE | VK_TAB | VK_F2 | VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN | V_KEY
         ) {
             return Ok(false);
         }
@@ -481,7 +482,14 @@ impl App {
         };
         let (root, font, dpi) = self.surface.grid_coordinates();
         let (hwnd, grid) = self.surface.grid_mut(grid_key).unwrap();
-        if grid.editing(handle) {
+        // SAFETY: The key modifiers refer to this UI thread's input queue.
+        let shift = unsafe { GetKeyState(VK_SHIFT as i32) < 0 };
+        let editing = grid.editing(handle);
+        if key == VK_TAB {
+            grid.cancel(hwnd, true);
+            // SAFETY: The root and grid are live HWNDs on the UI thread.
+            unsafe { SetFocus(GetNextDlgTabItem(root, hwnd, i32::from(shift))) };
+        } else if editing {
             match key {
                 VK_RETURN | VK_ESCAPE if grid.composition() => return Ok(false),
                 VK_RETURN => {
@@ -491,23 +499,25 @@ impl App {
                     }
                 }
                 VK_ESCAPE => grid.cancel(hwnd, true),
-                VK_TAB => {
-                    grid.cancel(hwnd, true);
-                    // SAFETY: The root and grid are live HWNDs on the UI thread.
-                    unsafe {
-                        SetFocus(GetNextDlgTabItem(
-                            root,
-                            hwnd,
-                            i32::from(GetKeyState(VK_SHIFT as i32) < 0),
-                        ))
-                    };
-                }
                 _ => return Ok(false),
             }
         } else {
             match key {
                 VK_RETURN | VK_F2 => grid.begin(hwnd, root, font)?,
-                VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN => grid.navigate(hwnd, key)?,
+                VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN => grid.navigate(hwnd, key, shift)?,
+                V_KEY if grid.accepts_paste() => {
+                    // SAFETY: The modifiers refer to this UI thread's input queue.
+                    let paste = unsafe {
+                        GetKeyState(VK_CONTROL as i32) < 0 && GetKeyState(VK_MENU as i32) >= 0
+                    };
+                    if !paste {
+                        return Ok(false);
+                    }
+                    if let Some(intent) = grid.paste(grid_key, crate::grid_clipboard::read(root)) {
+                        self.grid_intents.push_back(intent);
+                        return self.queue_grid().map(|()| true);
+                    }
+                }
                 _ => return Ok(false),
             }
         }

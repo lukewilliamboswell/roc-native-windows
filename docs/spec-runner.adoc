@@ -72,6 +72,10 @@ the grid and a draft, then `commit-cell` or `cancel-cell` with the grid.
 `expect-cell-feedback` also take the expected text. An empty feedback
 string means the cell has cleared its error.
 
+Use \`select-cell-range\` with the grid and two row-column pairs to set a
+rectangle. \`paste-grid\` supplies tab-separated text to the grid's normal
+paste handler without using the shared desktop clipboard.
+
 == Simulate and run effects
 
 Tests start with isolated storage and hold HTTP requests, timers and
