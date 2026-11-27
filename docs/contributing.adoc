@@ -41,6 +41,42 @@ the MSI on a clean machine. Cross-builds and Wine compatibility checks
 provide separate evidence from native Windows runs. Hosted CI is currently
 disabled.
 
+[#review-host-authority]
+== Review each feature's security model
+
+Include a security discussion in every feature design or change
+description. Use xref:architecture.adoc#capability-boundary[the authority
+contract] and describe the feature's hazards, the controls that address
+them, and what remains outside those controls. For work that leaves the
+security boundary as it is, a brief explanation is enough.
+
+* Name the user workflow, what the app author makes available, and
+  what the user authorizes. Identify sensitive data and operations,
+  who can supply their inputs, and what could go wrong. Consider
+  untrusted data, dependencies, resource replacement, and exhaustion
+  where relevant.
+* Show the usual call with its safe defaults. For an unattended grant,
+  explain why user designation and app-scoped facilities do not cover
+  the workflow. State the target, allowed operations, who can receive
+  the authority, its limits and lifetime, and when it is released.
+  For a retained grant, describe revocation and what can reopen it.
+* List the typed outcomes the caller can act on and explain any
+  structured payload. Show how the caller handles denial or refusal
+  without interpreting diagnostic text.
+* Trace the controls through the actual host paths, including raw
+  requests, simulation, redirects or file replacements, and
+  cancellation where applicable. Verify that denial leaves the
+  target untouched and consumes no in-flight slot. Check that
+  read-only access stays read-only across the ABI and in workers.
+* Exercise the ordinary path with its defaults and the failure paths
+  that establish the controls. Verify desktop interactions on native
+  Windows. Use specs for repeatable policy and result behavior.
+
+Put lasting explanations of hazards, controls, and security limits
+in the relevant manual chapter. Keep API doc comments focused on the
+contract callers need at the call site, including authority, defaults,
+and result tags. Link to the manual for the rationale and examples.
+
 [#record-example-gallery]
 == Refresh the README recordings
 

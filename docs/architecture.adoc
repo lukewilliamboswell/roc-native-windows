@@ -21,6 +21,110 @@ worker retains textures and coalesces pending changes for each view.
 It reads back the committed frame for compositing in the native child
 window. Screenshots and recordings use that same frame.
 
+[#capability-boundary]
+== Authority at the application boundary
+
+This section defines the platform's intended security contract. The
+app and control chapters describe the APIs available today.
+
+=== Start with the user's choice
+
+An ordinary desktop app should work without a capability declaration.
+The platform provides its controls, read-only packaged assets, and
+app-scoped storage. For external resources, prefer a Windows interaction
+that expresses the user's choice of target and operation. Opening or
+dropping an item grants read access to that item. A folder choice grants
+the documented operations beneath that folder. Save As authorizes one
+export to the confirmed destination. It gives no standing write access
+to the input or destination directory.
+
+Bind a user gesture to the specific operation the host exposes for
+that control.
+An ordinary Roc event, a path string, a clipboard value, or a launch
+argument carries data. Treat a native file activation as authority only
+when the host can establish the provenance and scope of the designation.
+A later effect does not gain authority merely because the app posts it
+after a click. Keep native edit and clipboard gestures scoped to the
+focused operation. Any API that retains a user's choice across launches
+must define how the user can revoke it and what happens when the
+resource moves, is replaced, or becomes inaccessible.
+
+=== Carry authority in bounded handles
+
+Use typed, opaque, host-issued handles for live resources. Put the
+resource identity, allowed operations, and lifetime in the host
+contract. A helper or worker receives the authority in the handles
+passed to it. Read-only types have no write operations. The host keeps
+native handles and transport IDs private and releases resources when
+their owners are gone. Bound admission and retained work before opening
+or retaining resources.
+
+Bind rights to the opened object or a confined directory and leaf.
+A path can be reused for a different object. Preserve identity across
+asynchronous work, check each descendant under its authorized root, and
+handle replacement and links without extending the grant. Keep saved
+paths as display or discovery data unless a supported, host-managed
+mechanism can re-establish the grant.
+
+=== Declare unattended access only when needed
+
+Start with the workflow and show why platform-provided authority or a
+user grant cannot cover it. Then allow an optional, narrowly scoped
+declaration for access that must occur without a fresh user choice.
+The declaration sets an auditable ceiling for the application. Any
+code able to construct a public app-wide request can use that grant.
+Omitting the declaration grants no unattended external authority.
+Malformed or unsupported declarations fail closed. Launch flags,
+environment variables, and mutable files beside the executable do not
+extend policy in a distributed app.
+
+[#host-enforcement]
+=== Enforce the boundary in the host
+
+The app decides what should happen, the platform API expresses the
+request, and the host mediates access to Windows. This split lets the
+host enforce the app author's declared limits and the scope of the
+user's choice, even if a dependency submits a request directly or
+untrusted data supplies its target. The Roc API helps callers express
+valid requests. The host is responsible for checking the actual
+operation and the authority behind it.
+
+Authorize each operation in the host before native work, queue
+admission, or test simulation. Apply the same rule to raw requests,
+native ports, and changes of target, such as a network redirect.
+A test runner may substitute outcomes for admitted requests. It
+cannot extend the application's authority.
+
+The trust boundary is Roc application code running through a trusted
+native host. A dependency can use authority the app has made available
+to it. The host enforces the scope of that authority and cannot infer
+the user's intent from an otherwise valid request. Ordinary desktop
+Windows still applies its own process rights, ACLs, and privacy rules.
+OS-enforced isolation is a separate deployment property and requires
+verification of the running process. The Roc capability contract
+applies there as well.
+
+[#secure-api-defaults]
+=== Make the secure path the ordinary API
+
+Design the simplest call to do the safe thing for the usual workflow.
+Prefer a read handle for opening an item, an exact target for external
+access, and finite bounds for data and work. Let callers request broader
+authority explicitly when a workflow warrants it. Handle an unavailable
+grant as a normal outcome. Preserve the requested scope when permissions
+or external conditions change. A failed check never authorizes a broader grant or a fallback target.
+
+Use types to express valid inputs and separate rights where practical.
+Report expected failures as named result tags. Distinguish policy
+denial, cancellation, invalid runtime input, OS access failure, resource
+limits, and temporary unavailability where they lead to different app
+behavior. Give a tag a structured payload when the app needs a fact to
+decide what to do, such as the byte limit behind `TooLarge`. Keep
+messages and native diagnostics for people. Application code should be
+able to handle a denial, ask for a fresh selection, or report a limit by
+matching on the result, without parsing a string. Limit result payloads
+and diagnostics to details the caller is authorized to see.
+
 [#redistributable-inputs]
 == What the bundle contains
 
