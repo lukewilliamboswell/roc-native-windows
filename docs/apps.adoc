@@ -55,14 +55,14 @@ custom platform, use `init --platform <platform/main.roc-or-bundle-URL>`.
 == Choose a build profile
 
 `build`, `run`, and `package` accept `--profile size` and `--profile speed`.
-`size` is the default and passes `--opt=size` to Roc. `speed` passes
-`--opt=speed`. Both profiles strip the linked debug metadata and write the
+`speed` is the default and passes `--opt=speed` to Roc. `size` passes
+`--opt=size`. Both profiles strip the linked debug metadata and write the
 selected target to `build/<target>/`. `run` launches the resulting executable
 on Windows. `package` uses the selected executable in the MSI or ZIP.
 
 [source,sh]
 ----
-roc windows.roc -- build --target arm64mingw --profile speed
+roc windows.roc -- build --target arm64mingw
 roc windows.roc -- package --profile size
 ----
 

@@ -224,14 +224,14 @@ optimization_option =
 		short: "",
 		long: "profile",
 		type: "profile",
-		help: "Roc build optimization. Use size (default) for smaller executables or speed for execution speed.",
+		help: "Roc build optimization. Use speed (default) for execution speed or size for smaller executables.",
 		parser: |arg| match arg.to_str() {
 			Ok("size") => Ok(Size)
 			Ok("speed") => Ok(Speed)
 			Ok(_) => Err(InvalidValue("expected size or speed"))
 			Err(_) => Err(InvalidUtf8)
 		},
-		default: Value(Size),
+		default: Value(Speed),
 	})
 
 package_command : SubCmd.SubcommandParserConfig(Command)
@@ -2124,9 +2124,9 @@ expect {
 	invalid.all(|source| spec_parse("invalid.scm", source).is_err())
 }
 
-expect parse_text(["build", "--target", "arm64mingw"]) == Ok(Build({ target: "arm64mingw", optimization: Size }))
-expect parse_text(["build", "--profile=speed"]) == Ok(Build({ target: "", optimization: Speed }))
-expect parse_text(["run", "--target=x64mingw"]) == Ok(Run({ target: "x64mingw", optimization: Size }))
+expect parse_text(["build", "--target", "arm64mingw"]) == Ok(Build({ target: "arm64mingw", optimization: Speed }))
+expect parse_text(["build", "--profile=size"]) == Ok(Build({ target: "", optimization: Size }))
+expect parse_text(["run", "--target=x64mingw"]) == Ok(Run({ target: "x64mingw", optimization: Speed }))
 expect parse_text(["dev"]) == Ok(Dev(""))
 expect parse_text(["dev", "--target=arm64mingw"]) == Ok(Dev("arm64mingw"))
 expect parse_text(["build", "--profile=dev"]).is_err()
@@ -2149,8 +2149,8 @@ expect {
 		_ => Bool.False
 	}
 }
-expect parse_text(["package"]) == Ok(Package({ target: "", optimization: Size, format: Msi, id: "", version: "", publisher: "" }))
-expect parse_text(["package", "--format", "zip", "--profile=speed", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", optimization: Speed, format: Zip, id: "", version: "", publisher: "" }))
+expect parse_text(["package"]) == Ok(Package({ target: "", optimization: Speed, format: Msi, id: "", version: "", publisher: "" }))
+expect parse_text(["package", "--format", "zip", "--profile=size", "--target=arm64mingw"]) == Ok(Package({ target: "arm64mingw", optimization: Size, format: Zip, id: "", version: "", publisher: "" }))
 expect parse_metadata("{\"id\":\"com.example.app\",\"version\":\"1.2.3\"}") == Ok({ installer: { id: "com.example.app", version: "1.2.3", publisher: "" }, icon: Err(Missing), display_name: Err(Missing), origins: [] })
 expect parse_metadata("{\"capabilities\":{\"version\":1,\"http\":{\"origins\":[\"HTTPS://Example.COM\",\"http://127.0.0.1:8000\"]}}}").map_ok(|settings| settings.origins) ==
 	Ok(["http://127.0.0.1:8000", "https://example.com:443"])
