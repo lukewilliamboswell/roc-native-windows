@@ -103,8 +103,8 @@ NUL, or `TooLarge`. Retrying takes another activation. Native edit Copy,
 Cut, and Paste continue to follow focus.
 
 Files uses this button for Copy SHA-256. HTTP uses it for Copy request
-details. Existing `Clipboard.text` callers can move their text signal
-and response handling to the button.
+details. An app-authored `Clipboard.text` request returns `NotAllowed`.
+Move its text signal and response handling to the button.
 
 [#system-services]
 == Read time and regional settings

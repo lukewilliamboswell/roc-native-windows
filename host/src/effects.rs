@@ -16,7 +16,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 use windows_sys::Win32::Foundation::HWND;
 
-use crate::clipboard::{self, Format};
+use crate::clipboard;
 use crate::regional::{self, Snapshot};
 use crate::spec_effects::{self, Simulated};
 use crate::spec_plan::valid_file_name;
@@ -88,7 +88,6 @@ pub(crate) struct SpecOptions {
 }
 
 pub(crate) struct Effects {
-    window: HWND,
     started: Instant,
     declarations: Declarations,
     send: mpsc::Sender<Event>,
@@ -108,10 +107,9 @@ pub(crate) struct Effects {
 }
 
 impl Effects {
-    pub(crate) fn new(window: HWND, send: mpsc::Sender<Event>, declarations: Declarations) -> Self {
+    pub(crate) fn new(send: mpsc::Sender<Event>, declarations: Declarations) -> Self {
         let (complete, completed) = mpsc::channel();
         Self {
-            window,
             started: Instant::now(),
             declarations,
             send,
@@ -489,9 +487,10 @@ impl Effects {
             }
             22 => self.environment(id),
             19 => {
-                let (text, format) = clipboard::request(reader)?;
-                let copied = format == Format::Plain && self.copy_text(self.window, text);
-                self.answer(id, if copied { vec![23] } else { vec![24, 2] });
+                // A raw request carries no native Copy gesture. Consume the
+                // whole frame and deny it before the simulator or clipboard.
+                clipboard::request(reader)?;
+                self.answer(id, vec![24, 1]);
             }
             8 => {
                 let order = workers::Order::read(reader)?;
@@ -878,4 +877,51 @@ fn tagged(tag: u8, bytes: &[u8]) -> Vec<u8> {
 fn put_string(output: &mut Vec<u8>, string: &str) {
     output.extend((string.len() as u32).to_le_bytes());
     output.extend(string.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_clipboard_denial_leaves_a_native_copy_and_its_fixture_available() {
+        let (send, receive) = mpsc::channel();
+        let mut effects = Effects::new(send, Declarations::default());
+        effects.spec = Some(SpecOptions {
+            storage: PathBuf::new(),
+            output: PathBuf::new(),
+            local: Vec::new(),
+            session: Vec::new(),
+            initial_time: 0,
+            live_time: false,
+            live_http: false,
+            live_entropy: false,
+            regional: Default::default(),
+            worker_limit: 1,
+        });
+        effects.clipboard_busy = true;
+        let mut request = Reader::new(b"\x01\0\0\0a\x00\x55");
+        effects.start(42, 19, &mut request).unwrap();
+        assert_eq!(request.u8().unwrap(), 0x55);
+        let Event::Turn {
+            node,
+            handler,
+            payload,
+        } = receive.try_recv().unwrap()
+        else {
+            panic!("expected a clipboard denial");
+        };
+        assert_eq!((node, handler, payload), (EFFECT_NODE, 42, vec![24, 1]));
+        assert_eq!(effects.pending(), 0);
+        assert_eq!(effects.clipboard_writes, 0);
+        assert_eq!(
+            effects.copy_from_button(std::ptr::null_mut(), "a"),
+            "unavailable"
+        );
+        assert_eq!(
+            effects.copy_from_button(std::ptr::null_mut(), "a"),
+            "copied"
+        );
+        assert_eq!(effects.clipboard_text, "a");
+    }
 }

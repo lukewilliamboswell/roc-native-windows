@@ -1,6 +1,7 @@
 import Engine
 
-## App-authored clipboard requests. Post the request from a user action.
+## App-authored clipboard requests. Windows denies requests without native
+## clipboard authority. Use Win.Ui.copy_button for an explicit Copy action.
 Clipboard := [].{
 	text : Str -> Engine.Ask({}, [NotAllowed, Unavailable, Refused])
 	text = |value| Engine.ask_of(CopyText.{}, value)
