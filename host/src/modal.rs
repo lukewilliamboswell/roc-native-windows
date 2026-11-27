@@ -309,7 +309,13 @@ pub(crate) fn takes_escape(focus: HWND, message: &MSG, composing: bool) -> bool 
     unsafe {
         let mut class = [0_u16; 32];
         let len = GetClassNameW(focus, class.as_mut_ptr(), class.len() as i32).max(0) as usize;
-        let named = |label: &str| class[..len].iter().copied().eq(label.encode_utf16());
+        let class = String::from_utf16_lossy(&class[..len]);
+        let named = |label: &str| class.eq_ignore_ascii_case(label);
+        // Standard multiline EDIT advertises WANTALLKEYS even for Escape.
+        // Outside an active composition it has no Escape action of its own.
+        if named("Edit") {
+            return false;
+        }
         if (named("ComboBox") && SendMessageW(focus, CB_GETDROPPEDSTATE, 0, 0) != 0)
             || named("ComboLBox")
             || (named("SysDateTimePick32") && SendMessageW(focus, DTM_GETMONTHCAL, 0, 0) != 0)
@@ -379,8 +385,34 @@ mod tests {
                 let mut class = [0_u16; 16];
                 let count = GetClassNameW(dialog, class.as_mut_ptr(), class.len() as i32) as usize;
                 assert_eq!(String::from_utf16_lossy(&class[..count]), "#32770");
+                let mut title = [0_u16; 64];
+                let count = GetWindowTextW(dialog, title.as_mut_ptr(), title.len() as i32) as usize;
+                assert_eq!(String::from_utf16_lossy(&title[..count]), "Owned example");
                 assert_eq!(GetWindow(dialog, GW_OWNER), owner);
                 assert_eq!(IsWindowVisible(dialog), 0);
+                let notes = CreateWindowExW(
+                    0,
+                    w!("EDIT"),
+                    w!(""),
+                    WS_CHILD | (ES_MULTILINE | ES_WANTRETURN) as u32,
+                    0,
+                    0,
+                    120,
+                    60,
+                    dialog,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                );
+                assert!(!notes.is_null());
+                let escape = MSG {
+                    hwnd: notes,
+                    message: WM_KEYDOWN,
+                    wParam: usize::from(VK_ESCAPE),
+                    ..MSG::default()
+                };
+                assert!(!takes_escape(notes, &escape, false));
+                assert!(takes_escape(notes, &escape, true));
                 position(dialog, owner, (300, 120)).unwrap();
                 let mut modal = Modal::begin(owner, dialog);
                 assert_eq!(IsWindowEnabled(owner), 0);
