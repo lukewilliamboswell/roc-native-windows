@@ -440,6 +440,84 @@ Ui := [].{
 			[],
 		)
 
+	## Read-only surfaces stay out of keyboard traversal by default.
+	SurfaceInput(ctx) := [ReadOnly, Interactive(SurfaceInputProps(ctx))]
+
+	SurfaceInputProps(ctx) := {
+		pointer : [NoPointer, Pointer(PointerProps(ctx))] ?? NoPointer,
+		keys : [NoKeys, FocusedKeys(FocusedKeyProps(ctx))] ?? NoKeys,
+	}
+
+	PointerProps(ctx) := {
+		zone : Str,
+		down : [NoHandler, Handle(HandlerOf(ctx, Engine.Pointer))] ?? NoHandler,
+		move : [NoHandler, Handle(HandlerOf(ctx, Engine.Pointer))] ?? NoHandler,
+		up : [NoHandler, Handle(HandlerOf(ctx, Engine.Pointer))] ?? NoHandler,
+		cancel : [NoHandler, Handle(HandlerOf(ctx, Engine.Pointer))] ?? NoHandler,
+		capture : [NoCapture, CaptureOnPress] ?? NoCapture,
+		move_policy : [EveryMove, LatestMove] ?? EveryMove,
+	}
+
+	FocusedKeyProps(ctx) := { key : Engine.KeyProps(ctx), handle : HandlerOf(ctx, Engine.Key) }
+
+	## Apply input declarations to a custom surface's element.
+	surface_input : SurfaceInput(ctx) -> List(Engine.Attr(ctx))
+	surface_input = |input| match input {
+		ReadOnly => []
+		Interactive(props) => {
+			pointer = match props.pointer {
+				NoPointer => []
+				Pointer(binding) => {
+					down = match (binding.down, binding.capture) {
+						(Handle(handler), CaptureOnPress) => [Engine.on_pointer_capture(handler)]
+						(Handle(handler), NoCapture) => [Engine.on_pointer(Down, handler)]
+						(NoHandler, _) => []
+					}
+					move = match (binding.move, binding.move_policy) {
+						(Handle(handler), LatestMove) => [Engine.on_pointer_paced(handler)]
+						(Handle(handler), EveryMove) => [Engine.on_pointer(Move, handler)]
+						(NoHandler, _) => []
+					}
+					[Engine.prop(Engine.Prop.pointer_zone, binding.zone)]
+						.concat(down).concat(move)
+						.concat(pointer_handler(Up, binding.up))
+						.concat(pointer_handler(Cancel, binding.cancel))
+				}
+			}
+			match props.keys {
+				NoKeys => pointer
+				FocusedKeys(binding) => pointer.append(Engine.on_key(binding.key, binding.handle))
+			}
+		}
+	}
+
+	SliderProps(ctx) := {
+		label : Str,
+		on_change : HandlerOf(ctx, I32),
+		range : { min : I32, max : I32 } ?? { min: 0, max: 100 },
+		step : I32 ?? 1,
+		enabled : Signal(ctx, Bool) ?? Engine.const(Bool.True),
+		reference : Str ?? "",
+	}
+
+	## A horizontal native trackbar controlled by an integer signal.
+	slider : Signal(ctx, I32), SliderProps(ctx) -> Elem(ctx)
+	slider = |value, props|
+		Engine.element(
+			"ui-slider",
+			[
+				Engine.ref(props.reference),
+				Engine.attr("label", props.label),
+				Engine.attr("range-min", props.range.min.to_str()),
+				Engine.attr("range-max", props.range.max.to_str()),
+				Engine.attr("step", props.step.to_str()),
+				Engine.attr_s("enabled", props.enabled.map(bool_word)),
+				Engine.attr_s("value", value.map(I32.to_str)),
+				Engine.on("change", props.on_change.from_payload_by(value, |current, payload| I32.from_str(payload) ?? current)),
+			],
+			[],
+		)
+
 	## A stable native option key and its display label.
 	Choice := { key : Str, label : Str }
 
@@ -515,16 +593,19 @@ Ui := [].{
 	## A tree with controlled selection and expansion.
 	tree_view : TreeViewProps(ctx) -> Elem(ctx)
 	tree_view = |props| {
-		nodes = { nodes: props.nodes, expanded: props.expanded }.Signal.map(|{ nodes: items, expanded }|
-			items.map(|item| {
-				key: item.key,
-				label: item.label,
-				parent: match item.parent {
-					Root => ""
-					ChildOf(key) => "1${key}"
-				},
-				expanded: expanded.contains(item.key),
-			}),
+		nodes = { nodes: props.nodes, expanded: props.expanded }.Signal.map(
+			|{ nodes: items, expanded }|
+				items.map(
+					|item| {
+						key: item.key,
+						label: item.label,
+						parent: match item.parent {
+							Root => ""
+							ChildOf(key) => "1${key}"
+						},
+						expanded: expanded.contains(item.key),
+					},
+				),
 		)
 		Engine.element(
 			"ui-tree-view",
@@ -534,25 +615,35 @@ Ui := [].{
 				Engine.attr_s("enabled", props.enabled.map(bool_word)),
 				Engine.attr_s("selected", props.selected.map(selection_key)),
 				Engine.on("change", props.on_select.from_payload_by(Engine.const({}), |_, key| selection_from_key(key))),
-				Engine.on("expand", props.on_expand.from_payload_by(Engine.const({}), |_, payload| {
-					key: payload.drop_prefix(if (payload.starts_with("1")) "1" else "0"),
-					expansion: if (payload.starts_with("1")) Expanded else Collapsed,
-				})),
+				Engine.on(
+					"expand",
+					props.on_expand.from_payload_by(
+						Engine.const({}),
+						|_, payload| {
+							key: payload.drop_prefix(if (payload.starts_with("1")) "1" else "0"),
+							expansion: if (payload.starts_with("1")) Expanded else Collapsed,
+						},
+					),
+				),
 			],
 			[
-				Engine.each(nodes, |item| item.key, |row| {
-					node = row.item()
-					Engine.element(
-						"ui-tree-node",
-						[
-							Engine.attr_s("key", node.map(|item| item.key)),
-							Engine.attr_s("label", node.map(|item| item.label)),
-							Engine.attr_s("parent", node.map(|item| item.parent)),
-							Engine.attr_s("expanded", node.map(|item| bool_word(item.expanded))),
-						],
-						[],
-					)
-				}),
+				Engine.each(
+					nodes,
+					|item| item.key,
+					|row| {
+						node = row.item()
+						Engine.element(
+							"ui-tree-node",
+							[
+								Engine.attr_s("key", node.map(|item| item.key)),
+								Engine.attr_s("label", node.map(|item| item.label)),
+								Engine.attr_s("parent", node.map(|item| item.parent)),
+								Engine.attr_s("expanded", node.map(|item| bool_word(item.expanded))),
+							],
+							[],
+						)
+					},
+				),
 			],
 		)
 	}
@@ -584,10 +675,14 @@ Ui := [].{
 	## Mount content inside a native file drop target.
 	file_drop_target : FileDropTargetProps(ctx), Elem(ctx) -> Elem(ctx)
 	file_drop_target = |props, content|
-		Engine.element("ui-file-drop-target", [
-			Engine.attr("label", props.label),
-			Engine.on_files(Drop, props.on_files),
-		], [content])
+		Engine.element(
+			"ui-file-drop-target",
+			[
+				Engine.attr("label", props.label),
+				Engine.on_files(Drop, props.on_files),
+			],
+			[content],
+		)
 
 	## Receive handles for the files selected by the user.
 	FileButtonProps(ctx) := {
@@ -941,3 +1036,9 @@ window_title = |title| match title {
 
 close_listener : HandlerOf(ctx, {}) -> Engine.Attr(ctx)
 close_listener = |handler| Engine.on("close-request", handler.from_payload_by(Engine.const({}), |_, _| {}))
+
+pointer_handler : [Down, Move, Up, Cancel], [NoHandler, Handle(HandlerOf(ctx, Engine.Pointer))] -> List(Engine.Attr(ctx))
+pointer_handler = |phase, binding| match binding {
+	NoHandler => []
+	Handle(handler) => [Engine.on_pointer(phase, handler)]
+}

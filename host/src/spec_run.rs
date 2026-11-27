@@ -7,6 +7,7 @@ use crate::civil::{Kind as CivilKind, Value as CivilValue};
 use crate::effects::SpecOptions;
 use crate::progress::Progress;
 use crate::spec_plan::{Locator, MAX_PLAN_BYTES, Mode, PROTOCOL, Plan, Step, valid_file_name};
+use crate::surface_input::Phase;
 use crate::view::Control;
 use crate::windows::OwnedWindow;
 use crate::wire::{Key, Kind};
@@ -554,6 +555,11 @@ impl App {
                 Ok(())
             }
             (
+                "pointer-down" | "pointer-move" | "pointer-up" | "pointer-cancel" | "key-press"
+                | "set-slider" | "expect-slider",
+                _,
+            ) => self.control_step(step),
+            (
                 "click" | "fill" | "toggle" | "press-enter" | "expect-visible" | "expect-absent"
                 | "expect-text" | "expect-checked" | "expect-disabled" | "select"
                 | "expect-selection" | "set-date" | "expect-date" | "set-time" | "expect-time"
@@ -660,6 +666,55 @@ impl App {
         let (surface, key) = self.one_control(&locator)?;
         self.prepare_surface(&surface, !step.command.starts_with("expect-"))?;
         match (step.command, args) {
+            ("pointer-down" | "pointer-move" | "pointer-up" | "pointer-cancel", _) => {
+                let phase = match step.command {
+                    "pointer-down" => Phase::Down,
+                    "pointer-move" => Phase::Move,
+                    "pointer-up" => Phase::Up,
+                    _ => Phase::Cancel,
+                };
+                if phase == Phase::Cancel && args.is_empty() {
+                    return self.spec_pointer(key, phase, None);
+                }
+                if args.is_empty() || phase == Phase::Cancel {
+                    return Err("this pointer gesture needs position arguments".into());
+                }
+                let mut remaining = args;
+                while !remaining.is_empty() {
+                    let position = match remaining {
+                        ["outside", rest @ ..] => {
+                            remaining = rest;
+                            None
+                        }
+                        [x, y, rest @ ..] => {
+                            remaining = rest;
+                            let (x, y): (u16, u16) = (number(x)?, number(y)?);
+                            if x > 10_000 || y > 10_000 {
+                                return Err("pointer positions must be in 0–10000".into());
+                            }
+                            Some((x, y))
+                        }
+                        _ => return Err("a pointer position needs x and y or outside".into()),
+                    };
+                    if phase == Phase::Down && position.is_none() {
+                        return Err("pointer-down needs an in-zone position".into());
+                    }
+                    if phase != Phase::Move && !remaining.is_empty() {
+                        return Err("this pointer gesture takes one position".into());
+                    }
+                    self.spec_pointer(key, phase, position)?;
+                }
+                Ok(())
+            }
+            ("key-press", [name]) => self.spec_key(key, name),
+            ("expect-slider", [value]) => {
+                let (_, actual) = self.surface.spec_slider(key, None)?;
+                expect(actual, number(value)?)
+            }
+            ("set-slider", [value]) => {
+                let (handle, _) = self.surface.spec_slider(key, Some(number(value)?))?;
+                self.slider_changed(handle)
+            }
             ("expect-visible", []) => Ok(()),
             ("drop-files", files) => self.spec_drop(Some(key), files),
             ("expect-text", [expected]) => expect(self.surface.spec_text(key)?.as_str(), *expected),
@@ -1024,7 +1079,8 @@ impl App {
                     let expected = if kind == "image" { "asset-image" } else { kind };
                     matches!(&node.kind, Kind::Element(tag) if tag.strip_prefix("ui-") == Some(expected)
                         || (expected == "checkbox" && tag == "ui-aggregate-checkbox")
-                        || (expected == "text-area" && tag == "textarea"))
+                        || (expected == "text-area" && tag == "textarea")
+                        || (kind == "image" && tag == "ui-image"))
                         && (label.is_empty()
                             || self.surface.spec_label(key, kind).as_deref() == Some(label))
                 };

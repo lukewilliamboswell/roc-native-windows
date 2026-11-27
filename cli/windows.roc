@@ -726,6 +726,37 @@ spec_step = |expr| {
 		("files", _) | ("drop-files-outside", _) => spec_texts(args, "Expected a fixture path in quotes")
 		("folder", []) | ("folder", [Quoted(_, _)]) => spec_texts(args, "Expected a fixture directory in quotes")
 		("await-work", []) | ("clipboard-busy", []) | ("expect-exit", []) => Ok([])
+		("pointer-down", [locator, x, y]) => {
+			parts = spec_locator(locator)?
+			position = spec_pointer_pair(x, y)?
+			Ok(parts.concat(position))
+		}
+		("pointer-move", [locator, ..]) | ("pointer-up", [locator, ..]) => {
+			parts = spec_locator(locator)?
+			moves = args.drop_first(1)
+			if (moves.is_empty()) return Err(spec_error(at, "Expected one or more pointer positions"))
+			samples = spec_pointer_points(moves, [])?
+			is_one = match samples {
+				["outside"] => Bool.True
+				[x, y] => x != "outside" and y != "outside"
+				_ => Bool.False
+			}
+			if op == "pointer-up" and !is_one {
+				return Err(spec_error(at, "pointer-up takes one position or outside"))
+			}
+			Ok(parts.concat(samples))
+		}
+		("pointer-cancel", [locator]) => spec_locator(locator)
+		("key-press", [locator, Quoted(key, key_at)]) => {
+			allowed = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]
+			if (!allowed.contains(key)) return Err(spec_error(key_at, "Expected a named navigation key"))
+			spec_locator(locator).map_ok(|parts| parts.append(key))
+		}
+		("set-slider", [locator, value]) | ("expect-slider", [locator, value]) => {
+			parts = spec_locator(locator)?
+			position = spec_number(value, "slider position", -2147483648, 2147483647)?
+			Ok(parts.append(position))
+		}
 		("close-window", [locator]) => spec_native_surface(locator, "window")
 		("dismiss", [locator]) => spec_native_surface(locator, "dialog")
 		("expect-clipboard", [count, Quoted(value, _)]) =>
@@ -812,6 +843,24 @@ spec_civil_value = |date, expr| {
 spec_two_digits : I64 -> Str
 spec_two_digits = |value| if (value < 10) "0${value.to_str()}" else value.to_str()
 
+spec_pointer_pair : SpecExpr, SpecExpr -> Try(List(Str), SpecIssue)
+spec_pointer_pair = |x, y| {
+	sample_x = spec_number(x, "pointer x", 0, 10000)?
+	sample_y = spec_number(y, "pointer y", 0, 10000)?
+	Ok([sample_x, sample_y])
+}
+
+spec_pointer_points : List(SpecExpr), List(Str) -> Try(List(Str), SpecIssue)
+spec_pointer_points = |parts, collected| match parts {
+	[] => Ok(collected)
+	[Word("outside", _), .. as rest] => spec_pointer_points(rest, collected.append("outside"))
+	[x, y, .. as rest] => {
+		position = spec_pointer_pair(x, y)?
+		spec_pointer_points(rest, collected.concat(position))
+	}
+	[part] => Err(spec_error(spec_position(part), "Expected x and y coordinates, or outside"))
+}
+
 spec_progress : SpecExpr -> Try(Str, SpecIssue)
 spec_progress = |expr|
 	match expr {
@@ -887,7 +936,7 @@ spec_screenshot_name = |name, pos|
 
 spec_locator_parts : SpecExpr -> Try(List(Str), SpecIssue)
 spec_locator_parts = |expr| {
-	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "file-drop-target", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button", "tree-view"]
+	kinds = ["button", "checkbox", "text-field", "text-area", "text", "file-button", "folder-button", "file-drop-target", "image", "test-id", "combo-box", "list-box", "radio-group", "list-view", "date-picker", "time-picker", "data-grid", "tabs", "progress-bar", "toolbar", "toolbar-button", "tree-view", "slider", "shader-view"]
 	match expr {
 		Form([Word("within", _), outer, inner], _) => {
 			left = spec_locator_parts(outer)?
@@ -2049,4 +2098,17 @@ expect {
 		"(test \"a\" (steps (click (within (button \"Open\") (window \"Main\")))))",
 	]
 	invalid.all(|source| spec_parse("test.scm", source).is_err())
+}
+
+expect spec_parse("input.scm", "(test \"a\" (steps (pointer-down (image \"Preview\") 2500 5000) (pointer-move (image \"Preview\") outside 7500 5000) (pointer-up (image \"Preview\") outside) (key-press (slider \"Value\") \"ArrowRight\") (expect-slider (slider \"Value\") -9)))").is_ok()
+
+expect {
+	invalid = [
+		"(test \"a\" (steps (pointer-down (image \"Preview\") -1 0)))",
+		"(test \"a\" (steps (pointer-move (image \"Preview\"))))",
+		"(test \"a\" (steps (pointer-up (image \"Preview\") outside outside)))",
+		"(test \"a\" (steps (key-press (image \"Preview\") \"Tab\")))",
+		"(test \"a\" (steps (set-slider (slider \"Value\") 2147483648)))",
+	]
+	invalid.all(|source| spec_parse("input.scm", source).is_err())
 }

@@ -228,6 +228,7 @@ pub(crate) enum Kind {
 pub(crate) struct Listener {
     pub(crate) handler: u32,
     pub(crate) kind: u8,
+    pub(crate) policies: u32,
 }
 
 #[derive(Clone)]
@@ -254,6 +255,10 @@ impl Node {
             id: None,
             holes: Vec::new(),
         }
+    }
+
+    pub(crate) fn listens(&self, name: &str) -> bool {
+        self.listeners.contains_key(name)
     }
 
     pub(crate) fn attr(&self, name: &str) -> Option<&str> {
@@ -340,8 +345,15 @@ impl Template {
                     let handler = u32::from(reader.u8()?);
                     let event = reader.str()?;
                     let kind = reader.u8()?;
-                    reader.u32()?; // Listener policies.
-                    HoleKind::Event(event, Listener { handler, kind })
+                    let policies = reader.u32()?;
+                    HoleKind::Event(
+                        event,
+                        Listener {
+                            handler,
+                            kind,
+                            policies,
+                        },
+                    )
                 }
                 4 => HoleKind::Id,
                 5 => HoleKind::Ref,
@@ -361,6 +373,7 @@ fn property(id: u8) -> Result<String> {
     match id {
         1 => Ok("value".into()),
         2 => Ok("checked".into()),
+        3 => Ok("pointer-zone".into()),
         4 => Ok("keymap-down".into()),
         5 => Ok("keymap-up".into()),
         _ => Err(format!("unsupported property {id}")),
@@ -656,10 +669,15 @@ impl Tree {
                 let handler = reader.u32()?;
                 let name = reader.str()?;
                 let kind = reader.u8()?;
-                reader.u32()?; // Listener policies.
-                self.node_mut(key)
-                    .listeners
-                    .insert(name, Listener { handler, kind });
+                let policies = reader.u32()?;
+                self.node_mut(key).listeners.insert(
+                    name,
+                    Listener {
+                        handler,
+                        kind,
+                        policies,
+                    },
+                );
             }
             12 => {
                 let key = self.get(reader.u32()?)?;
@@ -708,6 +726,58 @@ mod tests {
     }
 
     #[test]
+    fn keeps_input_properties_and_policies_on_elements_and_template_holes() {
+        let mut bytes = vec![8];
+        ints(&mut bytes, &[1, 0, 0]);
+        name(&mut bytes, "ui-asset-image");
+        bytes.push(0);
+        bytes.push(21);
+        ints(&mut bytes, &[1]);
+        bytes.push(3);
+        put_str(&mut bytes, "source");
+        bytes.push(11);
+        ints(&mut bytes, &[1, 4]);
+        put_str(&mut bytes, "pointerdown");
+        bytes.push(3);
+        ints(&mut bytes, &[4]);
+
+        let mut template = vec![1];
+        name(&mut template, "ui-asset-image");
+        template.extend_from_slice(&[0, 0, 0, 2]);
+        template.extend_from_slice(&[6, 0, 3]); // Top-level pointer zone property.
+        template.extend_from_slice(&[3, 0, 8]); // Top-level pointer listener.
+        put_str(&mut template, "pointermove");
+        template.push(3);
+        ints(&mut template, &[8]); // Latest move.
+        bytes.push(7);
+        ints(&mut bytes, &[9, template.len() as u32]);
+        bytes.extend(template);
+        bytes.push(1);
+        ints(&mut bytes, &[2, 0, 0, 9]);
+        put_str(&mut bytes, "clone");
+
+        let mut tree = Tree::new();
+        apply(&mut tree, &bytes);
+        let element = tree.get(1).unwrap();
+        let clone = tree.get(2).unwrap();
+        assert!(tree.node(element).listens("pointerdown"));
+        assert_eq!(tree.node(element).attr("pointer-zone"), Some("source"));
+        assert_eq!(
+            tree.mounted_event(element, "pointerdown")
+                .unwrap()
+                .1
+                .policies,
+            4
+        );
+        assert!(tree.node(clone).listens("pointermove"));
+        assert_eq!(tree.node(clone).attr("pointer-zone"), Some("clone"));
+        assert_eq!(
+            tree.mounted_event(clone, "pointermove").unwrap().1.policies,
+            8
+        );
+    }
+
+    #[test]
     fn cloned_rows_keep_identity_and_route_their_handlers() {
         let mut template = vec![1];
         name(&mut template, "ui-button");
@@ -749,7 +819,8 @@ mod tests {
                 21,
                 Listener {
                     handler: 2,
-                    kind: 10
+                    kind: 10,
+                    policies: 0
                 }
             ))
         );

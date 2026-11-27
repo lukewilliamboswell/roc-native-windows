@@ -5,10 +5,12 @@ use crate::command_icon::ButtonIcon;
 use crate::grid::Grid;
 use crate::list_view::{ListView, Report};
 use crate::progress::{Progress, native::ProgressBar};
+use crate::slider::native::Slider;
 use crate::style::{
     Accent,
     native::{FontRole, Fonts, Paint, Palette, StyledWindow},
 };
+use crate::surface_input::native as surface_input;
 use crate::toolbar::Toolbar;
 use crate::tree_view::{TreeIntent, TreeProjection};
 use crate::window::{APPLY_PENDING_EDIT, enabled_flag};
@@ -66,6 +68,7 @@ pub(crate) enum Control {
     DataGrid,
     Tabs,
     ProgressBar,
+    Slider,
     Toolbar,
     TreeView,
 }
@@ -98,6 +101,7 @@ impl Control {
             "ui-data-grid" => Self::DataGrid,
             "ui-tabs" => Self::Tabs,
             "ui-progress-bar" => Self::ProgressBar,
+            "ui-slider" => Self::Slider,
             "ui-toolbar" => Self::Toolbar,
             "ui-tree-view" => Self::TreeView,
             _ => return Err(format!("unsupported native control {tag}")),
@@ -138,6 +142,7 @@ impl Control {
                 | Self::Tabs
                 | Self::TreeView
                 | Self::ProgressBar
+                | Self::Slider
                 | Self::ListBox
                 | Self::ComboBox
                 | Self::DatePicker
@@ -186,6 +191,7 @@ impl Control {
                 WS_TABSTOP | WS_VSCROLL | (LBS_NOTIFY | LBS_NOINTEGRALHEIGHT) as u32,
             ),
             Self::RadioGroup => (WS_EX_CONTROLPARENT, w!("BUTTON"), BS_GROUPBOX as u32),
+            Self::Slider => (0, w!("msctls_trackbar32"), WS_TABSTOP),
             Self::ProgressBar => (0, w!("msctls_progress32"), 0),
             Self::ListView | Self::DataGrid => (
                 WS_EX_CLIENTEDGE,
@@ -235,6 +241,8 @@ struct View {
     list_view: Option<ListView>,
     grid: Option<Grid>,
     progress: ProgressBar,
+    slider: Slider,
+    input_attached: bool,
     toolbar: Option<Toolbar>,
     button_icon: ButtonIcon,
 }
@@ -312,6 +320,8 @@ impl View {
             combo_position: None,
             list_view,
             progress: ProgressBar::default(),
+            slider: Slider::default(),
+            input_attached: false,
             grid,
             toolbar,
             button_icon: ButtonIcon::default(),
@@ -862,6 +872,29 @@ impl Surface {
         self.status.as_ref().map_or_else(Vec::new, StatusBar::texts)
     }
 
+    pub(crate) fn slider_change(&self, key: Key) -> Option<i32> {
+        let view = self
+            .views
+            .get(&key)
+            .filter(|view| view.kind == Control::Slider)?;
+        view.slider.change(view.handle)
+    }
+
+    pub(crate) fn spec_slider(&self, key: Key, proposal: Option<i32>) -> Result<(HWND, i32)> {
+        let view = self
+            .views
+            .get(&key)
+            .filter(|view| view.kind == Control::Slider)
+            .ok_or("locator needs a native slider")?;
+        if let Some(value) = proposal {
+            if self.spec_disabled(key)? {
+                return Err("control is disabled".into());
+            }
+            Slider::propose(view.handle, value);
+        }
+        Ok((view.handle, Slider::actual(view.handle)))
+    }
+
     pub(crate) fn spec_progress(&self, key: Key, wire: &str) -> Result<()> {
         let view = self
             .views
@@ -981,6 +1014,7 @@ impl Surface {
             }
             kind if kind.is_choice() => view.choices.restore(view.handle, kind),
             Control::TreeView => view.tree.restore(view.handle),
+            Control::Slider => view.slider.restore(view.handle),
             _ => {}
         }
         if let (Some(mode), Some(value)) = (view.kind.civil(), view.props.civil) {
@@ -1266,6 +1300,14 @@ impl Surface {
                         ellipsize: node.attr("ellipsize-end").is_some_and(enabled_flag),
                     },
                 )?;
+                let keys = node.listens("keydown") || node.listens("keyup");
+                if !view.input_attached && (keys || node.attr("pointer-zone").is_some()) {
+                    surface_input::attach(view.handle, keys)?;
+                    view.input_attached = true;
+                }
+                if kind == Control::Slider {
+                    view.slider.sync(view.handle, node)?;
+                }
                 if kind == Control::ProgressBar {
                     let requested = Progress::parse(node.attr("progress").unwrap_or("idle"))?;
                     view.progress.update(view.handle, requested);
@@ -1749,6 +1791,10 @@ fn natural(view: &View, node: &Node, dc: HDC, dpi: u32, max_width: i32) -> (i32,
         Control::Edit | Control::DatePicker | Control::TimePicker => (
             max_width,
             dip(if view.props.label.is_empty() { 30 } else { 51 }),
+        ),
+        Control::Slider => (
+            max_width,
+            dip(if view.props.label.is_empty() { 34 } else { 55 }),
         ),
         Control::ProgressBar => (
             max_width,

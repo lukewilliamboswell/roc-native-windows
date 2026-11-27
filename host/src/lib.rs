@@ -29,10 +29,14 @@ mod progress;
 #[allow(clippy::all)]
 mod roc_platform_abi;
 #[cfg(any(test, windows))]
+mod slider;
+#[cfg(any(test, windows))]
 mod spec_effects;
 #[cfg(any(test, windows))]
 mod spec_plan;
 mod style;
+#[cfg(any(test, windows))]
+mod surface_input;
 #[cfg(any(test, windows))]
 mod taskbar;
 #[cfg(any(test, windows))]

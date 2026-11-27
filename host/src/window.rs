@@ -49,6 +49,11 @@ use windows_sys::core::{PCWSTR, w};
 #[path = "spec_run.rs"]
 mod spec_run;
 
+#[path = "input_runtime.rs"]
+mod input_runtime;
+use input_runtime::InputState;
+pub(crate) use input_runtime::queue_surface_mouse;
+
 const PUMP: usize = 1;
 const REPORT_EVENTS: u32 = WM_APP + 1;
 const GRID_EVENTS: u32 = WM_APP + 2;
@@ -68,6 +73,7 @@ struct App {
     surface: SurfaceRegistry,
     pump: OwnedWindow,
     close_requests: VecDeque<(Key, usize)>,
+    input: InputState,
     quit_posted: bool,
     effects: Effects,
     incoming: Receiver<Event>,
@@ -95,6 +101,7 @@ impl App {
             surface: SurfaceRegistry::new(window, title, driven),
             pump,
             close_requests: VecDeque::new(),
+            input: InputState::default(),
             quit_posted: false,
             effects,
             incoming,
@@ -139,6 +146,10 @@ impl App {
     }
 
     fn poll(&mut self) -> Result<()> {
+        if self.exited() {
+            return Ok(());
+        }
+        self.drain_input()?;
         if self.exited() {
             return Ok(());
         }
@@ -243,6 +254,7 @@ impl App {
             }
         }
         self.surface.sync(&self.tree)?;
+        self.reconcile_input();
         for (op, id) in references {
             if let Some(key) = self.tree.reference(id)
                 && let Some(owner) = self.surface.for_key(key)
@@ -451,6 +463,18 @@ impl App {
     fn tree_event(&mut self, key: crate::wire::Key, intent: TreeIntent) -> Result<()> {
         let (event, payload) = intent.event();
         self.control_event(key, event, payload)
+    }
+
+    fn slider_changed(&mut self, source: HWND) -> Result<()> {
+        if let Some(key) = self.surface.key(source)
+            && let Some(value) = self.surface.slider_change(key)
+        {
+            self.drain_input()?;
+            if self.select_key(key) && self.surface.spec_handle(key) == Some(source) {
+                self.control_event(key, "change", value.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn control_event(
@@ -1041,6 +1065,9 @@ fn route_key(message: &MSG) -> Result<(HWND, bool, bool)> {
         if app.surface.blocked(id) {
             return Ok((owner, false, true));
         }
+        if app.surface_key(message)? {
+            return Ok((owner, false, true));
+        }
         if message.message != WM_KEYDOWN {
             return Ok((owner, false, false));
         }
@@ -1152,6 +1179,7 @@ pub(crate) unsafe extern "system" fn window_proc(
             | WM_TIMER
             | WM_DPICHANGED
             | WM_VSCROLL
+            | WM_HSCROLL
             | WM_MOUSEWHEEL
             | WM_DROPFILES
             | WM_THEMECHANGED
@@ -1207,6 +1235,7 @@ pub(crate) unsafe extern "system" fn window_proc(
                                 | WM_COMMAND
                                 | WM_NOTIFY
                                 | WM_VSCROLL
+                                | WM_HSCROLL
                                 | WM_MOUSEWHEEL
                                 | WM_DROPFILES
                         )
@@ -1276,6 +1305,9 @@ pub(crate) unsafe extern "system" fn window_proc(
                             );
                             app.surface.dpi_changed(&app.tree)?;
                             app.surface.sync_icons(id);
+                        }
+                        WM_HSCROLL if lparam != 0 && !app.driven => {
+                            app.slider_changed(lparam as HWND)?
                         }
                         WM_VSCROLL => app.surface.scroll(&app.tree, wparam as u16, None)?,
                         WM_MOUSEWHEEL => {
