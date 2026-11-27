@@ -23,6 +23,7 @@ cells = store.cells()
 view : () -> Elem(Engine.StoreRoot(_))
 view = || {
 	request = cells.request.signal()
+	progress = request.map(|pending| if (pending.active) Ui.Progress.Indeterminate else Ui.Progress.Idle)
 	url = cells.url.signal()
 	start = { url, previous: request }.Signal.map(|{ url: typed, previous }| { url: typed.trim(), serial: previous.serial + 1, active: Bool.True })
 	Ui.vstack(
@@ -44,6 +45,7 @@ view = || {
 				],
 			),
 			Ui.text(cells.status.signal()),
+			Ui.progress_bar(progress, { label: "Request progress" }),
 			Ui.text(cells.body.signal()),
 			Engine.watch_latest(
 				request,
