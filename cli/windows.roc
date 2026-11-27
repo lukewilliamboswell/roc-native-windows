@@ -1121,7 +1121,8 @@ stage_build! = |entry, name, target, stage, dir, settings, profile| {
 	if !Path.is_file!(image)? {
 		return Err(MissingExecutable(program))
 	}
-	binary = gui_executable(Path.read_bytes!(image)?, target)?
+	linked = gui_executable(Path.read_bytes!(image)?, target)?
+	binary = if (profile == Shipping) strip_link_metadata(linked) ? |detail| BadExecutable(detail) else linked
 	app_resources = match settings.display_name {
 		Err(Missing) => icon_resources
 		Ok(title) => icon_resources.append(display_name_resource(title))
@@ -1208,6 +1209,90 @@ gui_executable = |bytes, target| {
 little_endian : List(U8), U64, U64 -> U64
 little_endian = |bytes, start, len|
 	bytes.sublist({ start, len }).fold({ number: 0, shift: 0 }, |acc, byte| { number: acc.number + byte.to_u64().shl_wrap(acc.shift), shift: acc.shift + 8 }).number
+
+# LLD appends DWARF sections and the COFF symbol table to Roc's linked image.
+# Remove that suffix before adding app resources so live sections keep their
+# file offsets and RVAs. The Build ID remains available for crash reports.
+strip_link_metadata : List(U8) -> Try(List(U8), Str)
+strip_link_metadata = |bytes| {
+	pe = little_endian(bytes, 60, 4)
+	header = pe + 24
+	header_size = little_endian(bytes, pe + 20, 2)
+	count = little_endian(bytes, pe + 6, 2)
+	table = header + header_size
+	headers_end = little_endian(bytes, header + 60, 4)
+	directories = little_endian(bytes, header + 108, 4)
+	if count == 0 or count > 96 or directories < 5 or 112 + 8 * directories > header_size or table + 40 * count > headers_end or headers_end > bytes.len() {
+		return Err("invalid PE sections or data directories")
+	}
+	if (little_endian(bytes, header + 144, 8) != 0) return Err("refusing to strip a signed image")
+	symbols_at = little_endian(bytes, pe + 12, 4)
+	symbols_count = little_endian(bytes, pe + 16, 4)
+	if (symbols_at == 0 and symbols_count == 0) return Ok(bytes)
+	strings_at = symbols_at + 18 * symbols_count
+	strings_size = little_endian(bytes, strings_at, 4)
+	if symbols_at < headers_end or strings_size < 4 or strings_at + strings_size > bytes.len() {
+		return Err("invalid PE symbol or string table")
+	}
+	file_align = little_endian(bytes, header + 36, 4)
+	mem_align = little_endian(bytes, header + 32, 4)
+	if file_align < 512 or file_align > 65536 or mem_align < file_align or mem_align > 65536 {
+		return Err("the executable's alignment is unsupported")
+	}
+	symbols_end = strings_at + strings_size
+	if bytes.len() > align_to(symbols_end, file_align) or bytes.drop_first(symbols_end).any(|byte| byte != 0) {
+		return Err("unexpected data after the PE symbol table")
+	}
+	strings = bytes.sublist({ start: strings_at, len: strings_size })
+	var $live_count = 0
+	var $live_file_end = headers_end
+	var $live_memory_end = headers_end
+	var $debug_size = 0
+	for index in (0.U64).until(count) {
+		section = table + 40 * index
+		name = bytes.sublist({ start: section, len: 8 })
+		memory_size = little_endian(bytes, section + 8, 4)
+		rva = little_endian(bytes, section + 12, 4)
+		raw_size = little_endian(bytes, section + 16, 4)
+		raw_at = little_endian(bytes, section + 20, 4)
+		flags = little_endian(bytes, section + 36, 4)
+		if raw_size != 0 and (raw_at < headers_end or raw_at + raw_size > symbols_at) {
+			return Err("a PE section extends outside the linked image")
+		}
+		if name.first() == Ok('/') {
+			offset = U64.from_str(Str.from_utf8_lossy(name.drop_first(1).split_on(0).first() ?? [])) ? |_| "invalid PE long section name"
+			is_debug = offset >= 4 and offset < strings_size and strings.sublist({ start: offset, len: 7 }) == ".debug_".to_utf8()
+			if !is_debug or flags != 0x42000040 or raw_at < $live_file_end or rva < $live_memory_end {
+				return Err("expected a discardable DWARF section")
+			}
+			$debug_size = $debug_size + raw_size
+		} else {
+			if ($live_count != index) return Err("live section follows PE debug data")
+			$live_count = $live_count + 1
+			$live_file_end = $live_file_end.max(raw_at + raw_size)
+			$live_memory_end = $live_memory_end.max(rva + memory_size.max(raw_size))
+		}
+	}
+	init_size = little_endian(bytes, header + 8, 4)
+	if $live_count == 0 or $debug_size > init_size or align_to($live_memory_end, mem_align) > 0xffffffff {
+		return Err("invalid PE image size")
+	}
+	for index in (0.U64).until(directories) {
+		dir = header + 112 + 8 * index
+		if little_endian(bytes, dir, 4) + little_endian(bytes, dir + 4, 4) > $live_memory_end {
+			return Err("a PE data directory references discarded data")
+		}
+	}
+	Ok(
+		bytes.take_first($live_file_end)
+			|> patch_bytes(pe + 6, u16_bytes($live_count))
+			|> patch_bytes(pe + 12, List.repeat(0, 8))
+			|> patch_bytes(header + 8, u32_bytes(init_size - $debug_size))
+			|> patch_bytes(header + 56, u32_bytes(align_to($live_memory_end, mem_align)))
+			|> patch_bytes(header + 64, List.repeat(0, 4))
+			|> patch_bytes(table + 40 * $live_count, List.repeat(0, 40 * (count - $live_count))),
+	)
+}
 
 ensure_dir! : Str => Try({}, _)
 ensure_dir! = |dir| {
@@ -2043,6 +2128,39 @@ expect {
 expect gui_executable(pe_fixture([0x64, 0xaa], Bool.False), "x64mingw") == Err(BadExecutable("unexpected architecture"))
 expect gui_executable(pe_fixture([0x64, 0x86], Bool.True), "x64mingw") == Err(BadExecutable("refusing to modify a signed image"))
 expect gui_executable([], "x64mingw") == Err(BadExecutable("missing PE header"))
+
+expect {
+	# One live section, a discardable DWARF section, and its COFF long name.
+	table = 240
+	text = ".text\u(0000)\u(0000)\u(0000)".to_utf8()
+	debug = "/4\u(0000)\u(0000)\u(0000)\u(0000)\u(0000)\u(0000)".to_utf8()
+	section = |name, rva, raw, flags| name.concat(u32_bytes(4)).concat(u32_bytes(rva)).concat(u32_bytes(512)).concat(u32_bytes(raw)).concat(List.repeat(0, 12)).concat(u32_bytes(flags))
+	strings = ".debug_info\u(0000)".to_utf8()
+	image = pe_fixture([0x64, 0x86], Bool.False)
+		.concat(section(text, 4096, 512, 0x60000020))
+		.concat(section(debug, 8192, 1024, 0x42000040))
+		.concat(List.repeat(0, 192))
+		.concat(List.repeat(0xcc, 512))
+		.concat(List.repeat(0xdd, 512))
+		.concat(List.repeat(0, 18))
+		.concat(u32_bytes(4 + strings.len()))
+		.concat(strings)
+		|> patch_bytes(70, u16_bytes(2))
+		|> patch_bytes(76, u32_bytes(1536).concat(u32_bytes(1)))
+		|> patch_bytes(96, u32_bytes(512))
+		|> patch_bytes(120, u32_bytes(4096).concat(u32_bytes(512)))
+		|> patch_bytes(144, u32_bytes(12288).concat(u32_bytes(512)))
+	stripped = strip_link_metadata(image) ?? []
+	stripped.len() == 1024
+		and stripped.drop_first(512) == List.repeat(0xcc, 512)
+		and little_endian(stripped, 70, 2) == 1
+		and little_endian(stripped, 76, 8) == 0
+		and little_endian(stripped, 144, 4) == 8192
+		and stripped.sublist({ start: table + 40, len: 40 }) == List.repeat(0, 40)
+		and strip_link_metadata(stripped) == Ok(stripped)
+		and strip_link_metadata(patch_bytes(image, 200, u32_bytes(8192).concat(u32_bytes(1)))) == Err("a PE data directory references discarded data")
+		and strip_link_metadata(image.append(1)) == Err("unexpected data after the PE symbol table")
+}
 
 expect {
 	pos = { line: 1, column: 1 }
