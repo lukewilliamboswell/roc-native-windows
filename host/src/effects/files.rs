@@ -1,11 +1,11 @@
-use super::{Result, folders::Folder, put_string, tagged};
+use super::{Result, folders::Folder, pickers, put_string, tagged};
+use crate::rooted::identity;
 use crate::wire::Reader;
 use std::collections::HashMap;
-use std::ffi::{OsString, c_void};
+use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::windows::ffi::OsStringExt;
-use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,13 +16,12 @@ use windows_sys::Win32::Security::Cryptography::{
     BCryptOpenAlgorithmProvider,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_DELETE_ON_CLOSE, FILE_ID_INFO, FILE_TYPE_DISK, FileIdInfo,
-    GetFileInformationByHandleEx, GetFileType,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_TYPE_DISK, GetFileType,
 };
-use windows_sys::Win32::UI::Controls::Dialogs::*;
 
 const MAX_FILE_BYTES: u64 = 256 << 20;
-const MAX_HANDLES: usize = 64;
+pub(super) const MAX_HANDLES: usize = 64;
 
 #[derive(Clone)]
 pub(super) struct Entry {
@@ -36,9 +35,23 @@ pub(super) struct Entry {
 
 impl Entry {
     fn new(path: PathBuf) -> io::Result<Self> {
-        let file = File::open(&path)?;
+        Self::from_path(&path, File::open(&path)?)
+    }
+
+    pub(super) fn open_picked(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        Self::from_path(path, file)
+    }
+
+    fn from_path(path: &Path, file: File) -> io::Result<Self> {
         let meta = file.metadata()?;
-        if !meta.is_file() || !is_disk_file(&file) {
+        if !meta.is_file()
+            || !is_disk_file(&file)
+            || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "expected a regular file",
@@ -49,7 +62,7 @@ impl Entry {
             .unwrap_or(path.as_os_str())
             .to_string_lossy()
             .into_owned();
-        let mime = mime(&path).to_owned();
+        let mime = mime(path).to_owned();
         Ok(Self {
             size: meta.len(),
             name,
@@ -223,21 +236,34 @@ pub(super) fn resolve(token: u64) -> Result<Entry> {
         .ok_or_else(|| format!("unknown file handle {token}"))
 }
 
+pub(super) struct Selection {
+    pub(super) requested: u32,
+    pub(super) entries: Vec<Entry>,
+}
+
+pub(super) fn remaining_handles() -> usize {
+    MAX_HANDLES.saturating_sub(HANDLES.lock().unwrap().files.len())
+}
+
 pub(super) fn selection(paths: Vec<PathBuf>) -> Option<(Vec<u8>, Vec<u64>)> {
-    let requested = paths.len();
+    let requested = paths.len() as u32;
+    let entries = paths
+        .into_iter()
+        .filter_map(|path| Entry::new(path).ok())
+        .take(remaining_handles())
+        .collect();
+    selection_record(Selection { requested, entries })
+}
+
+pub(super) fn selection_record(selection: Selection) -> Option<(Vec<u8>, Vec<u64>)> {
+    let Selection { requested, entries } = selection;
     if requested == 0 {
         return None;
     }
-    let remaining = MAX_HANDLES.saturating_sub(HANDLES.lock().unwrap().files.len());
-    let entries: Vec<_> = paths
-        .into_iter()
-        .filter_map(|path| Entry::new(path).ok())
-        .take(remaining)
-        .collect();
-    let accepted = entries.len();
+    let accepted = entries.len() as u32;
     let mut record = Vec::new();
-    record.extend((accepted as u32).to_le_bytes());
-    record.extend(((requested - accepted) as u32).to_le_bytes());
+    record.extend(accepted.to_le_bytes());
+    record.extend((requested - accepted).to_le_bytes());
     let handles = mint_entries(entries, &mut record)?;
     Some((record, handles))
 }
@@ -351,23 +377,34 @@ pub(super) fn sha256(data: &[u8]) -> Option<[u8; 32]> {
     }
 }
 
-pub(super) fn open_dialog(window: HWND, multiple: bool) -> Result<Vec<PathBuf>> {
-    dialog(window, None, multiple)
-}
-
 pub(super) fn save(window: HWND, token: u64, start: u64, len: u64, name: &str) -> Result<()> {
     let entry = resolve(token)?;
-    if let Some(destination) = dialog(window, Some(name), false)?.into_iter().next() {
-        write_range(entry, start, len, destination)?;
+    if let Some(destination) = pickers::save(window, name)? {
+        write_range(entry, start, len, || destination.open())?;
     }
     Ok(())
 }
 
 pub(super) fn save_to(token: u64, start: u64, len: u64, destination: PathBuf) -> Result<()> {
-    write_range(resolve(token)?, start, len, destination)
+    write_range(resolve(token)?, start, len, || {
+        open_fixture_export(&destination)
+    })
 }
 
-fn write_range(entry: Entry, start: u64, len: u64, destination: PathBuf) -> Result<()> {
+fn open_fixture_export(destination: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(destination)
+}
+
+fn write_range(
+    entry: Entry,
+    start: u64,
+    len: u64,
+    destination: impl FnOnce() -> io::Result<File>,
+) -> Result<()> {
     let end = start
         .checked_add(len)
         .filter(|&end| end <= entry.size)
@@ -377,17 +414,12 @@ fn write_range(entry: Entry, start: u64, len: u64, destination: PathBuf) -> Resu
     if end > current_size {
         return Err("file changed before it could be saved".into());
     }
-    let source_id = file_id(&input).map_err(file_error)?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(destination)
-        .map_err(file_error)?;
+    let source_id = identity(&input).map_err(file_error)?;
+    let mut output = destination().map_err(file_error)?;
     if !is_disk_file(&output) || !output.metadata().map_err(file_error)?.is_file() {
         return Err("expected a regular file for export".into());
     }
-    let destination_id = file_id(&output).map_err(file_error)?;
+    let destination_id = identity(&output).map_err(file_error)?;
     if source_id == destination_id {
         if start == 0 && len == current_size {
             return Ok(());
@@ -412,81 +444,8 @@ fn is_disk_file(file: &File) -> bool {
     unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
 }
 
-fn file_id(file: &File) -> io::Result<(u64, [u8; 16])> {
-    let mut info = FILE_ID_INFO::default();
-    // SAFETY: The live handle and correctly sized output buffer outlive the call.
-    let ok = unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileIdInfo,
-            std::ptr::from_mut(&mut info).cast(),
-            std::mem::size_of::<FILE_ID_INFO>() as u32,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((info.VolumeSerialNumber, info.FileId.Identifier))
-}
-
 fn file_error(error: io::Error) -> String {
     format!("file operation failed: {error}")
-}
-
-fn dialog(window: HWND, name: Option<&str>, multiple: bool) -> Result<Vec<PathBuf>> {
-    let mut names = vec![0u16; 32_768];
-    if let Some(name) = name {
-        for (target, char) in names.iter_mut().take(260).zip(name.encode_utf16()) {
-            *target = char;
-        }
-    }
-    let mut flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    flags |= if name.is_some() {
-        OFN_OVERWRITEPROMPT
-    } else {
-        OFN_FILEMUSTEXIST
-    };
-    if multiple {
-        flags |= OFN_ALLOWMULTISELECT;
-    }
-    let mut form = OPENFILENAMEW {
-        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: window,
-        lpstrFile: names.as_mut_ptr(),
-        nMaxFile: names.len() as u32,
-        Flags: flags,
-        ..Default::default()
-    };
-    // The buffer and form outlive the synchronous modal dialog.
-    let ok = unsafe {
-        if name.is_some() {
-            GetSaveFileNameW(&mut form)
-        } else {
-            GetOpenFileNameW(&mut form)
-        }
-    };
-    if ok == 0 {
-        let code = unsafe { CommDlgExtendedError() };
-        return if code == 0 {
-            Ok(Vec::new())
-        } else {
-            Err(format!("Windows file dialog failed ({code:#x})"))
-        };
-    }
-    let mut parts = names
-        .split(|&char| char == 0)
-        .take_while(|part| !part.is_empty())
-        .map(OsString::from_wide);
-    let Some(first) = parts.next() else {
-        return Ok(Vec::new());
-    };
-    let path = PathBuf::from(first);
-    let results: Vec<_> = parts.map(|leaf| path.join(leaf)).collect();
-    if results.is_empty() {
-        Ok(vec![path])
-    } else {
-        Ok(results)
-    }
 }
 
 fn mime(path: &Path) -> &'static str {
@@ -556,7 +515,7 @@ mod tests {
             operation: Operation::Url,
         };
         assert_eq!(url.run(&AtomicBool::new(false)), [13, 3]);
-        write_range(entry, 1, 3, exported.clone()).unwrap();
+        write_range(entry, 1, 3, || open_fixture_export(&exported)).unwrap();
         assert_eq!(std::fs::read(exported).unwrap(), b"irs");
         assert_eq!(std::fs::read(selected).unwrap(), b"other");
     }
@@ -572,7 +531,7 @@ mod tests {
         let entry = Entry::new(selected.clone()).unwrap();
         std::fs::write(selected, b"x").unwrap();
 
-        assert!(write_range(entry, 0, 5, target.clone()).is_err());
+        assert!(write_range(entry, 0, 5, || open_fixture_export(&target)).is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"existing");
     }
 
@@ -592,7 +551,7 @@ mod tests {
         std::fs::hard_link(&selected, &alias).unwrap();
 
         let entry = Entry::new(selected.clone()).unwrap();
-        write_range(entry, 1, 3, alias).unwrap();
+        write_range(entry, 1, 3, || open_fixture_export(&alias)).unwrap();
 
         assert_eq!(std::fs::read(selected).unwrap(), b"irs");
     }

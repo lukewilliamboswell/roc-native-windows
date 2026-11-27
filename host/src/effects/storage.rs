@@ -1,17 +1,13 @@
 //! Local key/value storage confined to a host-selected Windows directory.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
-};
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{FOLDERID_LocalAppData, SHGetKnownFolderPath};
 
-use crate::rooted::{self, Directory};
+use crate::rooted::{self, Directory, single_link};
 
 pub(super) struct Local {
     root: PathBuf,
@@ -117,29 +113,6 @@ impl Local {
         }
         Ok(directory)
     }
-}
-
-fn single_link(file: &File) -> io::Result<()> {
-    let mut info = FILE_STANDARD_INFO::default();
-    // SAFETY: Query the live regular-file handle into a correctly sized record.
-    let ok = unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileStandardInfo,
-            std::ptr::from_mut(&mut info).cast(),
-            std::mem::size_of_val(&info) as u32,
-        )
-    };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if info.NumberOfLinks != 1 || info.DeletePending {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "storage entries must be ordinary files with one link",
-        ));
-    }
-    Ok(())
 }
 
 fn storage_name(key: &str) -> io::Result<String> {

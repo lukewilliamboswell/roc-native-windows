@@ -162,14 +162,21 @@ target. Its `on_files` handler receives the same file capabilities and
 refusal count as the file picker. Keep a file picker in the area so users
 can also open files with the keyboard.
 
-A multi-file confirmation delivers its files and refusal count in one
-event. Cancelling the picker leaves the app's selection alone.
-A successful selection holds an open read handle for each accepted file.
-A later item at the same path cannot replace that handle's contents.
-Reads, hashes, image decoding, and export use the held file. The operating
-system may still allow another program to edit that same file in place.
+The Windows Open dialog binds each accepted file to a read handle before
+it closes. A multi-file confirmation delivers its files and refusal count
+in one event. Cancelling leaves the app's selection alone.
+Reads, hashes, image decoding, and export use the held file even if its
+name changes. Windows may still allow another program to edit that file
+in place.
 On Windows, `Engine.object_url` returns `Err(Unavailable)` for these
 capabilities. Use a file read or image decode to display the contents.
+
+Save As asks the user to confirm an overwrite before it writes to an
+existing file. It holds the chosen directory and the confirmed file.
+For a new filename, it creates the file only if that name is still
+available. A late arrival or a replaced directory produces an error and
+leaves existing files alone. Save As supports ordinary files in
+drive-letter paths and refuses reparse points and multiply linked targets.
 
 `Ui.folder_button` delivers either `FolderChosen(folder)` or
 `FolderRefused(Unavailable)`. Use `folder.name()` for display and

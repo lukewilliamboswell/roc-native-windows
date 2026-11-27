@@ -4,6 +4,7 @@ mod files;
 mod folders;
 mod http;
 mod images;
+mod pickers;
 mod storage;
 mod system;
 mod workers;
@@ -762,8 +763,11 @@ impl Effects {
         handler: u32,
         multiple: bool,
     ) -> Result<()> {
-        let paths = files::open_dialog(owner, multiple)?;
-        self.deliver_paths(node, handler, paths)
+        let selection = pickers::open(owner, multiple)?;
+        if let Some((record, handles)) = selection.and_then(files::selection_record) {
+            self.send_files(node, handler, record, handles)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn pick_folder(&mut self, owner: HWND, node: u32, handler: u32) -> Result<()> {
@@ -831,7 +835,10 @@ impl Effects {
             std::fs::create_dir_all(&saved).map_err(storage_error)?;
             files::save_to(token, start, len, saved.join(name))
         } else {
-            files::save(owner, token, start, len, name)
+            if let Err(error) = files::save(owner, token, start, len, name) {
+                pickers::save_error(owner, &error);
+            }
+            Ok(())
         }
     }
 }

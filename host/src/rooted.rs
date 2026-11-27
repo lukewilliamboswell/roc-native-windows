@@ -58,6 +58,10 @@ impl Directory {
         Ok(directory)
     }
 
+    pub(crate) fn id(&self) -> io::Result<Identity> {
+        identity(&self.0)
+    }
+
     pub(crate) fn subdir(&self, name: &OsStr) -> io::Result<Self> {
         self.open_relative(name, true, DIRECTORY_ACCESS, SHARE_ALL, FILE_OPEN)
             .map(Self)
@@ -70,6 +74,10 @@ impl Directory {
 
     pub(crate) fn read(&self, name: &OsStr) -> io::Result<File> {
         self.open_relative(name, false, FILE_GENERIC_READ, SHARE_ALL, FILE_OPEN)
+    }
+
+    pub(crate) fn open_for_export(&self, name: &OsStr) -> io::Result<File> {
+        self.open_relative(name, false, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_OPEN)
     }
 
     pub(crate) fn create_file(&self, name: &OsStr) -> io::Result<File> {
@@ -180,6 +188,33 @@ impl Directory {
         checked(&file, is_dir)?;
         Ok(file)
     }
+}
+
+pub(crate) fn single_link(file: &File) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+    };
+
+    let mut info = FILE_STANDARD_INFO::default();
+    // SAFETY: Query the live regular-file handle into a correctly sized record.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileStandardInfo,
+            std::ptr::from_mut(&mut info).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if info.NumberOfLinks != 1 || info.DeletePending {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a regular file with one link",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn remove(file: &File) -> io::Result<()> {
