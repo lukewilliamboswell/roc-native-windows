@@ -73,7 +73,10 @@ impl Entry {
         })
     }
 
-    fn for_folder(path: PathBuf) -> io::Result<Self> {
+    pub(super) fn for_folder(path: PathBuf) -> io::Result<Self> {
+        if remaining_handles() == 0 {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         let folder = Arc::new(Folder::open(&path)?);
         let name = path
             .file_name()
@@ -284,7 +287,11 @@ pub(super) fn mint_entries(entries: Vec<Entry>, record: &mut Vec<u8>) -> Option<
 }
 
 pub(super) fn folder_selection(path: Option<PathBuf>) -> (Vec<u8>, Vec<u64>) {
-    if let Some(entry) = path.and_then(|path| Entry::for_folder(path).ok()) {
+    folder_record(path.and_then(|path| Entry::for_folder(path).ok()))
+}
+
+pub(super) fn folder_record(entry: Option<Entry>) -> (Vec<u8>, Vec<u64>) {
+    if let Some(entry) = entry {
         let mut record = vec![1, 0, 0, 0, 0, 0, 0, 0];
         if let Some(handles) = mint_entries(vec![entry], &mut record) {
             return (record, handles);
@@ -491,6 +498,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn simulated_folder_path_keeps_chosen_and_refused_records() {
+        let directory = TestDirectory::new();
+        let (chosen, tokens) = folder_selection(Some(directory.0.clone()));
+        assert_eq!(&chosen[..8], &[1, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(resolve(tokens[0]).unwrap().folder.is_some());
+        discard_entries(tokens);
+
+        let (refused, tokens) = folder_selection(Some(directory.0.join("missing")));
+        assert_eq!(&refused, &[0, 0, 0, 0, 1, 0, 0, 0]);
+        assert!(tokens.is_empty());
     }
 
     #[test]

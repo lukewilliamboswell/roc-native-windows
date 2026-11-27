@@ -788,11 +788,13 @@ impl Effects {
     }
 
     pub(crate) fn pick_folder(&mut self, owner: HWND, node: u32, handler: u32) -> Result<()> {
-        match folders::pick(owner) {
-            Ok(Some(path)) => self.deliver_folder(node, handler, Some(path)),
-            Ok(None) => Ok(()),
-            Err(_) => self.deliver_folder(node, handler, None),
-        }
+        let entry = match pickers::folder(owner) {
+            pickers::FolderChoice::Chosen(entry) => Some(entry),
+            pickers::FolderChoice::Refused => None,
+            pickers::FolderChoice::Canceled => return Ok(()),
+        };
+        let (record, handles) = files::folder_record(entry);
+        self.send_files(node, handler, record, handles)
     }
 
     pub(crate) fn deliver_folder(

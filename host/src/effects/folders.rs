@@ -20,9 +20,7 @@ use windows_sys::Wdk::Storage::FileSystem::{
     FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
     NtCreateFile,
 };
-use windows_sys::Win32::Foundation::{
-    ERROR_CANCELLED, ERROR_NO_MORE_FILES, HWND, RtlNtStatusToDosError, UNICODE_STRING,
-};
+use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, RtlNtStatusToDosError, UNICODE_STRING};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
@@ -277,46 +275,6 @@ fn check_cancelled(stop: &AtomicBool) -> io::Result<()> {
         return Err(io::ErrorKind::Interrupted.into());
     }
     Ok(())
-}
-
-pub(super) fn pick(owner: HWND) -> windows::core::Result<Option<PathBuf>> {
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-        CoTaskMemFree, CoUninitialize,
-    };
-    use windows::Win32::UI::Shell::{
-        FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog,
-        SIGDN_FILESYSPATH,
-    };
-
-    struct Apartment;
-    impl Drop for Apartment {
-        fn drop(&mut self) {
-            unsafe { CoUninitialize() };
-        }
-    }
-
-    // This call and the dialog run on the owning window's thread.
-    unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        let _apartment = Apartment;
-        let dialog: IFileOpenDialog =
-            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-        dialog.SetOptions(
-            dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR,
-        )?;
-        if let Err(error) = dialog.Show(Some(windows::Win32::Foundation::HWND(owner))) {
-            return if error.code() == windows::core::HRESULT::from_win32(ERROR_CANCELLED) {
-                Ok(None)
-            } else {
-                Err(error)
-            };
-        }
-        let path = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
-        let owned = OsString::from_wide(path.as_wide());
-        CoTaskMemFree(Some(path.0.cast()));
-        Ok(Some(PathBuf::from(owned)))
-    }
 }
 
 #[cfg(test)]

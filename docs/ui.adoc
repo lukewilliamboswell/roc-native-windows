@@ -179,8 +179,9 @@ leaves existing files alone. Save As supports ordinary files in
 drive-letter paths and refuses reparse points and multiply linked targets.
 
 `Ui.folder_button` delivers either `FolderChosen(folder)` or
-`FolderRefused(Unavailable)`. Use `folder.name()` for display and
-`folder.files({})` in an engine request to obtain up to 16 immediate
+`FolderRefused(Unavailable)`. The picker retains the chosen directory
+before it closes. Cancelling keeps the previous selection. Use
+`folder.name()` for display and `folder.files({})` in an engine request to obtain up to 16 immediate
 ordinary files. Set `limit` to request fewer. Results are ordered by
 UTF-16 filename and report a partial listing when the scan or result
 limit is reached or an entry is skipped. Enumeration skips subdirectories

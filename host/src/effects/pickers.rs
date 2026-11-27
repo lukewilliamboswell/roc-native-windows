@@ -15,9 +15,10 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Ole::IOleWindow;
 use windows::Win32::UI::Shell::{
     FDE_OVERWRITE_RESPONSE, FDE_SHAREVIOLATION_RESPONSE, FDEOR_DEFAULT, FDESVR_DEFAULT,
-    FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_NODEREFERENCELINKS,
-    FOS_NOTESTFILECREATE, FOS_OVERWRITEPROMPT, FileOpenDialog, FileSaveDialog, IFileDialog,
-    IFileDialogEvents, IFileDialogEvents_Impl, IFileOpenDialog, IShellItem, SIGDN_FILESYSPATH,
+    FILEOPENDIALOGOPTIONS, FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR,
+    FOS_NODEREFERENCELINKS, FOS_NOTESTFILECREATE, FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS,
+    FileOpenDialog, FileSaveDialog, IFileDialog, IFileDialogEvents, IFileDialogEvents_Impl,
+    IFileOpenDialog, IShellItem, SIGDN_FILESYSPATH,
 };
 use windows::core::{Error, HRESULT, Interface, PCWSTR, Ref, implement};
 use windows_sys::Win32::Foundation::{ERROR_CANCELLED, HWND};
@@ -29,22 +30,46 @@ use super::files::{Entry, MAX_HANDLES, Selection, remaining_handles};
 use crate::rooted::{Directory, single_link};
 
 pub(super) fn open(owner: HWND, multiple: bool) -> crate::Result<Option<Selection>> {
-    let _apartment = Apartment::enter().map_err(dialog_error)?;
-    // SAFETY: The owning UI thread has entered its COM apartment.
-    let result = unsafe {
-        let dialog: IFileOpenDialog =
-            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).map_err(dialog_error)?;
-        let mut options = dialog.GetOptions().map_err(dialog_error)? | COMMON_OPTIONS;
-        if multiple {
-            options |= FOS_ALLOWMULTISELECT;
-        }
-        dialog.SetOptions(options).map_err(dialog_error)?;
-        show(owner, &dialog, Kind::Open)
-    }?;
-    match result {
+    let flags = if multiple {
+        FOS_ALLOWMULTISELECT
+    } else {
+        FILEOPENDIALOGOPTIONS::default()
+    };
+    match show_open(owner, Kind::Open, flags)? {
         Some(Choice::Open(selection)) => Ok(Some(selection)),
         None => Ok(None),
         _ => unreachable!("an Open dialog always binds an open selection"),
+    }
+}
+
+pub(super) enum FolderChoice {
+    Chosen(Entry),
+    Refused,
+    Canceled,
+}
+
+pub(super) fn folder(owner: HWND) -> FolderChoice {
+    match show_open(owner, Kind::Folder, FOS_PICKFOLDERS) {
+        Ok(Some(Choice::Folder(Some(entry)))) => FolderChoice::Chosen(entry),
+        Ok(Some(Choice::Folder(None))) | Err(_) => FolderChoice::Refused,
+        Ok(None) => FolderChoice::Canceled,
+        _ => unreachable!("a folder dialog always binds a folder selection"),
+    }
+}
+
+fn show_open(
+    owner: HWND,
+    kind: Kind,
+    flags: FILEOPENDIALOGOPTIONS,
+) -> crate::Result<Option<Choice>> {
+    let _apartment = Apartment::enter().map_err(dialog_error)?;
+    // SAFETY: The owning UI thread has entered its COM apartment.
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).map_err(dialog_error)?;
+        let options = dialog.GetOptions().map_err(dialog_error)? | COMMON_OPTIONS | flags;
+        dialog.SetOptions(options).map_err(dialog_error)?;
+        show(owner, &dialog, kind)
     }
 }
 
@@ -80,8 +105,8 @@ pub(super) fn save(owner: HWND, suggested_name: &str) -> crate::Result<Option<De
     }
 }
 
-const COMMON_OPTIONS: windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS =
-    windows::Win32::UI::Shell::FILEOPENDIALOGOPTIONS(FOS_FORCEFILESYSTEM.0 | FOS_NOCHANGEDIR.0);
+const COMMON_OPTIONS: FILEOPENDIALOGOPTIONS =
+    FILEOPENDIALOGOPTIONS(FOS_FORCEFILESYSTEM.0 | FOS_NOCHANGEDIR.0);
 
 struct Apartment;
 
@@ -104,11 +129,13 @@ impl Drop for Apartment {
 #[derive(Clone, Copy)]
 enum Kind {
     Open,
+    Folder,
     Save,
 }
 
 enum Choice {
     Open(Selection),
+    Folder(Option<Entry>),
     Save(Destination),
 }
 
@@ -157,6 +184,13 @@ fn bound_open(dialog: &IFileDialog) -> windows::core::Result<Selection> {
             .collect();
         Ok(Selection { requested, entries })
     }
+}
+
+fn bound_folder(dialog: &IFileDialog) -> Option<Entry> {
+    // SAFETY: The Shell documents GetResult during OnFileOk.
+    let item = unsafe { dialog.GetResult() }.ok()?;
+    let path = shell_path(&item).ok()?;
+    Entry::for_folder(path).ok()
 }
 
 pub(super) struct Destination {
@@ -289,6 +323,7 @@ impl IFileDialogEvents_Impl for DialogEvents_Impl {
                 .map(Choice::Open)
                 .map(Some)
                 .map_err(dialog_error),
+            Kind::Folder => Ok(Some(Choice::Folder(bound_folder(dialog)))),
             Kind::Save => bound_save(dialog, owner).map(|choice| choice.map(Choice::Save)),
         };
         match result {
@@ -303,6 +338,7 @@ impl IFileDialogEvents_Impl for DialogEvents_Impl {
                         message_box(owner, "Open", &error, MB_OK | MB_ICONERROR);
                     }
                     Kind::Save => save_error(owner, &error),
+                    Kind::Folder => unreachable!("a folder refusal is delivered to the app"),
                 }
                 Err(Error::from_hresult(S_FALSE))
             }
@@ -559,6 +595,48 @@ mod tests {
             assert_eq!(opened.requested, 1);
             assert_eq!(opened.entries[0].read_range(0, 6).unwrap(), b"chosen");
             drop(opened);
+
+            let selected = scratch.0.join("selected-folder");
+            let moved = scratch.0.join("moved-folder");
+            std::fs::create_dir(&selected).unwrap();
+            std::fs::write(selected.join("proof.txt"), b"confirmed").unwrap();
+            let native: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).unwrap();
+            native
+                .SetOptions(native.GetOptions().unwrap() | COMMON_OPTIONS | FOS_PICKFOLDERS)
+                .unwrap();
+            const FOLDER_TITLE: PCWSTR = w!("Roc native folder picker contract");
+            let folder_title = FOLDER_TITLE.as_wide();
+            native.SetTitle(FOLDER_TITLE).unwrap();
+            native.SetFolder(&folder).unwrap();
+            native.SetFileName(w!("selected-folder")).unwrap();
+            let click = std::thread::spawn(move || press(folder_title, IDCANCEL, None));
+            assert!(show(owner, &native, Kind::Folder).unwrap().is_none());
+            click.join().unwrap();
+
+            let click = std::thread::spawn(move || press(folder_title, IDOK, None));
+            let choice = show(owner, &native, Kind::Folder).unwrap();
+            click.join().unwrap();
+            let Some(Choice::Folder(Some(entry))) = choice else {
+                panic!("Folder picker did not retain the confirmed directory");
+            };
+            drop(native);
+            std::fs::rename(&selected, &moved).unwrap();
+            std::fs::create_dir(&selected).unwrap();
+            std::fs::write(selected.join("proof.txt"), b"substitute").unwrap();
+            // Bind the app token only after the confirmed path has been reused.
+            let (record, tokens) = super::super::files::folder_record(Some(entry));
+            assert_eq!(&record[..8], &[1, 0, 0, 0, 0, 0, 0, 0]);
+            let entry = super::super::files::resolve(tokens[0]).unwrap();
+            super::super::files::discard_entries(tokens);
+            let (files, flags) = entry
+                .folder
+                .unwrap()
+                .list(16, &std::sync::atomic::AtomicBool::new(false))
+                .unwrap();
+            assert_eq!(flags, 0);
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].read_range(0, 9).unwrap(), b"confirmed");
 
             let native: IFileDialog =
                 CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).unwrap();
