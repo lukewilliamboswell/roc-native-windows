@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::ffi::{OsString, c_void};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +15,10 @@ use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_SHA256_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
     BCryptOpenAlgorithmProvider,
 };
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_ID_INFO, FILE_TYPE_DISK, FileIdInfo,
+    GetFileInformationByHandleEx, GetFileType,
+};
 use windows_sys::Win32::UI::Controls::Dialogs::*;
 
 const MAX_FILE_BYTES: u64 = 256 << 20;
@@ -20,27 +26,19 @@ const MAX_HANDLES: usize = 64;
 
 #[derive(Clone)]
 pub(super) struct Entry {
-    pub(super) path: PathBuf,
     pub(super) size: u64,
     name: String,
     mime: String,
     pub(super) folder: Option<Arc<Folder>>,
-    folder_file: Option<Arc<Mutex<File>>>,
-    _temporary: Option<Arc<Temporary>>,
+    file: Option<Arc<Mutex<File>>>,
     pub(super) image: Option<Arc<crate::raster::Pixels>>,
-}
-
-struct Temporary(PathBuf);
-impl Drop for Temporary {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
 }
 
 impl Entry {
     fn new(path: PathBuf) -> io::Result<Self> {
-        let meta = path.metadata()?;
-        if !meta.is_file() {
+        let file = File::open(&path)?;
+        let meta = file.metadata()?;
+        if !meta.is_file() || !is_disk_file(&file) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "expected a regular file",
@@ -53,13 +51,11 @@ impl Entry {
             .into_owned();
         let mime = mime(&path).to_owned();
         Ok(Self {
-            path,
             size: meta.len(),
             name,
             mime,
             folder: None,
-            folder_file: None,
-            _temporary: None,
+            file: Some(Arc::new(Mutex::new(file))),
             image: None,
         })
     }
@@ -72,13 +68,11 @@ impl Entry {
             .to_string_lossy()
             .into_owned();
         Ok(Self {
-            path: PathBuf::new(),
             size: 0,
             name,
             mime: String::new(),
             folder: Some(folder),
-            folder_file: None,
-            _temporary: None,
+            file: None,
             image: None,
         })
     }
@@ -87,13 +81,11 @@ impl Entry {
         let name = path.to_string_lossy().into_owned();
         let mime = mime(&path).into();
         Self {
-            path,
             size,
             name,
             mime,
             folder: None,
-            folder_file: Some(Arc::new(Mutex::new(file))),
-            _temporary: None,
+            file: Some(Arc::new(Mutex::new(file))),
             image: None,
         }
     }
@@ -105,35 +97,29 @@ impl Entry {
             next_token()
         ));
         let mut file = OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
             .open(&path)?;
-        let backing = Arc::new(Temporary(path.clone()));
-        if let Err(error) = file.write_all(bytes) {
-            drop(file);
-            return Err(error);
-        }
+        file.write_all(bytes)?;
         Ok(Self {
-            path,
             size: bytes.len() as u64,
             name: name.into(),
             mime: mime.into(),
             folder: None,
-            folder_file: None,
-            _temporary: Some(backing),
+            file: Some(Arc::new(Mutex::new(file))),
             image: None,
         })
     }
 
     pub(super) fn image(pixels: Arc<crate::raster::Pixels>) -> Self {
         Self {
-            path: PathBuf::new(),
             size: 0,
             name: "Image".into(),
             mime: "application/x-roc-windows-raster".into(),
             folder: None,
-            folder_file: None,
-            _temporary: None,
+            file: None,
             image: Some(pixels),
         }
     }
@@ -145,16 +131,20 @@ impl Entry {
                 "file range is outside the supported bounds",
             ));
         }
-        if self.image.is_some() {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        if self.folder.is_some() {
-            return Err(io::ErrorKind::IsADirectory.into());
-        }
-        if let Some(file) = &self.folder_file {
-            return read_range(&mut file.lock().unwrap(), start, len);
-        }
-        read_range(&mut File::open(&self.path)?, start, len)
+        let mut file = self.lock_file()?;
+        read_range(&mut file, start, len)
+    }
+
+    fn lock_file(&self) -> io::Result<std::sync::MutexGuard<'_, File>> {
+        let file = self.file.as_ref().ok_or_else(|| {
+            if self.folder.is_some() {
+                io::Error::from(io::ErrorKind::IsADirectory)
+            } else {
+                io::Error::from(io::ErrorKind::InvalidInput)
+            }
+        })?;
+        file.lock()
+            .map_err(|_| io::Error::other("file handle lock poisoned"))
     }
 
     pub(super) fn encode(&self, record: &mut Vec<u8>) {
@@ -238,19 +228,16 @@ pub(super) fn selection(paths: Vec<PathBuf>) -> Option<(Vec<u8>, Vec<u64>)> {
     if requested == 0 {
         return None;
     }
-    let mut entries: Vec<_> = paths
+    let remaining = MAX_HANDLES.saturating_sub(HANDLES.lock().unwrap().files.len());
+    let entries: Vec<_> = paths
         .into_iter()
         .filter_map(|path| Entry::new(path).ok())
+        .take(remaining)
         .collect();
-    let table = HANDLES.lock().unwrap();
-    let accepted = entries
-        .len()
-        .min(MAX_HANDLES.saturating_sub(table.files.len()));
+    let accepted = entries.len();
     let mut record = Vec::new();
     record.extend((accepted as u32).to_le_bytes());
     record.extend(((requested - accepted) as u32).to_le_bytes());
-    drop(table);
-    entries.truncate(accepted);
     let handles = mint_entries(entries, &mut record)?;
     Some((record, handles))
 }
@@ -314,14 +301,8 @@ impl FileTask {
 
     pub(super) fn run(self, stop: &AtomicBool) -> Vec<u8> {
         if let Operation::Url = self.operation {
-            if self.start != 0
-                || self.len != self.entry.size
-                || self.entry.folder.is_some()
-                || self.entry.folder_file.is_some()
-            {
-                return vec![13, 3];
-            }
-            return tagged(19, file_url(&self.entry.path).as_bytes());
+            // A file URL would give the pathname rather than the opened object.
+            return vec![13, 3];
         }
         let limit = match self.operation {
             Operation::Read(_, limit) => limit,
@@ -387,28 +368,65 @@ pub(super) fn save_to(token: u64, start: u64, len: u64, destination: PathBuf) ->
 }
 
 fn write_range(entry: Entry, start: u64, len: u64, destination: PathBuf) -> Result<()> {
-    if !start.checked_add(len).is_some_and(|end| end <= entry.size) {
-        return Err("save range is outside the file".into());
+    let end = start
+        .checked_add(len)
+        .filter(|&end| end <= entry.size)
+        .ok_or("save range is outside the file")?;
+    let mut input = entry.lock_file().map_err(file_error)?;
+    let current_size = input.metadata().map_err(file_error)?.len();
+    if end > current_size {
+        return Err("file changed before it could be saved".into());
     }
-    if entry.folder_file.is_some() {
-        let bytes = entry.read_range(start, len).map_err(file_error)?;
-        return std::fs::write(destination, bytes).map_err(file_error);
+    let source_id = file_id(&input).map_err(file_error)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(destination)
+        .map_err(file_error)?;
+    if !is_disk_file(&output) || !output.metadata().map_err(file_error)?.is_file() {
+        return Err("expected a regular file for export".into());
     }
-    let mut input = File::open(&entry.path).map_err(file_error)?;
+    let destination_id = file_id(&output).map_err(file_error)?;
+    if source_id == destination_id {
+        if start == 0 && len == current_size {
+            return Ok(());
+        }
+        if len > MAX_FILE_BYTES {
+            return Err("in-place export range exceeds the supported size".into());
+        }
+        let bytes = read_range(&mut input, start, len).map_err(file_error)?;
+        output.write_all(&bytes).map_err(file_error)?;
+        return output.set_len(len).map_err(file_error);
+    }
     input.seek(SeekFrom::Start(start)).map_err(file_error)?;
-    if destination
-        .canonicalize()
-        .ok()
-        .is_some_and(|path| entry.path.canonicalize().ok() == Some(path))
-    {
-        let bytes = entry.read_range(start, len).map_err(file_error)?;
-        return std::fs::write(destination, bytes).map_err(file_error);
-    }
-    let mut output = File::create(destination).map_err(file_error)?;
-    if io::copy(&mut input.take(len), &mut output).map_err(file_error)? != len {
+    output.set_len(0).map_err(file_error)?;
+    if io::copy(&mut (&mut *input).take(len), &mut output).map_err(file_error)? != len {
         return Err("file changed while being saved".into());
     }
     Ok(())
+}
+
+fn is_disk_file(file: &File) -> bool {
+    // SAFETY: The handle is live for the duration of the Win32 call.
+    unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_DISK }
+}
+
+fn file_id(file: &File) -> io::Result<(u64, [u8; 16])> {
+    let mut info = FILE_ID_INFO::default();
+    // SAFETY: The live handle and correctly sized output buffer outlive the call.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            std::ptr::from_mut(&mut info).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((info.VolumeSerialNumber, info.FileId.Identifier))
 }
 
 fn file_error(error: io::Error) -> String {
@@ -471,24 +489,6 @@ fn dialog(window: HWND, name: Option<&str>, multiple: bool) -> Result<Vec<PathBu
     }
 }
 
-fn file_url(path: &Path) -> String {
-    let path = path.as_os_str().encode_wide().collect::<Vec<_>>();
-    let path = String::from_utf16_lossy(&path).replace('\\', "/");
-    let (mut url, suffix) = match path.strip_prefix("//") {
-        Some(hosted) => (String::from("file://"), hosted),
-        None => (String::from("file:///"), path.as_str()),
-    };
-    for byte in suffix.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~/:".contains(&byte) {
-            url.push(char::from(byte));
-        } else {
-            use std::fmt::Write;
-            let _ = write!(url, "%{byte:02X}");
-        }
-    }
-    url
-}
-
 fn mime(path: &Path) -> &'static str {
     match path
         .extension()
@@ -507,5 +507,93 @@ fn mime(path: &Path) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "roc-file-tests-{}-{}",
+                std::process::id(),
+                next_token()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn selection_reads_and_exports_the_open_object_after_its_path_changes() {
+        let directory = TestDirectory::new();
+        let selected = directory.0.join("selected.txt");
+        let renamed = directory.0.join("renamed.txt");
+        let exported = directory.0.join("exported.txt");
+        std::fs::write(&selected, b"first").unwrap();
+
+        let (_, tokens) = selection(vec![selected.clone()]).unwrap();
+        let entry = resolve(tokens[0]).unwrap();
+        discard_entries(tokens);
+        std::fs::rename(&selected, &renamed).unwrap();
+        std::fs::write(&selected, b"other").unwrap();
+
+        assert_eq!(entry.read_range(0, 5).unwrap(), b"first");
+        let url = FileTask {
+            entry: entry.clone(),
+            start: 0,
+            len: 5,
+            operation: Operation::Url,
+        };
+        assert_eq!(url.run(&AtomicBool::new(false)), [13, 3]);
+        write_range(entry, 1, 3, exported.clone()).unwrap();
+        assert_eq!(std::fs::read(exported).unwrap(), b"irs");
+        assert_eq!(std::fs::read(selected).unwrap(), b"other");
+    }
+
+    #[test]
+    fn a_shortened_source_leaves_the_export_target_untouched() {
+        let directory = TestDirectory::new();
+        let selected = directory.0.join("selected.txt");
+        let target = directory.0.join("export.txt");
+        std::fs::write(&selected, b"first").unwrap();
+        std::fs::write(&target, b"existing").unwrap();
+
+        let entry = Entry::new(selected.clone()).unwrap();
+        std::fs::write(selected, b"x").unwrap();
+
+        assert!(write_range(entry, 0, 5, target.clone()).is_err());
+        assert_eq!(std::fs::read(target).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn worker_temporary_bytes_are_read_from_the_open_handle() {
+        let entry = Entry::temporary("built.txt", "text/plain", b"worker output").unwrap();
+        assert_eq!(entry.read_range(0, 13).unwrap(), b"worker output");
+        assert_eq!(entry.read_range(7, 6).unwrap(), b"output");
+    }
+
+    #[test]
+    fn export_to_an_alias_reads_before_truncation() {
+        let directory = TestDirectory::new();
+        let selected = directory.0.join("selected.txt");
+        let alias = directory.0.join("alias.txt");
+        std::fs::write(&selected, b"first").unwrap();
+        std::fs::hard_link(&selected, &alias).unwrap();
+
+        let entry = Entry::new(selected.clone()).unwrap();
+        write_range(entry, 1, 3, alias).unwrap();
+
+        assert_eq!(std::fs::read(selected).unwrap(), b"irs");
     }
 }

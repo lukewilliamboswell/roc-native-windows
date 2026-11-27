@@ -164,6 +164,12 @@ can also open files with the keyboard.
 
 A multi-file confirmation delivers its files and refusal count in one
 event. Cancelling the picker leaves the app's selection alone.
+A successful selection holds an open read handle for each accepted file.
+A later item at the same path cannot replace that handle's contents.
+Reads, hashes, image decoding, and export use the held file. The operating
+system may still allow another program to edit that same file in place.
+On Windows, `Engine.object_url` returns `Err(Unavailable)` for these
+capabilities. Use a file read or image decode to display the contents.
 
 `Ui.folder_button` delivers either `FolderChosen(folder)` or
 `FolderRefused(Unavailable)`. Use `folder.name()` for display and
