@@ -18,4 +18,7 @@
     (click (button "Reconcile"))
     (await-work)
     (expect-visible (text "Submitted snapshot: 2 matched, 0 short, 5 surplus."))
+    (expect-visible (text "2 of 4 submitted lines differ"))
+    (expect-shader (shader-view "Share of submitted lines with a count variance") "rendered")
+    (expect-shader-pixel (shader-view "Share of submitted lines with a count variance") 5 5 "#452e9e" 3)
     (wait 1250)))

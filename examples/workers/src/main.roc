@@ -32,6 +32,8 @@ Job : { serial : U64, running : Bool, counts : List(Stock.Count) }
 initial_job : Job
 initial_job = { serial: 0, running: Bool.False, counts: [] }
 
+Variance : [NoSnapshot, Measured({ total : U64, different : U64 })]
+
 store = Engine.store(
 	Inventory,
 	{
@@ -40,6 +42,7 @@ store = Engine.store(
 		mismatches: Engine.cell(Bool.False),
 		second_page: Engine.cell(Bool.False),
 		job: Engine.cell(initial_job),
+		variance: Engine.cell(NoSnapshot),
 		status: Engine.cell("Edit a count, then reconcile a snapshot."),
 	}.Engine.Cells,
 )
@@ -188,24 +191,72 @@ view = || {
 					),
 				],
 			),
-			Ui.panel({ width: Fill }, Ui.text_with(cells.status.signal(), { tone: AccentText })),
+			Ui.panel(
+				{ width: Fill },
+				Ui.vstack(
+					{},
+					[
+						Ui.text_with(cells.status.signal(), { tone: AccentText }),
+						variance_meter(cells.variance.signal()),
+					],
+				),
+			),
 			Engine.watch_latest(
 				job,
 				|run| if (run.running) [reconcile.ask(run.counts)] else [],
 				Engine.react(
-					|_, result| [
-						cells.job.update(|run| { ..run, running: Bool.False }),
-						cells.status.set(
-							match result {
-								Ok(totals) => "Submitted snapshot: ${totals.matched.to_str()} matched, ${totals.short.to_str()} short, ${totals.surplus.to_str()} surplus."
-								Err(error) => "Worker failed: ${Str.inspect(error)}"
-							},
-						),
-					],
+					|submitted, result| {
+						finish = cells.job.update(|run| { ..run, running: Bool.False })
+						match result {
+							Ok(totals) => [
+								finish,
+								cells.status.set("Submitted snapshot: ${totals.matched.to_str()} matched, ${totals.short.to_str()} short, ${totals.surplus.to_str()} surplus."),
+								cells.variance.set(Measured({ total: submitted.counts.len(), different: submitted.counts.len() - totals.matched })),
+							]
+							Err(error) => [finish, cells.status.set("Worker failed: ${Str.inspect(error)}")]
+						}
+					},
 				),
 			),
 		],
 	)
 }
+
+variance_meter : Signal(ctx, Variance) -> Elem(ctx)
+variance_meter = |variance| Engine.when(
+	variance.map(|value| value != NoSnapshot),
+	|| Ui.vstack(
+		{ spacing: 4 },
+		[
+			Ui.text_with(
+				variance.map(
+					|value| match value {
+						NoSnapshot => ""
+						Measured({ total, different }) => "${different.to_str()} of ${total.to_str()} submitted lines differ"
+					},
+				),
+				{ style: Caption, tone: SecondaryText },
+			),
+			Ui.shader_view({
+				label: "Share of submitted lines with a count variance",
+				shader: "stock-variance.cso",
+				width: 264,
+				height: 12,
+				parameters: variance.map(
+					|value| [
+						{
+							name: "mismatch",
+							value: match value {
+								NoSnapshot => 0.F32
+								Measured({ total, different }) => different.to_f32() / total.max(1).to_f32()
+							},
+						},
+					],
+				),
+			}),
+		],
+	),
+	|| Ui.vstack({}, []),
+)
 
 expect Engine.mounts(main) > 0
