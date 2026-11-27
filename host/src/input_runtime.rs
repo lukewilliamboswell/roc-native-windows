@@ -32,6 +32,7 @@ struct Drag {
 pub(super) struct InputState {
     queue: Queue,
     captured: Option<Drag>,
+    spec_pressed: bool,
 }
 
 impl App {
@@ -93,6 +94,9 @@ impl App {
 
     fn release_drag(&mut self) -> Option<Drag> {
         let drag = self.input.captured.take()?;
+        if !drag.native {
+            self.input.spec_pressed = false;
+        }
         // SAFETY: Capture APIs belong to the app's UI thread.
         if drag.native && unsafe { GetCapture() } == drag.hwnd {
             unsafe { ReleaseCapture() };
@@ -197,9 +201,8 @@ impl App {
         if self.input_handle(key).is_none() || self.tree.node(key).attr("pointer-zone").is_none() {
             return Err("pointer input requires a mounted pointer-enabled surface".into());
         }
-        let buttons = u16::from(
-            phase == Phase::Down || (phase == Phase::Move && self.input.captured.is_some()),
-        );
+        let buttons =
+            u16::from(phase == Phase::Down || (phase == Phase::Move && self.input.spec_pressed));
         self.pointer(
             key,
             phase,
@@ -208,6 +211,11 @@ impl App {
             0,
             false,
         );
+        match phase {
+            Phase::Down => self.input.spec_pressed = true,
+            Phase::Up | Phase::Cancel => self.input.spec_pressed = false,
+            _ => {}
+        }
         Ok(())
     }
 
