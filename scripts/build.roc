@@ -77,6 +77,7 @@ bundle! = |roc| {
 check! = |roc| {
 	step!("roc-stable", ["fmt", "--check", "scripts"])?
 	step!(roc, ["fmt", "--check", "platform", "examples", "cli"])?
+	step!(roc, ["fmt", "--check", "tests/native-input/src"])?
 	for file in ["scripts/build.roc", "scripts/check_glue.roc", "scripts/release.roc", "scripts/serve.roc"] {
 		step!("roc-stable", ["test", file])?
 	}
@@ -100,18 +101,18 @@ check! = |roc| {
 		_ => Bool.False
 	}
 	for example in examples {
-		app_tool!(roc, example, ["test", "--check"])?
+		app_tool!(roc, "examples/${example}", ["test", "--check"])?
 		if can_fuzz and ["starter", "files"].contains(example) {
-			app_tool!(roc, example, ["fuzz", "--check"])?
+			app_tool!(roc, "examples/${example}", ["fuzz", "--check"])?
 		}
 	}
+	app_tool!(roc, "tests/native-input", ["test", "--check"])?
 	build!(roc)
 }
 
-app_tool! = |roc, example, args| {
-	dir = "examples/${example}"
+app_tool! = |roc, dir, args| {
 	cmd = command(roc, ["../../cli/windows.roc", "--"].concat(args)).cwd(Path.utf8(dir)).env("ROC_WINDOWS_ROC", OsStr.from_str(roc))
-	run!(cmd, "${example}: ${Str.join_with(args, " ")}")
+	run!(cmd, "${dir}: ${Str.join_with(args, " ")}")
 }
 
 test_native! = |roc, options| {
@@ -121,9 +122,9 @@ test_native! = |roc, options| {
 		_ => return Err("Run the test-native task on Windows")
 	}
 	for example in examples {
-		app_tool!(roc, example, ["test"].concat(options))?
+		app_tool!(roc, "examples/${example}", ["test"].concat(options))?
 	}
-	Ok({})
+	app_tool!(roc, "tests/native-input", ["test"].concat(options))
 }
 
 check_glue! = |roc| {
@@ -135,8 +136,9 @@ build! = |roc| {
 	hosts!()?
 	for target in windows_targets {
 		for example in examples {
-			app_tool!(roc, example, ["build", "--target", target.roc])?
+			app_tool!(roc, "examples/${example}", ["build", "--target", target.roc])?
 		}
+		app_tool!(roc, "tests/native-input", ["build", "--target", target.roc])?
 	}
 	Ok({})
 }

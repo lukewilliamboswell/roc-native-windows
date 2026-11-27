@@ -423,7 +423,9 @@ mod tests {
             assert_eq!(
                 result
                     .bgra
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|p| p[0])
                     .collect::<Vec<_>>(),
                 pixels

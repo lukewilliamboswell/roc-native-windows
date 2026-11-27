@@ -139,24 +139,33 @@ Ui := [].{
 			"ui-text",
 			[
 				Engine.attr("ellipsize-end", bool_word(props.overflow == EllipsizeEnd)),
-				Engine.attr("text-style", match props.style {
-					Body => "body"
-					Caption => "caption"
-					Heading => "heading"
-					Title => "title"
-					Display => "display"
-					Monospace => "monospace"
-				}),
-				Engine.attr("text-tone", match props.tone {
-					PrimaryText => "primary"
-					SecondaryText => "secondary"
-					AccentText => "accent"
-				}),
-				Engine.attr("text-align", match props.align {
-					Start => "start"
-					Center => "center"
-					End => "end"
-				}),
+				Engine.attr(
+					"text-style",
+					match props.style {
+						Body => "body"
+						Caption => "caption"
+						Heading => "heading"
+						Title => "title"
+						Display => "display"
+						Monospace => "monospace"
+					},
+				),
+				Engine.attr(
+					"text-tone",
+					match props.tone {
+						PrimaryText => "primary"
+						SecondaryText => "secondary"
+						AccentText => "accent"
+					},
+				),
+				Engine.attr(
+					"text-align",
+					match props.align {
+						Start => "start"
+						Center => "center"
+						End => "end"
+					},
+				),
 			],
 			[Engine.text_s(value)],
 		)
@@ -921,16 +930,19 @@ Ui := [].{
 
 	## The input identity crosses as a private typed port attachment.
 	with_raster_binding : Signal(ctx, ImageSource), (Engine.Attr(Engine.In(ctx, U64)), Elem(Engine.In(ctx, U64)) -> Elem(Engine.In(ctx, U64))) -> Elem(ctx)
-	with_raster_binding = |source, build| Engine.state(0.U64, |local| {
-		update = { binding: local.signal(), source: source.lift() }.Engine.Signal
-		bind = Engine.on("roc-raster-bind", local.set_value(|_, token| U64.from_str(token) ?? 0))
-		attachment = Engine.watch(
-			update,
-			|{ binding, source: current }| if (binding == 0) [] else [Engine.command(attach_raster.send(raster_payload(binding, current)))],
-			Engine.ignore({}),
-		)
-		build(bind, attachment)
-	})
+	with_raster_binding = |source, build| Engine.state(
+		0.U64,
+		|local| {
+			update = { binding: local.signal(), source: source.lift() }.Engine.Signal
+			bind = Engine.on("roc-raster-bind", local.set_value(|_, token| U64.from_str(token) ?? 0))
+			attachment = Engine.watch(
+				update,
+				|{ binding, source: current }| if (binding == 0) [] else [Engine.command(attach_raster.send(raster_payload(binding, current)))],
+				Engine.ignore({}),
+			)
+			build(bind, attachment)
+		},
+	)
 
 	image_ports : {} -> List(Engine.PortRegistration)
 	image_ports = |_| Port.registrations({ attach: attach_raster, decode: decode_image_port })
