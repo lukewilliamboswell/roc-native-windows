@@ -76,16 +76,16 @@ while ($deadline.Elapsed.TotalSeconds -lt 30) {
                 $foreground.Kill()
                 [void] $foreground.WaitForExit(3000)
             }
-        } elseif ($foreground.ProcessName -eq 'StartMenuExperienceHost') {
+        } elseif ($foreground.ProcessName -in @('StartMenuExperienceHost', 'SearchHost')) {
             $clear.Restart()
             Write-Output "Dismissing the foreground $($foreground.ProcessName) window (PID $foregroundId)."
             [void] [RocHostedDesktop]::DismissStartMenu($foreground.Id)
         }
     }
     if ($clear.Elapsed.TotalSeconds -ge 3) {
-        Write-Output 'The ARM64 runner desktop is clear of first sign-in and Start windows.'
+        Write-Output 'The ARM64 runner desktop is clear of first sign-in, Start, and Search windows.'
         return
     }
     Start-Sleep -Milliseconds 500
 }
-throw 'The first sign-in or Start window still owns the ARM64 runner foreground.'
+throw 'The first sign-in, Start, or Search window still owns the ARM64 runner foreground.'

@@ -30,7 +30,7 @@ jobs:
   check:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.task == 'build' && 45 || 30 }}
+    timeout-minutes: ${{ matrix.runner == 'windows-2025' && 30 || 45 }}
     strategy:
       fail-fast: false
       matrix:
