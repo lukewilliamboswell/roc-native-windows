@@ -1,0 +1,9 @@
+= roc-native-windows unreleased
+
+// Record user-visible changes here as they land on the integration branch.
+// When cutting a release, fold these entries into the versioned notes.
+
+== Fixes
+
+* Resizing a window now keeps styled text and panel borders intact.
+  This fixes clipped headings and streaks in apps such as Reading List.
