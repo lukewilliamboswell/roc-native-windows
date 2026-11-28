@@ -5,7 +5,7 @@ import pf.Recipes
 tooling = { compiler: "nightly-2026-11-26-890d6c8" }
 
 docs_tool = |system|
-	if (system == "x86_64-windows") Unavailable else Recipes.file("https://github.com/lukewilliamboswell/roc-automation/releases/download/tools-0.12.0/roc-docs-{system}")(system)
+	if (system == "x86_64-windows") Unavailable else Recipes.file("https://github.com/lukewilliamboswell/roc-automation/releases/download/tools-0.12.1/roc-docs-{system}")(system)
 
 config = [
 	Name("roc-native-windows"),
